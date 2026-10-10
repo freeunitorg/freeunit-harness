@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""inbox -- the agent message bus: one line per message in run/inbox/bus.log. Format: docs/agent-messages.md.
+  inbox send <kind> <text...> [--json '{"k":"v"}'] [--task <id>]     kinds: fact request ack finding claim
+  inbox tail [N]  |  inbox since <id|ISO-timestamp>  |  inbox ack <id> [text]
+Sender comes from INBOX_SENDER (role@tool, e.g. orchestrator@claude). When it is unset, the sender is agent@claude
+inside a Claude Code session (CLAUDE_CODE_SESSION_ID is set), else <USER>@sh. Log path from INBOX_LOG.
+--task adds "task":"<id>" to the tail and appends the same line to that task file (tools/task, docs/task-ledger.md).
+A usage error exits 2. A bus line that does not parse is skipped with one warning on stderr."""
+import datetime, hashlib, importlib.machinery, importlib.util, json, os, re, sys
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOG = os.environ.get("INBOX_LOG") or os.path.join(HERE, "..", "run", "inbox", "bus.log")
+KINDS = ("fact", "request", "ack", "finding", "claim")
+LINE = re.compile(r"^(\S+Z) (\S+@\S+) (fact|request|ack|finding|claim) ([0-9a-f]{6}) (.*)$")   # new lines
+LEGACY = re.compile(r"^(\S+Z) (\S+): (.*)$")                                                 # <ts> <who>: <text>
+
+def parse(line):
+    m = LINE.match(line)
+    if m: return dict(zip(("ts", "sender", "kind", "id", "body"), m.groups()))
+    m = LEGACY.match(line)
+    return dict(ts=m.group(1), sender=m.group(2) + "@legacy", kind="fact", id=hashlib.sha256(line.encode()).hexdigest()[:6], body=m.group(3)) if m else None
+
+def sender():
+    if os.environ.get("INBOX_SENDER"): return os.environ["INBOX_SENDER"]
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"): return "agent@claude"     # keeps user names off the bus
+    return f"{os.environ.get('USER', 'agent')}@sh"
+
+def compose(kind, text, tail=None, ts=None):                       # validate one message; return (id, line)
+    if kind not in KINDS: sys.exit(f"kind must be one of {KINDS}")
+    try:
+        if tail: json.loads(tail)                                 # the tail must parse; keys are free
+    except ValueError as e: sys.exit(f"--json is not valid JSON: {e}")
+    if "\n" in text or len(text) > 500: sys.exit("one line, at most 500 characters; put more in a file and send its path")
+    if not (text + (tail or "")).isprintable(): sys.exit("printable characters only: no tab, carriage return or other control character")
+    ts = ts or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); who = sender()
+    mid = hashlib.sha256(f"{ts} {who} {text}{os.getpid()}".encode()).hexdigest()[:6]
+    return mid, f"{ts} {who} {kind} {mid} {text}" + (f" {tail}" if tail else "")
+
+def append(line):
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    with open(LOG, "a") as f: f.write(line + "\n")
+
+def load_tool(name):                                              # a sibling tool has no .py suffix; load it without running its main
+    loader = importlib.machinery.SourceFileLoader(name, os.path.join(HERE, name)); sys.dont_write_bytecode = True
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader)); loader.exec_module(module); return module
+
+def send(kind, text, tail=None, task=None):
+    if task: mid = load_tool("task").post(task, kind, text, tail)  # the task file and the bus get the same line
+    else: mid, line = compose(kind, text, tail); append(line)
+    print(mid)
+
+def since(lines, cursor):                                         # by id: lines after it; by timestamp: lines at or after it
+    by_id = re.fullmatch(r"[0-9a-f]{6}", cursor) is not None
+    hit = [i for i, l in enumerate(lines) if (parse(l) or {}).get("id" if by_id else "ts", "") >= cursor] if not by_id else [i for i, l in enumerate(lines) if (parse(l) or {}).get("id") == cursor]
+    return lines[hit[0] + (1 if by_id else 0):] if hit else []
+
+def usage(msg): print("inbox: " + msg, file=sys.stderr); sys.exit(2)
+
+def send_args(args):
+    """send <kind> <text...> [--json J] [--task T]. Each option and its value are removed by position; the rest is the text."""
+    if not args: usage("send needs a kind and a text")
+    words, opts = args[1:], {}
+    for opt in ("--json", "--task"):
+        if opt in words:
+            i = words.index(opt)
+            if i + 1 >= len(words) or not words[i + 1].strip(): usage(f"{opt} needs a value")
+            opts[opt] = words[i + 1]; del words[i:i + 2]
+    text = " ".join(words)
+    if not text.strip(): usage("send needs a text")
+    return args[0], text, opts.get("--json"), opts.get("--task")
+
+def read_log():
+    """The bus lines, without the ones that do not parse. Each of those gets one warning on stderr."""
+    if not os.path.exists(LOG): return []
+    out = []
+    with open(LOG, encoding="utf-8", errors="replace") as f:
+        for n, l in enumerate(f, 1):
+            l = l.rstrip("\n")
+            if not l.strip(): continue
+            if parse(l): out.append(l)
+            else: print(f"inbox: {LOG}:{n}: not a bus line, skipped", file=sys.stderr)
+    return out
+
+def main(argv):
+    cmd, args = (argv[0] if argv else "tail"), argv[1:]
+    if cmd in ("-h", "--help", "help"): print(__doc__); return
+    if cmd == "send": send(*send_args(args))
+    elif cmd == "ack":
+        if not args: usage("ack needs a message id")
+        send("ack", " ".join(args[1:]) or "ack", json.dumps({"re": args[0]}))
+    elif cmd == "since":
+        if len(args) != 1 or not args[0]: usage("since takes one message id or ISO timestamp")
+        for l in since(read_log(), args[0]): print(l)
+    elif cmd == "tail":
+        if len(args) > 1 or (args and not re.fullmatch(r"[1-9][0-9]*", args[0])): usage("tail takes one positive number")
+        for l in read_log()[-int(args[0] if args else 20):]: print(l)
+    else: usage(f"unknown command {cmd!r}; commands: send tail since ack")
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

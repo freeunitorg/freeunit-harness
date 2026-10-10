@@ -1,0 +1,57 @@
+{
+ "listeners": {
+  "127.0.0.1:@PORT@": {
+   "pass": "routes/rx"
+  }
+ },
+ "routes": {
+  "rx": [
+   {
+    "match": {
+     "uri": [
+      "!*/.well-known/*",
+      "/vendor/*",
+      "/core/profiles/demo_umami/modules/demo_umami_content/default_content/*",
+      "*.engine",
+      "*.inc",
+      "*.install",
+      "*.make",
+      "*.module",
+      "*.po",
+      "*.profile",
+      "*.sh",
+      "*.theme",
+      "*.tpl",
+      "*.twig",
+      "*.xtmpl",
+      "*.yml",
+      "*/.*",
+      "*/Entries*",
+      "*/Repository",
+      "*/Root",
+      "*/Tag",
+      "*/Template",
+      "*/composer.json",
+      "*/composer.lock",
+      "*/web.config",
+      "*sql",
+      "*.bak",
+      "*.orig",
+      "*.save",
+      "*.swo",
+      "*.swp",
+      "*~"
+     ]
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "action": {
+     "return": 200
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,24 @@
+# Job 21: PR 631 as merged, a pure revision A/B (no patch).
+# https://github.com/freeunitorg/freeunit/pull/631
+# A = b83530700, the parent of the PR commit on origin/master.
+# B = 250327760, "php: intern the fixed $_SERVER names and presize the array".
+# Replaces 18-php-server-interned.job; the merged src/ matches
+# patches/php-server-interned.diff line for line.
+# Needs the runner patch jobs/19-runner-ae-server.patch (server workload,
+# www/server.php reads $_SERVER, and the PHP module build for it).
+# Callgrind: -3,272 instructions per request in nxt_php_request_handler.
+JOB=21-php-server-merged
+ISSUE=https://github.com/freeunitorg/freeunit/pull/631
+REV_A=b835307008bf4cc93d3068b4357d6143877ee0ef
+REV_B=250327760f3ea0d2e11e14cce0e4f71e7811ed37
+WORKLOAD=server
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+FUNCS=php.unit.so:nxt_php_register_variables
+EXPECT=s_instructions down about 3,300 per request (near the null band); every asys_ and rsys_ syscall count equal in A and B
+FALSIFY=s_instructions higher in B than the null band, or any syscall count that differs between A and B

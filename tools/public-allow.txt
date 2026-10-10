@@ -1,0 +1,33 @@
+# Exact strings a deny rule may match. One per line. "re:<ERE>" allows any
+# match that the whole ERE matches. Add the reason in a comment line above.
+# Loopback and unspecified addresses.
+127.0.0.1
+0.0.0.0
+# Documentation ranges (RFC 5737).
+re:192\.0\.2\.[0-9]{1,3}
+re:198\.51\.100\.[0-9]{1,3}
+re:203\.0\.113\.[0-9]{1,3}
+# Co-author trailer address.
+noreply@anthropic.com
+# Published GHSA ids of freeunitorg/freeunit, checked with
+# gh api repos/freeunitorg/freeunit/security-advisories?state=published on 2026-10-09.
+GHSA-33mh-v5x6-3vj4
+GHSA-46w9-v4vj-9w35
+GHSA-768w-qrh2-jjvh
+GHSA-g6v8-r577-76jm
+GHSA-pr6c-9w58-qw6g
+GHSA-qjcm-mqc4-83p5
+GHSA-r8gw-f8h9-vc5q
+# CVE id that GHSA-g6v8-r577-76jm lists as its cve_id.
+CVE-2026-84300
+# Reserved example domains (RFC 2606) used as fake author addresses in tests.
+re:[A-Za-z0-9._%+-]+@example\.(invalid|com|org|net)
+# Unroutable address used on purpose as a packet black hole in the OTel retry docs.
+# It names no host. It is in a private range, so it is allowlisted by hand.
+10.255.255.1
+# Public Linux kernel advisory (AF_ALG), GHSA-2274-3hgr-wxv6, published 2026-04-22.
+CVE-2026-31431
+# Home directory of the GitHub-hosted runner user; public, names no person.
+re:/home/runner/
+# Home directory of Alpine's public package build user.
+re:/home/buildozer/

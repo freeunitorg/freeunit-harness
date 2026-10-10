@@ -1,0 +1,16 @@
+# Job 04b: chdir removal (PR 616, merged 856d23b9) — 1.37.0 vs master.
+# Untracked variant of 04-php-chdir.job with REV_B resolved to origin/master.
+JOB=04b-php-chdir
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=1.37.0
+REV_B=origin/master
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=asys_chdir 1.000 to 0, asys_total down by 1 per request
+FALSIFY=asys_chdir still 1.000 in B

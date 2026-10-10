@@ -1,0 +1,1 @@
+read MEMORY.md first

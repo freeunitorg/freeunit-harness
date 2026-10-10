@@ -1,0 +1,37 @@
+# Job 11: LTO alone at -O on the libunit path of an external application.
+# Same as job 07 (A is master 856d23b9e at -O, B adds patches/cflags-lto-fat.diff)
+# with WORKLOAD=capp: lab_capp, src/test/nxt_unit_app_test.c linked against
+# build/lib/libunit.a. No interpreter runs, so the app side is libunit.
+# How the patch is applied, the lab image and the reasons for the empty FUNCS
+# and for STRACE=0 are in the header of job 07.
+#
+# What B changes here is more than the flag. remote.sh:156 builds lab_capp with
+# "cc -O2 ... build/lib/libunit.a" and no -flto. The objects in libunit.a are
+# fat in B, and gcc's linker plugin runs LTO on them in that link even without
+# -flto (seen on the local gcc 15.2 build, not on the lab image: lto1 runs, and
+# the DWARF of lab_capp has an LTO unit with "-O1 -O2" where A has libunit at
+# -O). So in B:
+# - unitd and libnxt.a get LTO at -O (as in job 07), and
+# - the libunit code inside lab_capp is LTO-optimized with the -O2 of that link
+#   line, while in A it stays at -O.
+# Local build, gcc 15.2: lab_capp text is 66742 bytes in A and 55133 in B.
+# Read the delta of this job as "LTO plus -O2 for libunit in the app". Job 13
+# is the clean pair for libunit alone: both sides at -O2, B adds LTO.
+#
+# PRIMARY is s_instructions, not r_instructions: the code under test runs in
+# the app processes, and s_ counts unitd and every descendant. With no PHP
+# engine, s_ is mostly router plus libunit. r_instructions is the router share
+# of the same change and is read beside it.
+JOB=11-lto-capp
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=856d23b9ed2cecbd96d5452cf790f828fc55d700
+PATCH_B=patches/cflags-lto-fat.diff
+WORKLOAD=capp
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=s_instructions
+EXPECT=s_instructions lower in B by more than the null band (guess before any run: 2 to 8 percent, the app side is small and libunit gets both LTO and -O2); r_instructions lower as in job 07; ok equal, bad 0, alerts 0; lab_capp in B is smaller than in A
+FALSIFY=s_instructions NO CLAIM or NOISY, or higher in B: LTO plus -O2 for libunit gives nothing this lab can resolve at c=6; or lab_capp has the same size in A and B: the objects were not fat

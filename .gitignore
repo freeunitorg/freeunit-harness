@@ -1,0 +1,27 @@
+# Local working state — never committed.
+/src/
+/build/
+/scratch/
+/run/
+
+# Benchmark output
+bench-engines-results.txt
+*.bench.txt
+release-*.tsv
+
+# Python
+__pycache__/
+*.pyc
+
+# Agent-local state — never repo content, and `git add -A` will take it otherwise.
+.claude/settings.local.json
+
+# Editors
+*.swp
+.idea/
+.vscode/
+
+# Per-checkout private instructions (Claude Code and AGENTS.md conventions).
+# Private host notes go here or under run/, never in tracked files.
+/CLAUDE.local.md
+/AGENTS.local.md

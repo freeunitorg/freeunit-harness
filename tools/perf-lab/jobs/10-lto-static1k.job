@@ -1,0 +1,22 @@
+# Job 10: LTO alone at -O on the router-only path.
+# Same as job 07 (A is master 856d23b9e at -O, B adds patches/cflags-lto-fat.diff)
+# with WORKLOAD=static1k: a 1 KiB file served by a route share action. No
+# application process runs, so the request path is the router, the HTTP code and
+# the file read, and no PHP engine dilutes the counters.
+# How the patch is applied, the lab image and the reasons for the empty FUNCS
+# and for STRACE=0 are in the header of job 07.
+# The same tree is rebuilt for this workload: the build stamp has the workload,
+# so remote.sh runs ./configure and make again in the cached tree (no PHP module).
+JOB=10-lto-static1k
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=856d23b9ed2cecbd96d5452cf790f828fc55d700
+PATCH_B=patches/cflags-lto-fat.diff
+WORKLOAD=static1k
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by more than the null band (guess before any run: 1 to 4 percent, as job 07 or a little more because the share is all router code); s_instructions follows r_instructions; ok equal, bad 0, alerts 0
+FALSIFY=r_instructions NO CLAIM or NOISY, or higher in B: LTO at -O gives nothing this lab can resolve on the router-only path; or the gnu.lto check of job 07 fails in B

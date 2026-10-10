@@ -1,0 +1,27 @@
+# Job 8: how much of a distro build's gain is -O2 rather than LTO.
+# A is master 856d23b9e as it builds today (-O). B is the same tree plus
+# patches/cflags-o2.diff: -O2 added after the -O line of auto/cc/test (line 74
+# in the gcc branch, line 118 in the clang branch). The last -O on the command
+# line wins; build/Makefile then shows "-O -O2". The explicit
+# -fno-strict-aliasing stays in force: gcc 15.2 reports -fstrict-aliasing
+# [disabled] for "-O -fno-strict-aliasing -O2" (checked locally).
+# How the patch is applied, the lab image and the reasons for the empty FUNCS
+# and for STRACE=0 are in the header of job 07.
+# Local build, gcc 15.2: unitd text grows from 506706 to 540326 bytes at -O2.
+# The share of -O2 is this delta. Job 07 gives the LTO share at -O, job 09 the
+# LTO share at -O2. The two do not add up; read the three deltas as separate
+# measurements. PRIMARY is r_instructions; s_instructions has the PHP engine in
+# it, which -O2 does not touch.
+JOB=08-o2-hello
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=856d23b9ed2cecbd96d5452cf790f828fc55d700
+PATCH_B=patches/cflags-o2.diff
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by more than the null band (guess before any run: 2 to 6 percent); s_instructions lower by less; ok equal, bad 0, alerts 0; unitd_b in meta.txt differs from unitd_a
+FALSIFY=r_instructions NO CLAIM or NOISY, or higher in B: -O2 gives nothing this lab can resolve at hello.php c=6; or build/Makefile of B has no -O2: the patch did not reach the build

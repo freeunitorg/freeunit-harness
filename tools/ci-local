@@ -1,0 +1,190 @@
+#!/bin/bash
+# ci-local — run the CI gates locally, in the CI image, before you push.
+#
+# Runs the same sequence the server repo's workflows run, in dependency order,
+# stopping at the first failure:
+#
+#   1. whitespace       lint-whitespace.yml     (git log --check)
+#   2. configure+build  build-test.yml          (unitd, -Werror)
+#   3. C tests          build-test.yml c-tests  (build/tests)
+#   4. clang-ast        analysis-clang-ast.yml  (convention plugin)
+#   5. pytest           build-test.yml          (the python suite)
+#
+# It is NOT the whole matrix: CI builds every language module across several
+# distros and runs sanitizer jobs. This is the fast subset that catches what
+# actually breaks — a green run here is a good signal, not a guarantee.
+#
+#   BASE=origin/master   base ref for the whitespace gate
+#   STAGES="1 2 3"       run a subset
+#   PLATFORM=linux/amd64 pin the image arch (see below)
+#   --shard N            stage 5 runs only the python-N leg's testpath, N in
+#                         0..versions-1 (see pkg/eol.json); omit for the whole
+#                         suite (the default, "test")
+
+set -euo pipefail
+
+HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
+UNIT_SRC="${UNIT_SRC:-$HARNESS/src}"
+BASE="${BASE:-origin/master}"
+STAGES="${STAGES:-1 2 3 4 5}"
+IMAGE="${IMAGE:-freeunit-harness/ci:debian-testing}"
+SHARD=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --shard)
+            SHARD="${2:?--shard needs a number}"
+            shift 2
+            ;;
+        --shard=*)
+            SHARD="${1#--shard=}"
+            shift
+            ;;
+        *)
+            echo "ci-local: unrecognized argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Pin the platform explicitly. On a box that builds for several architectures,
+# letting the daemon resolve the arch by ambient default silently produces an
+# image that does not match what CI runs.
+PLATFORM="${PLATFORM:-linux/amd64}"
+
+command -v docker >/dev/null || { echo "docker not found — ci-local needs it" >&2; exit 1; }
+[ -d "$UNIT_SRC" ] || { echo "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
+
+has_stage() { case " $STAGES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+echo "==> building CI image ($PLATFORM)"
+docker build --platform "$PLATFORM" -t "$IMAGE" -f "$HARNESS/ci/Dockerfile.dev" "$HARNESS/ci"
+
+# One container for the whole run so stages share the configured tree.
+# --init reaps zombies; the pytest suite spawns daemons and a stray unitd
+# inside a container with pid 1 = bash would never be reaped.
+run() {
+    docker run --rm --platform "$PLATFORM" --init \
+        -v "$UNIT_SRC:/src" -w /src \
+        "$IMAGE" bash -euo pipefail -c "$1"
+}
+
+if has_stage 1; then
+    echo
+    echo "==> [1/5] whitespace gate"
+    UNIT_SRC="$UNIT_SRC" "$HARNESS/tools/check-style" "$BASE" || exit 1
+fi
+
+if has_stage 2; then
+    echo
+    echo "==> [2/5] configure + build unitd"
+    run './configure --tests --openssl --debug >/dev/null && make -j"$(nproc)" unitd'
+fi
+
+if has_stage 3; then
+    echo
+    echo "==> [3/5] C unit tests"
+    # Since freeunit #413 c-tests also runs check-test-hooks.sh, which needs
+    # the plain libunit.a that `make tests` does not build. Trees from before
+    # #413 have no gate; the else branch says so instead of passing quietly.
+    run 'make -j"$(nproc)" build/lib/libunit.a tests >/dev/null \
+         && if [ -f .github/scripts/check-test-hooks.sh ]; then
+                sh .github/scripts/check-test-hooks.sh | tail -n 1
+            else echo "no hook gate in this tree"; fi \
+         && ./build/tests'
+fi
+
+if has_stage 4; then
+    echo
+    echo "==> [4/5] clang-ast convention gate"
+    run './configure --cc=clang \
+            --cc-opt="-Xclang -load -Xclang $CLANG_AST/ngx-ast.so -Xclang -add-plugin -Xclang ngx-ast -Wno-default-const-init-field-unsafe" \
+            --openssl --debug --tests >/dev/null \
+         && make -j"$(nproc)" unitd'
+fi
+
+if has_stage 5; then
+    echo
+    echo "==> [5/5] pytest suite"
+
+    TESTPATH="test"
+
+    if [ -n "$SHARD" ]; then
+        # Mirrors build-test.yml's python-leg shard derivation (the
+        # "Output build metadata" step): each of the three supported Python
+        # versions runs its own interpreter-specific suites whole
+        # (test_python*/test_asgi*/test_wsgi*) plus a round-robin share of
+        # the language-agnostic tests, shard 0 also carries
+        # test_app_lifecycle.py. Reproduced here, not reinvented, so a bad
+        # shard path fails locally instead of only on CI (see #396).
+        command -v jq >/dev/null || { echo "ci-local: jq not found — needed to derive --shard from pkg/eol.json" >&2; exit 1; }
+        EOL_JSON="$UNIT_SRC/pkg/eol.json"
+        [ -f "$EOL_JSON" ] || { echo "ci-local: no $EOL_JSON — can't derive shards" >&2; exit 1; }
+
+        VERSIONS="$(jq -r '.runtimes.python | length' "$EOL_JSON")"
+        case "$VERSIONS" in
+            ''|0|*[!0-9]*)
+                echo "::error::no python runtimes in $EOL_JSON" >&2
+                exit 1
+                ;;
+        esac
+
+        case "$SHARD" in
+            ''|*[!0-9]*)
+                echo "ci-local: --shard must be a non-negative integer, got '$SHARD'" >&2
+                exit 1
+                ;;
+        esac
+        if [ "$SHARD" -ge "$VERSIONS" ]; then
+            echo "ci-local: --shard $SHARD out of range (pkg/eol.json has $VERSIONS python runtimes, 0..$((VERSIONS - 1)))" >&2
+            exit 1
+        fi
+
+        files=""
+        whole=""
+        i=0
+        for f in $(cd "$UNIT_SRC" && ls test/test_*.py | sort); do
+            case "$f" in
+                test/test_python*|test/test_asgi*|test/test_wsgi*)
+                    whole="${whole} ${f}"
+                    continue
+                    ;;
+                test/test_app_lifecycle.py)
+                    continue
+                    ;;
+            esac
+
+            if [ $((i % VERSIONS)) -eq "$SHARD" ]; then
+                files="${files} ${f}"
+            fi
+
+            i=$((i + 1))
+        done
+
+        TESTPATH="${files}${whole}"
+
+        if [ "$SHARD" -eq 0 ]; then
+            TESTPATH="${TESTPATH} test/test_app_lifecycle.py"
+        fi
+
+        # The check #396 needed: a derived path that does not exist on disk
+        # must fail here, loudly, instead of surfacing as a pytest "file or
+        # directory not found" abort deep inside stage 5 (or not at all, if
+        # ci-local never sharded and stayed green while CI did not).
+        for p in $TESTPATH; do
+            [ -e "$UNIT_SRC/$p" ] || { echo "ci-local: derived test path does not exist: $p" >&2; exit 1; }
+        done
+
+        echo "==> shard $SHARD/$((VERSIONS - 1)): $TESTPATH"
+    fi
+
+    # Rebuild without the plugin first: stage 4 leaves the tree configured for
+    # clang, and the suite should exercise a normal build.
+    run "./configure --tests --openssl --debug >/dev/null \
+         && make -j\"\$(nproc)\" unitd >/dev/null \
+         && ./configure php >/dev/null && make -j\"\$(nproc)\" php >/dev/null \
+         && python3 -m pytest --print-log $TESTPATH"
+fi
+
+echo
+echo "ci-local: all requested stages passed"

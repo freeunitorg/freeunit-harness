@@ -1,0 +1,76 @@
+# Debian build environment for FreeUnit. Two targets:
+#
+#   --target test   what you need to build unitd + PHP and run the suite.
+#   --target full   adds every language module toolchain plus the clang-ast
+#                   plugin — mirrors .github/workflows/analysis-clang-ast.yml,
+#                   the broadest build in CI.
+#
+# The split exists because `full` is ~3GB and most of that (LLVM, a JDK, Ruby,
+# Rust, npm) is untouched by a test run. Making the broad image the default for
+# everything meant paying for the whole language matrix to run one PHP test.
+#
+# When the CI workflow changes, `full` follows it rather than drifting into a
+# second opinion about what CI requires.
+
+# ---------------------------------------------------------------- base
+FROM debian:testing AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Just enough to configure and build unitd itself.
+RUN apt-get -y update && apt-get -y install --no-install-recommends \
+        git curl ca-certificates make \
+        gcc g++ libc6-dev \
+        libssl-dev libpcre2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# ---------------------------------------------------------------- test
+FROM base AS test
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# PHP is the module the suite can exercise most cheaply, plus pytest itself
+# and the load generators the bench harness looks for.
+RUN apt-get -y update && apt-get -y install --no-install-recommends \
+        php-dev libphp-embed \
+        python3-dev libpython3-dev python3-pytest \
+        apache2-utils procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------- full
+FROM test AS full
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get -y update && apt-get -y install --no-install-recommends \
+        llvm-dev libclang-dev clang \
+        libperl-dev ruby-dev default-jdk npm dpkg-dev \
+        cargo rustc cmake wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g node-gyp
+
+# Debian multiarch: RbConfig["libdir"] returns /usr/lib but the actual
+# libruby-X.Y.so lives in /usr/lib/<triplet>/. auto/modules/ruby probes
+# -L$(RbConfig["libdir"]) and misses the multiarch path, so the ruby module
+# fails to link on a stock Debian image. Same symlink workaround the CI
+# workflow carries; the real fix belongs in auto/modules/ruby.
+RUN MULTIARCH=$(dpkg-architecture -q DEB_HOST_MULTIARCH) \
+    && for f in /usr/lib/$MULTIARCH/libruby-*.so; do \
+         [ -f "$f" ] && ln -sf "$f" /usr/lib/$(basename "$f") || true; \
+       done
+
+# The clang-ast convention gate. Pinned to the `unit` branch, which is what CI
+# uses.
+#
+# Its Makefile compiles a C++ source (ngx-ast.cc, -std=c++17) with `cc`, which
+# needs cc1plus from g++. The CI workflow does not install g++ because the
+# GitHub runner image already has it — so the workflow's apt list is not a
+# complete dependency list for a clean base image. Without g++ this step fails
+# with "cannot execute 'cc1plus'", which reads like a broken toolchain rather
+# than a missing package.
+RUN git clone --depth 1 https://github.com/freeunitorg/clang-ast.git -b unit /opt/clang-ast \
+    && make -C /opt/clang-ast
+ENV CLANG_AST=/opt/clang-ast

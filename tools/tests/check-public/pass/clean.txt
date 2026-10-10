@@ -1,0 +1,7 @@
+# nothing private here
+Version 1.37.0 and 1.2.3 are fine; OID 1.3.6.1.4.1 too.
+ssh "$HOST" 'make'
+ssh $HOST make
+Listen on 127.0.0.1 or 0.0.0.0 or 192.0.2.7.
+Co-Authored-By: Claude <noreply@anthropic.com>
+Author: test@example.invalid

@@ -1,0 +1,25 @@
+# Job 9: the delta that matters to a distro build: LTO on top of -O2.
+# A is master 856d23b9e plus patches/cflags-o2.diff (-O2). B is the same tree plus
+# patches/cflags-o2-lto-fat.diff (-O2 -flto=auto -ffat-lto-objects). Both
+# patches add their flags after the -O line of auto/cc/test (line 74).
+# A is the B tree of job 08: same SHA, same patch, so remote.sh reuses the
+# cached build (the tree name is the SHA and the patch hash).
+# Local build, gcc 15.2: unitd text is 540326 bytes at -O2 and 579433 with LTO
+# added. At -O, LTO alone makes it smaller (506706 to 490432).
+# How the patch is applied, the lab image and the reasons for the empty FUNCS
+# and for STRACE=0 are in the header of job 07.
+# PRIMARY is r_instructions; s_instructions has the PHP engine in it.
+JOB=09-o2-lto-hello
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=856d23b9ed2cecbd96d5452cf790f828fc55d700
+PATCH_A=patches/cflags-o2.diff
+PATCH_B=patches/cflags-o2-lto-fat.diff
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by more than the null band (guess before any run: 0 to 3 percent, less than job 07 because -O2 already inlines inside a file); s_instructions lower by less; ok equal, bad 0, alerts 0; unitd_b in meta.txt differs from unitd_a
+FALSIFY=r_instructions NO CLAIM or NOISY, or higher in B: LTO on top of -O2 gives nothing this lab can resolve at hello.php c=6; or the gnu.lto check of job 07 fails in B: the patch did not reach the build

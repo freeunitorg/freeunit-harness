@@ -1,0 +1,568 @@
+#!/bin/bash
+# unit-build — build, test and debug FreeUnit locally or on a remote host.
+#
+# THE PROBLEM
+#   The obvious command, `./configure && make`, is the wrong one on the machine
+#   most of this work happens on. /tmp there is a 7 GB tmpfs, so build temps
+#   cost RAM; a Rust link inside an --otel build has exhausted it and taken the
+#   shell down with it, killing four agents whose only symptom was a stall. The
+#   test suite adds a second problem: it wildcard-binds *:8080 with no --port
+#   option, and that port is occupied on every host we use.
+#
+#   So the same three commands have to be spelled differently depending on
+#   where they run, and getting one of the spellings wrong fails quietly:
+#   configure falls back, cargo escapes the job cap, or 24 of 36 otel tests
+#   skip and the run still reports green.
+#
+# WHAT THIS DOES
+#   Encodes the three targets we actually use, with the flags each needs:
+#
+#     local          this workstation. Forces TMPDIR onto disk so a Rust link
+#                    cannot exhaust the tmpfs. Single-job-ish by default.
+#     remote HOST    a native build box over ssh (the build host, role
+#                    "build"). More cores, more RAM, and a large data disk.
+#     alpine HOST    an Alpine/musl build inside $ALPINE_BUILD_IMAGE on a
+#                    Docker host (role "alpine"). This is the one with gdb.
+#
+#   Hosts, remote roots and the alpine image come from the lab env file,
+#   ${LAB_ENV:-run/lab.env} (template tools/perf-lab/lab.env.example):
+#   BUILD_ROOT (else REMOTE_WORKDIR), BUILD_CACHE (else BUILD_ROOT/cache),
+#   ALPINE_BUILD_IMAGE. A variable set in the environment wins.
+#
+# WHERE REMOTE BUILDS LAND
+#   The reference build boxes have a 40 G root filesystem and a separate
+#   428 G data disk.
+#   Earlier versions of this script synced the source tree to ~/$name and left
+#   cargo's registry and target dirs in $HOME, all of which is on that 40 G
+#   root -- which reached 90 % full. Everything large now goes under
+#   $REMOTE_ROOT and $REMOTE_CACHE on the data disk. Set them in the lab env
+#   file, or override per run with UNIT_REMOTE_ROOT / UNIT_REMOTE_CACHE.
+#
+#   Note /tmp on those boxes is NOT a tmpfs, it is on that same small root
+#   filesystem -- so it is the wrong place for build logs and temps for a
+#   different reason than on the laptop. TMPDIR and the build log both go to
+#   the data disk too.
+#
+# USAGE
+#   unit-build [-t local|remote|alpine] [-H host] [-s srcdir] [-j jobs]
+#              [--otel] [--debug] [--hardening[=LEVEL]] [--no-tests] VERB
+#
+#   -s is the FreeUnit checkout. Without it: $UNIT_SRC, else the harness
+#   ./src (`make src` clones it). It must hold ./configure; a tree without
+#   one is refused before anything is synced.
+#
+#   --hardening alone means --hardening=strict: the level that adds -Wvla,
+#   -Wformat=2 and -Wimplicit-fallthrough, which is what new code must build
+#   clean under. LEVEL goes to ./configure as is (off, default, strict).
+#
+#   VERB is one of:
+#     build     configure + make
+#     tests     build, then the C tests and the hook gate (see TESTS)
+#     verify    after a remote run ends: read its artifacts (see VERIFY)
+#     pytest    build, then the Python suite (see PORTS below)
+#     debug     build --debug and drop into gdb (alpine target only).
+#               NOTE: --debug reaches the C build only. src/otel still builds
+#               release, so C functions get file:line and Rust FFI entry
+#               points are address-only. You can break on nxt_otel_rs_*, not
+#               step into it.
+#     shell     open a shell in the build environment
+#     config    print the resolved target, host, source and remote paths;
+#               touches no host
+#
+# EXAMPLES
+#   unit-build -t local build
+#   unit-build -t remote -H build --otel tests
+#   unit-build -t remote -H build --hardening tests
+#   unit-build -t remote -H build verify       # once the session has ended
+#   unit-build -t alpine -H alpine --otel --debug debug
+#   unit-build -t remote -H build -s ../freeunit config
+#
+# TESTS
+#   Since freeunit #413, --tests no longer defines NXT_TESTS for the whole
+#   build. `make tests` compiles every core and libunit source a second time
+#   with -DNXT_TESTS=1, into build/lib/libnxt-tests.a and libunit-tests.a, and
+#   only the test programs link those. unitd, libnxt.a, libunit.a and the
+#   modules are hook-free even with --tests.
+#
+#   .github/scripts/check-test-hooks.sh proves that from the objects, and the
+#   tests verb runs it when the tree has it. It needs the plain
+#   build/lib/libunit.a, which neither `make` nor `make tests` builds. Without
+#   it the gate fails with "build/src/nxt_unit.test.o has no plain object
+#   build/src/nxt_unit.o" -- a harness bug that reads as a hook leak. So the
+#   verb builds that target first, in the order CI's c-tests job uses.
+#
+# ONE RUN PER TREE
+#   A remote run happens in a tmux session named unitbuild-<basename of -s>.
+#   A second run on the same tree dies before it syncs. It used to rsync
+#   --delete over the tree the first build was compiling, and only then fail
+#   at `tmux new-session` with "duplicate session". A caller that polled for
+#   "done" then read the first run's artifacts, or a mix of both. Runs on
+#   different trees do not block each other. The alpine target takes the
+#   same name, because it builds in the same synced directory.
+#
+# VERIFY
+#   Do not judge a remote run by its log or by `ls build/tests`: in the week
+#   of 2026-09-21 callers read a build/tests from the day before more than
+#   once. After the session
+#   ends, the verify verb prints, from the artifacts: build/tests with its
+#   mtime (marked STALE when older than the run's start), the exit code of a
+#   fresh ./build/tests, the hook gate's exit code and last line, the
+#   warning: count of the run's log, and the run's PASSED/FAILED line. With
+#   --otel, or when the tree has libotel.a, it also runs the otel check.
+#   It refuses to run while the session exists. Remote target only: an alpine
+#   build/tests is a musl binary that the host cannot run.
+#
+# PORTS
+#   8080 is taken on every host we use, including the remotes. The pytest verb
+#   shifts the suite to $UNIT_TEST_PORT (default 8099) in the *copy* it runs
+#   from, never in your worktree.
+#
+#   The shift covers every *.py under test/, not just test/unit/*.py and
+#   test/*.py -- measured 2026-09-12: the narrower glob missed
+#   test/unit/applications/lang/{java,php}.py, test/unit/applications/tls.py
+#   and seven places in test/unit/check/isolation.py, which left the app
+#   binding 8080 while the client dialled $PORT. The symptom is not a port
+#   error, it is 40 failed / 2 passed in test_java_application.py with
+#   ConnectionRefusedError -- it reads as a broken module, not a harness bug.
+#
+#   The range in test_routing.py is shifted first, as a whole. A bare
+#   s/8080/$PORT/ turns "127.0.0.1:8080-8090" into "8099-8090" -- descending,
+#   which Unit correctly rejects, and the test fails for a reason that has
+#   nothing to do with the code. Measured on the build host, 2026-09-14.
+#
+#   Still NOT covered: the non-Python app fixtures under test/go and test/node
+#   hardcode 8080 in their own sources. Those legs are unsafe on a shifted
+#   port; nobody has needed them yet. Check a port with `ss -ltn | grep :PORT` —
+#   and note there is no rg on the remote hosts, so piping to it fails in a way
+#   that looks like success.
+#
+# CORES
+#   Remote hosts are shared. Default is 5 jobs, and on the alpine target all
+#   three of --cpus, CARGO_BUILD_JOBS and -j are set: --cpus alone still lets
+#   cargo fork one rustc per host CPU, and -j alone does not constrain cargo
+#   at all.
+
+set -euo pipefail
+
+HARNESS=$(cd "$(dirname "$0")/.." && pwd)
+TARGET=local
+HOST=
+# The FreeUnit checkout: -s, else UNIT_SRC, else the harness ./src (the
+# Makefile convention). Never the current directory: run from the harness
+# root, that would sync the harness itself.
+SRC=${UNIT_SRC:-$HARNESS/src}
+JOBS=5
+OTEL=
+DEBUG=
+HARDENING=
+TESTS=--tests
+PORT=${UNIT_TEST_PORT:-8099}
+
+die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
+
+# The lab env file is read by tools/lib/env.sh, one key at a time: nothing
+# from it is exported to the build. A value set in the environment wins.
+LAB_HARNESS=$HARNESS
+# shellcheck source=lib/env.sh
+. "$HARNESS/tools/lib/env.sh"
+
+IMAGE=$(lab_env_get ALPINE_BUILD_IMAGE)
+
+# Where remote work lands. See "WHERE REMOTE BUILDS LAND" above. $REMOTE_CACHE
+# should match the layout the build host's shell already exports (CARGO_HOME
+# et al), so a build started by hand and one started by this script share one
+# registry. UNIT_REMOTE_ROOT, else BUILD_ROOT, else REMOTE_WORKDIR;
+# UNIT_REMOTE_CACHE, else BUILD_CACHE, else the root plus /cache.
+REMOTE_ROOT=$(lab_build_root)
+REMOTE_CACHE=$(lab_build_cache)
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        -t) TARGET=$2; shift 2 ;;
+        -H) HOST=$2; shift 2 ;;
+        -s) SRC=$2; shift 2 ;;
+        -j) JOBS=$2; shift 2 ;;
+        --otel) OTEL=--otel; shift ;;
+        --debug) DEBUG=--debug; shift ;;
+        # A bare --hardening is an error to ./configure (auto/options matches
+        # only --hardening=*), so the bare form is spelled out here.
+        --hardening) HARDENING=--hardening=strict; shift ;;
+        --hardening=*) HARDENING=$1; shift ;;
+        --no-tests) TESTS=; shift ;;
+        # Printing a literal line range went stale the first time the header
+        # grew. Print from line 2 up to wherever the code actually starts.
+        -h|--help) awk 'NR>1 && /^set -/{exit} NR>1' "$0"; exit 0 ;;
+        -*) die "unknown option $1" ;;
+        *) VERB=$1; shift ;;
+    esac
+done
+
+VERB=${VERB:-build}
+[ "$TARGET" = local ] || [ -n "$HOST" ] || die "target $TARGET needs -H host"
+[ "$TARGET" = local ] || [ -n "$REMOTE_ROOT" ] \
+    || die "target $TARGET needs a remote root: set BUILD_ROOT in $LAB_ENV or UNIT_REMOTE_ROOT"
+[ "$TARGET" != alpine ] || [ -n "$IMAGE" ] \
+    || die "target alpine needs an image: set ALPINE_BUILD_IMAGE in $LAB_ENV or the environment"
+
+# -H accepts a literal ssh name or a role from run/lab.env (tools/hosts), so a
+# checkout does not hardcode one contributor's machine names. The resolver
+# prints nothing for an unknown role, which leaves the literal name in place.
+# A known role with no host set is an error, not a literal name.
+if [ -n "$HOST" ] && [ -x "$(dirname "$0")/hosts" ]; then
+    ROLE_HOST=$(cd "$(dirname "$0")" && ./hosts ssh "$HOST") \
+        || die "cannot resolve host role '$HOST' (see the message above)"
+    [ -n "$ROLE_HOST" ] && HOST=$ROLE_HOST
+fi
+
+# The remote tree is $REMOTE_ROOT/<basename of SRC>, and it is the target of
+# rsync --delete. `-s .` or `-s dir/` would make that basename "." or empty,
+# i.e. $REMOTE_ROOT itself, and the sync would delete every other tree on the
+# host. Resolve SRC to an absolute path with no trailing slash first.
+SRC=$(cd "$SRC" 2>/dev/null && pwd) || die "no such source dir: $SRC (pass -s DIR, or run make src)"
+NAME=${SRC##*/}
+[ -n "$NAME" ] || die "refusing to sync / as a source tree"
+# Checked before any ssh or rsync: a tree without configure is not a FreeUnit
+# checkout, and syncing it with --delete would replace a real one of the
+# same name on the host.
+[ -f "$SRC/configure" ] || die "$SRC has no configure: not a FreeUnit checkout (pass -s DIR, or run make src)"
+
+# config: print what this run would use, and stop. Touches no host.
+if [ "$VERB" = config ]; then
+    printf 'TARGET=%s\nHOST=%s\nSRC=%s\nNAME=%s\nREMOTE_ROOT=%s\nREMOTE_CACHE=%s\nIMAGE=%s\n' \
+        "$TARGET" "$HOST" "$SRC" "$NAME" "$REMOTE_ROOT" "$REMOTE_CACHE" "$IMAGE"
+    exit 0
+fi
+
+# tmux turns "." and ":" in a session name into "_", and `-t` without a
+# leading "=" matches by prefix: `has-session -t unitbuild` succeeds while
+# only unitbuild-foo exists. Sanitize here, and always look it up as =NAME.
+SESSION=unitbuild-${NAME//[.:]/_}
+
+CONF="--openssl $OTEL $DEBUG $HARDENING $TESTS"
+
+# The tests verb, one string for all three targets. See TESTS above.
+#
+# No single quotes in it: the alpine target runs it inside sh -c '...'. The
+# else branch keeps trees from before #413, which have no gate, working, and
+# says so rather than passing in silence.
+GATE=.github/scripts/check-test-hooks.sh
+TESTS_CMD="make -j$JOBS build/lib/libunit.a && make -j$JOBS tests \
+    && ./build/tests \
+    && if [ -f $GATE ]; then sh $GATE; else echo no hook gate in this tree; fi"
+
+# ---------------------------------------------------------------- local ----
+#
+# TMPDIR is the whole point here. Without it a Rust link writes into the 7 GB
+# tmpfs and can take the shell with it; the failure looks like every command
+# returning a bare exit 1 with no output, because the shell cannot write its
+# own temp files. See the tmpfs-limits memory.
+
+run_local() {
+    export TMPDIR="${TMPDIR:-$HOME/tmp}"
+    mkdir -p "$TMPDIR"
+    export CARGO_NET_OFFLINE=1
+
+    cd "$SRC"
+    echo "disk before:"; df -h / "$TMPDIR" 2>/dev/null | sed 's/^/  /'
+    [ -f build/Makefile ] || ./configure $CONF
+    nice -n 10 make -j"$JOBS"
+    echo "disk after:";  df -h / "$TMPDIR" 2>/dev/null | sed 's/^/  /'
+
+    case $VERB in
+        tests)  eval "$TESTS_CMD" ;;
+        pytest) die "pytest on local collides with :8080 — use -t remote" ;;
+        debug)  die "debug needs gdb — use -t alpine" ;;
+    esac
+}
+
+# --------------------------------------------------------------- remote ----
+#
+# rsync excludes are ANCHORED. A bare --exclude build also matches
+# auto/echo/build, which is a source file, and configure then dies with
+# "cannot open auto/echo/build" — a confusing failure that costs a round trip.
+#
+# __pycache__ is the one exclude left unanchored on purpose. It is a directory
+# name that collides with no source file, and it has nothing to ship. A
+# `docker run` that mounts the synced tree leaves root-owned test/**/
+# __pycache__ directories behind; --delete cannot remove them, and rsync then
+# exits 23, "some files/attrs were not transferred". Excluded, they are also
+# protected from --delete, so a poisoned tree syncs clean. To clean one:
+#   ssh HOST 'docker run --rm -v $REMOTE_ROOT/TREE:/src alpine \
+#       sh -c "find /src -name __pycache__ -type d -exec rm -rf {} +"'
+
+sync_to() {
+    # Progress only when stdout is a terminal. A silent multi-MB transfer over
+    # a slow link looks like a hang and gets killed, leaving a half-synced tree
+    # -- but --info=progress2 to a pipe emits a line per file, and the first
+    # run of this flooded 118 KB into a captured log. Interactive gets the
+    # meter; non-interactive gets one summary line.
+    local prog=--info=stats1
+    [ -t 1 ] && prog=--info=progress2
+
+    ssh "$1" "mkdir -p $REMOTE_ROOT/$2"
+    # Explicit, not left to set -e: a partial sync followed by a build is a
+    # build of a tree nobody wrote, and set -e is off in any caller that
+    # tests this function's status.
+    rsync -a --delete "$prog" \
+        --exclude '/build' --exclude '/src/otel/target' --exclude '/.git' \
+        --exclude '__pycache__' \
+        "$SRC"/ "$1:$REMOTE_ROOT/$2/" \
+        || die "rsync to $1:$REMOTE_ROOT/$2 failed (exit $?); nothing started"
+}
+
+# claim_session — die if a run on this tree is still going on the host.
+#
+# Checked before the sync, not just at `tmux new-session`: by then rsync has
+# already replaced the sources under the running build.
+
+claim_session() {
+    if ssh "$1" "tmux has-session -t =$SESSION 2>/dev/null"; then
+        die "tmux session $SESSION is still running on $1 (a run on this" \
+            "tree). Wait for it: ssh $1 'tmux has-session -t =$SESSION'" \
+            "fails once it has ended. Nothing was synced or started."
+    fi
+}
+
+# df_remote — print the two filesystems that matter, before and after a build.
+# A build that fills / does not fail with "disk full"; it fails with whatever
+# the next write happened to be, so the free-space number has to be on the
+# record either side of the run.
+
+df_remote() {
+    ssh "$1" "df -h / $REMOTE_ROOT 2>/dev/null | sed 's/^/  /'"
+}
+
+# verify_otel — prove otel is in the build from ARTIFACTS, not from a log grep.
+#
+# Learned the hard way: ./configure's summary does not reach the tee'd log at
+# all, so grepping it for "otel support: YES" returns empty on a build that
+# enabled otel perfectly well. That is a false negative from a check looking
+# for a string that was never going to be there. libotel.a and the symbol
+# count are ground truth.
+
+# Unaffected by CARGO_TARGET_DIR, and that was measured rather than assumed:
+# the rule emits with `--emit link=../../build/lib/libotel.a`, a path relative
+# to the crate, so redirecting the target dir does not move libotel.a.
+
+verify_otel() {
+    local d=$REMOTE_ROOT/$2
+    ssh "$1" "test -f $d/build/lib/libotel.a && \
+        printf 'libotel.a %s bytes, %s nxt_otel_rs symbols in unitd\n' \
+            \"\$(stat -c%s $d/build/lib/libotel.a)\" \
+            \"\$(nm -D $d/build/sbin/unitd 2>/dev/null | grep -c nxt_otel_rs)\" \
+        || echo 'NO libotel.a -- otel did NOT get through'"
+}
+
+# verify_run -- the four artifact lines described under VERIFY, plus the
+# run's verdict line. The script goes over stdin, so no second shell expands
+# anything in it; each earlier check here built as one quoted ssh string
+# needed a comment to explain its escapes.
+#
+# ./build/tests is run again, not read from the log: it takes seconds, and its
+# exit code now is a fact about the binary on disk, which is what is judged.
+
+verify_run() {
+    local d=$REMOTE_ROOT/$2 logs=$REMOTE_CACHE/logs
+    if ssh "$1" "tmux has-session -t =$SESSION 2>/dev/null"; then
+        die "$SESSION is still running on $1; verify reads the finished" \
+            "artifacts, so wait until it ends"
+    fi
+    ssh "$1" sh -s -- "$d" "$logs/$SESSION.log" "$logs/$SESSION.start" \
+        "$GATE" <<'EOF'
+cd "$1" || exit 1
+if [ ! -f build/tests ]; then
+    echo "build/tests: missing (not a tests run?)"
+else
+    stale=
+    [ build/tests -nt "$3" ] || stale="   <- STALE: older than the run start"
+    echo "$(ls -la --time-style=+%F_%T build/tests)$stale"
+    ./build/tests >/dev/null 2>&1
+    echo "./build/tests exit: $?"
+    if [ -f "$4" ]; then
+        out=$(sh "$4" 2>&1)
+        echo "hook gate exit $?: $(printf '%s\n' "$out" | tail -n 1)"
+    else
+        echo "hook gate: none in this tree"
+    fi
+fi
+echo "warning: lines in $2: $(grep -c warning: "$2")"
+grep 'unit-build: .* \(PASSED\|FAILED\)$' "$2" | tail -n 1
+EOF
+}
+
+run_remote() {
+    local name=$NAME
+    local log=$REMOTE_CACHE/logs/$SESSION.log
+
+    claim_session "$HOST"
+    echo "disk on $HOST before:"; df_remote "$HOST"
+
+    # The rsync runs HERE, before tmux, in this shell. A failed sync must stop
+    # the run before anything builds, and only a sync outside the session can
+    # do that; a dropped link means running the tool again, nothing worse.
+    sync_to "$HOST" "$name"
+
+    # Take the cache locations from the host environment when it sets them
+    # (the build host's ~/.bashrc does), and fall back to $REMOTE_CACHE otherwise.
+    # A host that has neither still needs somewhere off /, hence the defaults
+    # rather than a bare inherit. The ${VAR:-default} forms are resolved by the
+    # host's own shell as it parses the ssh command, which is what makes
+    # "honour the host, else default" work across the two hops.
+    #
+    # The mkdir names the default literally rather than $TMPDIR for that same
+    # reason: $TMPDIR would be expanded one hop too early, by a shell that has
+    # not run the export yet, and silently become the empty string.
+    local rtmp=$REMOTE_CACHE/tmp
+    local env="export CARGO_HOME=\${CARGO_HOME:-$REMOTE_CACHE/cargo} \
+        RUSTUP_HOME=\${RUSTUP_HOME:-$REMOTE_CACHE/rustup} \
+        CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-$REMOTE_CACHE/cargo-target} \
+        TMPDIR=\${TMPDIR:-$rtmp}; \
+        mkdir -p $rtmp $REMOTE_CACHE/logs"
+
+    local cmd="cd $REMOTE_ROOT/$name || exit 1; \
+        . \$HOME/.cargo/env 2>/dev/null; $env; \
+        ./configure $CONF 2>&1 && make -j$JOBS"
+
+    case $VERB in
+        tests)  cmd="$cmd && $TESTS_CMD" ;;
+        pytest) cmd="$cmd && find test -name '*.py' -exec sed -i -e s/8080-8090/$PORT-$((PORT+10))/g -e s/8080/$PORT/g {} + && \
+                     ~/venv-unit/bin/pytest test/ -x -q" ;;
+        shell)  exec ssh -t "$HOST" "cd $REMOTE_ROOT/$name && exec \$SHELL" ;;
+    esac
+
+    # The verdict goes into the log as a line of its own. The trailing df
+    # always succeeds, so the session's exit status says nothing.
+    cmd="{ $cmd; } && echo 'unit-build: $VERB PASSED' \
+        || echo 'unit-build: $VERB FAILED'"
+
+    # The closing df is part of the tmux command, not run here: the build is
+    # detached, so "after" has to be recorded by the thing that finishes.
+    cmd="$cmd; echo; echo 'disk after:'; df -h / $REMOTE_ROOT | sed 's/^/  /'"
+
+    # The subshell is load-bearing. `a; b | tee log` pipes only b, so without
+    # it the tee captured just the trailing df and threw the entire build away
+    # -- a log that exists, is freshly written, and contains none of the run.
+    #
+    # The .start file is the reference for verify's STALE check: an artifact
+    # older than it was not built by this run.
+    ssh "$HOST" "mkdir -p $REMOTE_CACHE/logs && \
+        touch $REMOTE_CACHE/logs/$SESSION.start && \
+        tmux new-session -d -s $SESSION \"( $cmd ) 2>&1 | tee $log\"" \
+        || die "could not start tmux session $SESSION on $HOST"
+    echo "started tmux session $SESSION on $HOST; poll with:"
+    echo "  ssh $HOST 'tmux has-session -t =$SESSION 2>/dev/null" \
+         "&& echo running || echo done'"
+    echo "  ssh $HOST 'tail -40 $log'"
+    echo "verify when done:  $0 -t remote -H $HOST -s $SRC $OTEL verify"
+}
+
+# --------------------------------------------------------------- alpine ----
+#
+# The image already carries the C toolchain: `apk add alpine-sdk` pulls
+# build-base which pulls gcc, so build-base/gcc/musl-dev/libgcc-static are all
+# present before we add anything. (An earlier version of this comment claimed
+# otherwise, inferred from a successful `apk add build-base` -- a no-op install
+# is indistinguishable from a real one. Verified with `apk info -e` on a fresh
+# --rm container.)
+#
+# What it does lack is the library headers and the Rust toolchain, below.
+# pcre2-dev is the trap: without it configure dies at "no PCRE library found"
+# AFTER every otel probe has passed, which reads like an otel failure if you
+# are skimming the log.
+#
+# One live hazard on stale images: gcc-15.2.0-r3 did not depend on
+# libgcc-static, so an abuild install-then-purge cycle could orphan and delete
+# crtbegin*.o, leaving gcc unable to link. Our apk add upgrades gcc to r9,
+# which hard-depends on it, so this path is safe. Check with
+# `ls /usr/lib/gcc/*/*/crtbeginS.o`; repair with `apk add build-base libgcc
+# gcc musl-dev` rather than re-pulling a 420 MB image.
+#
+# CARGO_HOME follows $HOME, and --user root makes that /root/.cargo, not the
+# mounted home. Set it explicitly or the registry silently repopulates into
+# the container layer on every run.
+
+APK_DEPS="build-base linux-headers openssl-dev pcre2-dev pkgconf rust cargo \
+gdb python3 py3-pytest py3-openssl procps-ng"
+
+run_alpine() {
+    local name=$NAME c=$SESSION-$$
+    local log=$REMOTE_CACHE/logs/$c.log
+
+    claim_session "$HOST"
+    echo "disk on $HOST before:"; df_remote "$HOST"
+    sync_to "$HOST" "$name"
+
+    local caps=
+    [ "$VERB" = debug ] && caps="--cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
+
+    # These three mounts used to point into $HOME, i.e. the 40 G root
+    # filesystem; a musl registry and a 420 MB apk cache do not belong there.
+    ssh "$HOST" "mkdir -p $REMOTE_CACHE/cargo-musl $REMOTE_CACHE/apk $REMOTE_CACHE/logs"
+    ssh "$HOST" "docker run -d --name $c --platform linux/amd64 --cpus=$JOBS $caps \
+        -e CARGO_HOME=/cargo -e CARGO_BUILD_JOBS=$JOBS \
+        -v $REMOTE_CACHE/cargo-musl:/cargo -v $REMOTE_CACHE/apk:/var/cache/apk \
+        -v $REMOTE_ROOT/$name:/mnt --user root -w /mnt $IMAGE sleep infinity" >/dev/null
+
+    ssh "$HOST" "docker exec $c apk add --no-progress $APK_DEPS >/dev/null"
+
+    local cmd="./configure $CONF && make -j$JOBS"
+    case $VERB in
+        tests)  cmd="$cmd && $TESTS_CMD" ;;
+        # fake_otlp or 24 of 36 otel cases skip and the run still looks green.
+        #
+        # The in-tree target/ path is correct HERE and only here. A plain
+        # `cargo build` does honour CARGO_TARGET_DIR, and the hosts now export
+        # one -- but this cargo runs inside the container, which is given only
+        # CARGO_HOME and CARGO_BUILD_JOBS, so CARGO_TARGET_DIR is empty there
+        # (checked: `docker run ... echo $CARGO_TARGET_DIR` prints nothing).
+        #
+        # Do NOT "fix" this to ${CARGO_TARGET_DIR:-...}. That looks safer and
+        # is worse: the ${...} sits inside single quotes inside a double-quoted
+        # ssh argument, where single quotes are literal characters and not
+        # quoting, so the HOST shell expands it and the container is handed
+        # $REMOTE_CACHE/cargo-target/... -- a path that does not exist
+        # inside it. The cp then fails and two thirds of the otel suite skips,
+        # which is exactly the green-but-empty run this verb exists to prevent.
+        pytest) cmd="$cmd && cargo build --release --manifest-path test/fake_otlp/Cargo.toml \
+                     && cp test/fake_otlp/target/release/fake_otlp /usr/local/bin/ \
+                     && find test -name '*.py' -exec sed -i -e s/8080-8090/$PORT-$((PORT+10))/g -e s/8080/$PORT/g {} + \
+                     && pytest test/ -x -q" ;;
+        debug)  cmd="$cmd && gdb build/sbin/unitd" ;;
+        shell)  ssh -t "$HOST" "docker exec -it $c sh"; return ;;
+    esac
+
+    ssh "$HOST" "tmux new-session -d -s $SESSION \
+        \"docker exec $c sh -c '$cmd' 2>&1 | tee $log\"" \
+        || die "could not start tmux session $SESSION on $HOST"
+    echo "container $c started in tmux session $SESSION on $HOST"
+    if [ "$VERB" = debug ]; then
+        # gdb is sitting in that session waiting for input. Tailing the log
+        # tells you nothing; you have to attach to interact with it.
+        echo "  ssh -t $HOST 'tmux attach -t =$SESSION'    # <- gdb is here"
+        echo "  (C code has full debug info; the Rust crate is built release"
+        echo "   even under --debug, so nxt_otel_rs_* are address-only symbols)"
+    else
+        echo "  ssh $HOST 'tail -40 $log'"
+    fi
+    echo "  ssh $HOST 'docker rm -f $c'   # when finished"
+    echo "disk on $HOST after container start:"; df_remote "$HOST"
+}
+
+if [ "$VERB" = verify ]; then
+    [ -n "$HOST" ] || die "verify needs -H host"
+    verify_run "$HOST" "$NAME"
+    # The otel line only where it can mean something: without --otel and
+    # without libotel.a, "NO libotel.a" is the expected state, not news.
+    if [ -n "$OTEL" ] ||
+        ssh "$HOST" "test -f $REMOTE_ROOT/$NAME/build/lib/libotel.a"; then
+        verify_otel "$HOST" "$NAME"
+    fi
+    exit 0
+fi
+
+case $TARGET in
+    local)  run_local ;;
+    remote) run_remote ;;
+    alpine) run_alpine ;;
+    *) die "unknown target $TARGET" ;;
+esac

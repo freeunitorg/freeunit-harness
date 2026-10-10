@@ -1,0 +1,25 @@
+# Job 20: PR 630 as merged, a pure revision A/B (no patch).
+# https://github.com/freeunitorg/freeunit/pull/630
+# A = 1a695b4f3, the parent of the first PR commit 376ad904b on origin/master.
+# B = b83530700, the last of its 4 commits (376ad904b c31bcf685 f7989e85a b83530700).
+# Replaces 17-http-config-precompute.job. The merged src/ differs from
+# patches/http-config-precompute.diff in about 290 changed lines, so the
+# callgrind numbers below belong to the branch version.
+# Needs the runner patch jobs/19-runner-ae-server.patch (AE key, static1k-hdrs).
+# Workload static1k-hdrs: static1k plus three constant response_headers,
+# compression off; oha sends a browser Accept-Encoding on every request.
+# Callgrind (branch version): router 18368.5 to 16847.0 per request (-8.3%).
+JOB=20-http-precompute-merged
+ISSUE=https://github.com/freeunitorg/freeunit/pull/630
+REV_A=1a695b4f3146163e5a27e2ff91c349d14c05a251
+REV_B=b835307008bf4cc93d3068b4357d6143877ee0ef
+WORKLOAD=static1k-hdrs
+AE=gzip, deflate, br, zstd
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by 6 to 10 percent (callgrind: 8.3 percent); s_instructions follows; ok equal, bad 0, alerts 0
+FALSIFY=r_instructions NO CLAIM, NOISY or a drop under 5 percent

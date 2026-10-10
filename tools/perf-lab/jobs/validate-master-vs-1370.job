@@ -1,0 +1,15 @@
+# Validate net post-1.37.0: 592 epoll + 616 chdir-hook + 635 WHOAMI + 39700f29 cost, all in.
+JOB=validate-master-1370
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=1.37.0
+REV_B=origin/master
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=report net delta (improvements vs 39700f29 cost)
+FALSIFY=null band over 5%

@@ -1,0 +1,107 @@
+#!/bin/bash
+# doctor — report what this box can and cannot do. Changes nothing, installs
+# nothing, exits 0 unless something required for `make build` is missing.
+#
+# The point is to fail early and legibly. Unit's ./configure will tell you a
+# header is missing, but only for the one it hit first, and only after you have
+# waited for the probe that found it.
+
+set -u
+
+ok=0; warn=0; fail=0
+say_ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; ok=$((ok+1)); }
+say_warn() { printf '  \033[33m!\033[0m %s\n' "$*"; warn=$((warn+1)); }
+say_fail() { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=$((fail+1)); }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Probe for a C header the way configure will, without a full configure run.
+has_header() {
+    local hdr="$1"; shift
+    echo "#include <$hdr>
+int main(void){return 0;}" | ${CC:-cc} -x c - -o /dev/null "$@" 2>/dev/null
+}
+
+echo
+echo "freeunit-harness doctor"
+echo
+
+echo "Required to build unitd:"
+for t in cc make git; do
+    if have "$t"; then say_ok "$t ($(command -v $t))"; else say_fail "$t not found"; fi
+done
+if has_header openssl/ssl.h -lssl -lcrypto; then
+    say_ok "openssl headers + libs"
+else
+    say_fail "openssl dev files missing (Debian: libssl-dev, Alpine: openssl-dev)"
+fi
+if has_header pcre2.h -DPCRE2_CODE_UNIT_WIDTH=8; then
+    say_ok "pcre2 headers"
+else
+    say_fail "pcre2 dev files missing (Debian: libpcre2-dev, Alpine: pcre2-dev)"
+fi
+
+echo
+echo "Required to run the test suite:"
+if have python3; then say_ok "python3 ($(python3 --version 2>&1))"; else say_fail "python3 not found"; fi
+if python3 -c 'import pytest' 2>/dev/null; then
+    say_ok "pytest ($(python3 -c 'import pytest; print(pytest.__version__)' 2>/dev/null))"
+else
+    say_fail "pytest not importable (Debian: python3-pytest, or pip install pytest)"
+fi
+if have curl; then say_ok "curl"; else say_fail "curl not found (needed to drive the control socket)"; fi
+
+echo
+echo "Language modules (only what you list in MODULES needs to pass):"
+echo "  note: these probe for headers/toolchain, which is necessary but not"
+echo "  sufficient — ./configure <module> is the authority on whether it builds."
+if have php-config; then
+    say_ok "php  — $(php-config --version 2>/dev/null)"
+else
+    say_warn "php  — php-config not found (Debian: php-dev + libphp-embed)"
+fi
+if have python3-config; then
+    say_ok "python3 — $(python3-config --includes >/dev/null 2>&1 && echo headers present)"
+else
+    say_warn "python3 — python3-config not found (Debian: python3-dev)"
+fi
+for m in perl ruby go node java; do
+    case "$m" in
+        perl) have perl && has_header EXTERN.h $(perl -MExtUtils::Embed -e ccopts 2>/dev/null) \
+                  && say_ok "perl — headers present" || say_warn "perl — libperl-dev missing" ;;
+        ruby) have ruby && say_ok "ruby — $(ruby -v 2>/dev/null | cut -d' ' -f2)" || say_warn "ruby — not installed (ruby-dev)" ;;
+        go)   have go   && say_ok "go — $(go version 2>/dev/null | cut -d' ' -f3)" || say_warn "go — not installed" ;;
+        node) have node && say_ok "node — $(node -v 2>/dev/null)" || say_warn "node — not installed (also needs node-gyp)" ;;
+        java) have javac && say_ok "java — $(javac -version 2>&1 | cut -d' ' -f2)" || say_warn "java — javac not found (default-jdk)" ;;
+    esac
+done
+
+echo
+echo "Benchmarking (make bench):"
+if have oha || [ -x "$HOME/bin/oha" ]; then
+    say_ok "oha — primary load generator"
+else
+    say_warn "oha not found — the harness needs it (https://github.com/hatoo/oha)"
+fi
+if have ab; then say_ok "ab — secondary load generator"; else say_warn "ab not found (Debian: apache2-utils); bench runs with SKIP_AB=1"; fi
+if have taskset; then say_ok "taskset — CPU pinning"; else say_fail "taskset not found (Debian: util-linux); bench results would be unpinned and untrustworthy"; fi
+
+echo
+echo "Local CI (make ci-local):"
+if have docker; then say_ok "docker ($(docker --version 2>/dev/null | cut -d, -f1))"; else say_warn "docker not found — 'make ci-local' unavailable"; fi
+
+echo
+echo "Harness configuration:"
+harness_src="$(cd "$(dirname "$0")/.." && pwd)/src"
+if [ "${UNIT_SRC:-$harness_src}" = "$harness_src" ]; then
+    say_ok "UNIT_SRC is harness-managed ($harness_src)"
+else
+    say_warn "UNIT_SRC=$UNIT_SRC is NOT harness-managed"
+    echo "      ./configure rewrites Makefile and build/ inside that tree, and the"
+    echo "      test suite requires the build to live there. If you are editing"
+    echo "      that checkout, build from a git worktree instead."
+fi
+
+echo
+printf 'ok %d, warnings %d, failures %d\n\n' "$ok" "$warn" "$fail"
+[ "$fail" -eq 0 ] || { echo "Fix the failures above before 'make build'."; exit 1; }

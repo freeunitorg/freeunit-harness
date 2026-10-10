@@ -1,0 +1,15 @@
+# Bisect +12.6% c32: suspect 1453d33c (per-request compressor stream) — parent vs commit.
+JOB=bisect-1453
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=1453d33c^
+REV_B=1453d33c
+WORKLOAD=hello
+CONNS=32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=asys_sendmsg delta if compressor adds a message; s_instructions delta
+FALSIFY=NO CLAIM on both

@@ -1,0 +1,272 @@
+{
+ "listeners": {
+  "127.0.0.1:@PORT@": {
+   "pass": "routes/rx"
+  }
+ },
+ "routes": {
+  "rx": [
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)0[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)1[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)2[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)3[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)4[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)5[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)6[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)7[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)8[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)9[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)10[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)11[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)12[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)13[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)14[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)15[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)16[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)17[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)18[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)19[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)20[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)21[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)22[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)23[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)24[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)25[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)26[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)27[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)28[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)29[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|entry)30[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|item)[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 200
+    }
+   },
+   {
+    "action": {
+     "return": 404
+    }
+   }
+  ]
+ }
+}

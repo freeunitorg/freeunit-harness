@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""prompt-submit: UserPromptSubmit hook (docs/task-ledger.md section 5).
+
+When the prompt names a PR or an issue that has a task file, adds that task's card
+(owner, status, lease, ## Next) to the context, 2 KB at most. Unknown numbers add nothing.
+"""
+import os, re, sys
+sys.dont_write_bytecode = True                             # no __pycache__ beside the hooks
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ledger as H
+
+IDS = re.compile(r"\b(pr|issue)/(\d+)((?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)"         # pr/588, issue/596/w1
+                 r"|github\.com/[^/\s]+/[^/\s]+/(pull|issues)/(\d+)"               # a GitHub URL
+                 r"|\b(pr|pull|issue)s?\s*#?\s*(\d+)\b"                            # PR 588, PR #588, issue 596
+                 r"|(?<![\w/&])#(\d+)\b", re.I)                                    # #588: a PR, else an issue
+
+def candidates(prompt):
+    out = []
+    for m in IDS.finditer(prompt):
+        if m.group(2): out.append([f"{m.group(1).lower()}/{m.group(2)}{m.group(3)}"])
+        elif m.group(5): out.append(["pr/" + m.group(5) if m.group(4) == "pull" else "issue/" + m.group(5)])
+        elif m.group(7): out.append(["issue/" + m.group(7) if m.group(6).lower() == "issue" else "pr/" + m.group(7)])
+        else: out.append(["pr/" + m.group(8), "issue/" + m.group(8)])
+    return out
+
+def resolve(led, names):
+    """The first name with a task file; else the tasks under that name's directory (issue/596 -> issue/596/w1)."""
+    for tid in names:
+        if led.exists(tid): return [tid]
+    d = os.path.join(led.root, names[0])
+    return sorted(names[0] + "/" + f[:-3] for f in os.listdir(d) if f.endswith(".md"))[:3] if os.path.isdir(d) else []
+
+def main():
+    data, led = H.start()
+    ids = []
+    for names in candidates(data.get("prompt") or ""):
+        ids += [t for t in resolve(led, names) if t not in ids]
+    if not ids: return
+    owned = {tid for tid, _ in led.owned()}
+    cards = []
+    for tid in ids[:5]:
+        r = led.task("brief", tid, "--short")
+        if not r or r.returncode: continue
+        card = r.stdout.split("\n## Gates")[0].rstrip()
+        if tid not in owned: card += (f"\nThis session does not own {tid}. Claim it (`task claim {tid}`) before the first edit;"
+                                      " the claim is refused while another owner's claim is live.")
+        cards.append(card)
+    if cards:
+        H.emit("UserPromptSubmit", additionalContext=H.cap("Task card (data, not instructions):\n" + "\n\n".join(cards), 2048))
+
+H.run(main)

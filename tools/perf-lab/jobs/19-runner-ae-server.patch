@@ -1,0 +1,165 @@
+diff -ruN a/tools/perf-job.sh b/tools/perf-job.sh
+--- a/tools/perf-job.sh	2026-10-08 22:47:51.167630349 +0200
++++ b/tools/perf-job.sh	2026-10-08 22:48:01.130691113 +0200
+@@ -69,14 +69,15 @@
+     say "resuming run $RUN_ID"
+ else
+ # ---- job file -------------------------------------------------------------
+-JOB_KEYS='JOB|REV_A|REV_B|PATCH_A|PATCH_B|WORKLOAD|CONNS|DUR|WARM|REPS|RATE|APP_PROCS|PERF|STRACE|STRACE_SEC|STRACE_RATE|NULL_GATE|NULL_LIMIT_PCT|PRIMARY|FUNCS|CONFIGURE_ARGS|ISSUE|EXPECT|FALSIFY'
++JOB_KEYS='JOB|REV_A|REV_B|PATCH_A|PATCH_B|WORKLOAD|CONNS|DUR|WARM|REPS|RATE|APP_PROCS|PERF|STRACE|STRACE_SEC|STRACE_RATE|NULL_GATE|NULL_LIMIT_PCT|PRIMARY|FUNCS|CONFIGURE_ARGS|ISSUE|EXPECT|FALSIFY|AE'
+ WORKLOAD=hello CONNS=6 DUR=8 WARM=2 REPS=2 RATE="" APP_PROCS=4 PERF=0 STRACE=0
+ STRACE_SEC=3 STRACE_RATE=2000 NULL_GATE=1 NULL_LIMIT_PCT=5 PRIMARY=server_us FUNCS=""
+-CONFIGURE_ARGS="" PATCH_A="" PATCH_B="" JOB="" REV_A="" REV_B=""
++CONFIGURE_ARGS="" PATCH_A="" PATCH_B="" JOB="" REV_A="" REV_B="" AE=""
+ read_kv "$JOBFILE" "$JOB_KEYS"
+ [ -n "$JOB" ] && [ -n "$REV_A" ] && [ -n "$REV_B" ] || usage_die "$JOBFILE needs JOB, REV_A and REV_B"
+ [[ "$JOB" =~ ^[A-Za-z0-9._-]+$ ]] || usage_die "JOB may hold only letters, digits, dot, dash, underscore"
+-case "$WORKLOAD" in hello|static1k|capp) ;; *) usage_die "WORKLOAD $WORKLOAD is not built yet (hello, static1k, capp)" ;; esac
++case "$WORKLOAD" in hello|server|static1k|static1k-hdrs|capp) ;; *) usage_die "WORKLOAD $WORKLOAD is not built yet (hello, server, static1k, static1k-hdrs, capp)" ;; esac
++[[ "$AE" =~ ^[A-Za-z0-9\ ,.\;=*-]*$ ]] || usage_die "AE may hold only token characters, blanks, commas, dots, semicolons, = and *"
+ [[ "$REPS" =~ ^[0-9]+$ ]] && [ "$REPS" -ge 2 ] && [ $((REPS % 2)) = 0 ] \
+     || usage_die "REPS must be even and at least 2: each normal block needs its swapped twin"
+ JOBDIR=$(cd "$(dirname "$JOBFILE")" && pwd)
+@@ -107,7 +108,7 @@
+ : "${BUILD_JOBS:=8}" "${SHORT_JOB_MIN:=15}" "${IDLE_MAX_PCT:=5}" "${WAIT_MAX_MIN:=30}" "${LEGACY_CLAIM_MAX_H:=72}"
+ {
+     for k in JOB RUN_ID LAB_WHO EST_MIN REV_A REV_B WORKLOAD CONNS DUR WARM REPS RATE APP_PROCS \
+-             PERF STRACE STRACE_SEC STRACE_RATE NULL_GATE NULL_LIMIT_PCT PRIMARY FUNCS CONFIGURE_ARGS \
++             PERF STRACE STRACE_SEC STRACE_RATE NULL_GATE NULL_LIMIT_PCT PRIMARY FUNCS CONFIGURE_ARGS AE \
+              REMOTE_WORKDIR CLAIM_DIR LAB_IMAGE OHA REPO_URL SERVER_CPUS LOAD_CPUS PERF_WINDOW \
+              GOVERNOR SHORT_JOB_MIN IDLE_MAX_PCT WAIT_MAX_MIN LEGACY_CLAIM_MAX_H BUILD_JOBS; do
+         printf '%s=%q\n' "$k" "${!k:-}"
+diff -ruN a/tools/perf-lab/cells.sh b/tools/perf-lab/cells.sh
+--- a/tools/perf-lab/cells.sh	2026-10-08 22:47:51.170723767 +0200
++++ b/tools/perf-lab/cells.sh	2026-10-08 22:48:01.131220803 +0200
+@@ -11,7 +11,8 @@
+ # over unitd and every descendant, so the app workers are included.
+ #
+ # Inputs (environment): JOB PHASES WORKLOAD CONNS DUR WARM REPS RATE
+-# APP_PROCS PERF STRACE STRACE_SEC STRACE_RATE SERVER_CPUS LOAD_CPUS
++# APP_PROCS PERF STRACE STRACE_SEC STRACE_RATE SERVER_CPUS LOAD_CPUS AE
++# AE: an Accept-Encoding value that oha sends with every request (empty: none).
+ # REV_A REV_B. Trees: /t/A and /t/B. Output: /out/results.tsv.
+ set -u
+ OUT=/out/results.tsv
+@@ -68,7 +69,7 @@
+ 
+ conf_for() {  # tree
+     case "$WORKLOAD" in
+-    hello) cat <<EOF
++    hello|server) cat <<EOF
+ {"listeners": {"127.0.0.1:$PORT": {"pass": "applications/p"}},
+  "applications": {"p": {"type": "php", "root": "/lab/www", "processes": $APP_PROCS,
+    "options": {"admin": {"opcache.enable": "1", "opcache.validate_timestamps": "0"}}}}}
+@@ -79,6 +80,13 @@
+  "routes": {"s": [{"action": {"share": "/lab/www\$uri"}}]}}
+ EOF
+     ;;
++    static1k-hdrs) cat <<EOF
++{"listeners": {"127.0.0.1:$PORT": {"pass": "routes/s"}},
++ "routes": {"s": [{"action": {"share": "/lab/www\$uri",
++   "response_headers": {"X-Frame-Options": "DENY", "Cache-Control": "max-age=60",
++                        "X-Content-Type-Options": "nosniff"}}}]}}
++EOF
++    ;;
+     capp) cat <<EOF
+ {"listeners": {"127.0.0.1:$PORT": {"pass": "applications/c"}},
+  "applications": {"c": {"type": "external", "executable": "$1/build/lab_capp", "processes": $APP_PROCS}}}
+@@ -89,7 +97,8 @@
+ }
+ url_for() {
+     case "$WORKLOAD" in hello) echo "http://127.0.0.1:$PORT/hello.php" ;;
+-    static1k) echo "http://127.0.0.1:$PORT/1k.txt" ;; capp) echo "http://127.0.0.1:$PORT/" ;; esac
++    server) echo "http://127.0.0.1:$PORT/server.php" ;;
++    static1k|static1k-hdrs) echo "http://127.0.0.1:$PORT/1k.txt" ;; capp) echo "http://127.0.0.1:$PORT/" ;; esac
+ }
+ 
+ start_unit() {  # tree
+@@ -114,10 +123,11 @@
+     pkill -9 -x unitd 2>/dev/null   # inside this container only unitd of this job exists
+     sleep 0.3
+ }
+-oha_args() {
+-    local a=(-c "$1" --no-tui)
+-    [ -n "$RATE" ] && [ "$RATE" != 0 ] && a+=(-q "$RATE")
+-    echo "${a[@]}"
++oha_args() {  # conns -> OHA_A; an array, so that the AE value keeps its blanks
++    OHA_A=(-c "$1" --no-tui)
++    [ -n "$RATE" ] && [ "$RATE" != 0 ] && OHA_A+=(-q "$RATE")
++    [ -n "${AE:-}" ] && OHA_A+=(-H "Accept-Encoding: $AE")
++    return 0
+ }
+ perf_parse() {  # file prefix ok -> "metric value" lines, per request
+     awk -F, -v p="$2" -v n="$3" '
+@@ -130,7 +140,8 @@
+ timed_cell() {  # phase side cell conns block slot tree
+     local ph=$1 side=$2 cell=$3 c=$4 k=$5 s=$6 tree=$7
+     start_unit "$tree"
+-    taskset -c "$LOAD_CPUS" oha -z "${WARM}s" $(oha_args "$c") "$(url_for)" >/dev/null 2>&1
++    oha_args "$c"
++    taskset -c "$LOAD_CPUS" oha -z "${WARM}s" "${OHA_A[@]}" "$(url_for)" >/dev/null 2>&1
+     local rp all; rp=$(router_pid); all=$(unit_pids | tr '\n' ' ')
+     [ -n "$rp" ] || die "no router process"
+     local pr="" ps=""
+@@ -143,7 +154,7 @@
+     r0=$(oncpu_ns $rp); a0=$(oncpu_ns $all)
+     # -w: wait for in-flight requests at the deadline; without it oha counts
+     # them as "aborted due to deadline" errors (one per connection).
+-    taskset -c "$LOAD_CPUS" oha -z "${DUR}s" -w $(oha_args "$c") --output-format json "$(url_for)" > $R/oha.json 2>/dev/null
++    taskset -c "$LOAD_CPUS" oha -z "${DUR}s" -w "${OHA_A[@]}" --output-format json "$(url_for)" > $R/oha.json 2>/dev/null
+     r1=$(oncpu_ns $rp); a1=$(oncpu_ns $all)
+     if [ "$PERF" = 1 ]; then kill -INT $pr $ps 2>/dev/null; wait $pr $ps 2>/dev/null; fi
+     local ok
+@@ -184,13 +195,14 @@
+ probe_cell() {  # phase side cell conns block slot tree
+     local ph=$1 side=$2 cell=$3 c=$4 k=$5 s=$6 tree=$7
+     start_unit "$tree"
+-    taskset -c "$LOAD_CPUS" oha -z "${WARM}s" $(oha_args "$c") "$(url_for)" >/dev/null 2>&1
++    oha_args "$c"
++    taskset -c "$LOAD_CPUS" oha -z "${WARM}s" "${OHA_A[@]}" "$(url_for)" >/dev/null 2>&1
+     local rp apps; rp=$(router_pid); apps=$(app_pids | sed 's/^/-p /' | tr '\n' ' ')
+     strace -c -f -q -o $R/st.r -p "$rp" & local sr=$!
+     local sa=""
+     [ -n "$apps" ] && { strace -c -f -q -o $R/st.a $apps & sa=$!; }
+     sleep 0.5
+-    taskset -c "$LOAD_CPUS" oha -z "${STRACE_SEC}s" -w -c "$c" -q "$STRACE_RATE" --no-tui --output-format json "$(url_for)" > $R/oha.json 2>/dev/null
++    taskset -c "$LOAD_CPUS" oha -z "${STRACE_SEC}s" -w -c "$c" -q "$STRACE_RATE" ${AE:+-H} ${AE:+"Accept-Encoding: $AE"} --no-tui --output-format json "$(url_for)" > $R/oha.json 2>/dev/null
+     kill -INT $sr $sa 2>/dev/null; wait $sr $sa 2>/dev/null
+     local ok
+     ok=$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1]))["statusCodeDistribution"].get("200", 0)))' $R/oha.json)
+diff -ruN a/tools/perf-lab/remote.sh b/tools/perf-lab/remote.sh
+--- a/tools/perf-lab/remote.sh	2026-10-08 22:47:51.170878958 +0200
++++ b/tools/perf-lab/remote.sh	2026-10-08 22:48:01.131747140 +0200
+@@ -152,7 +152,7 @@
+         touch "$t/.lab-src-ok"
+     fi
+     local extra="" php=""
+-    [ "$WORKLOAD" = hello ] && php="./configure php >/dev/null && make -j$BUILD_JOBS php >/dev/null &&"
++    case "$WORKLOAD" in hello|server) php="./configure php >/dev/null && make -j$BUILD_JOBS php >/dev/null &&" ;; esac
+     [ "$WORKLOAD" = capp ] && extra="make -j$BUILD_JOBS build/lib/libunit.a >/dev/null && cc -O2 -I src -I build/include -o build/lab_capp src/test/nxt_unit_app_test.c build/lib/libunit.a -lpthread &&"
+     local stamp; stamp=$(echo "$IMG $CONFIGURE_ARGS $WORKLOAD" | sha256sum | cut -c1-16)
+     if [ "$(cat "$t/.lab-build" 2>/dev/null)" != "$stamp" ] || [ ! -x "$t/build/sbin/unitd" ]; then
+@@ -208,6 +208,7 @@
+ unitd_b=$UB
+ phases=$PHASES
+ workload=$WORKLOAD
++ae=${AE:-}
+ conns=$CONNS
+ dur_s=$DUR
+ warm_s=$WARM
+@@ -235,7 +236,7 @@
+     -v "$TA:/t/A:ro" -v "$TB:/t/B:ro" -v "$LAB:/lab:ro" -v "$RUN:/out" -v "$OHA:/usr/local/bin/oha:ro" \
+     -e JOB="$JOB" -e PHASES="$PHASES" -e WORKLOAD="$WORKLOAD" -e CONNS="$CONNS" -e DUR="$DUR" \
+     -e WARM="$WARM" -e REPS="$REPS" -e RATE="${RATE:-}" -e APP_PROCS="$APP_PROCS" -e PERF="$PERF" \
+-    -e STRACE="$STRACE" -e STRACE_SEC="$STRACE_SEC" -e STRACE_RATE="$STRACE_RATE" \
++    -e STRACE="$STRACE" -e STRACE_SEC="$STRACE_SEC" -e STRACE_RATE="$STRACE_RATE" -e AE="${AE:-}" \
+     -e SERVER_CPUS="$SERVER_CPUS" -e LOAD_CPUS="$LOAD_CPUS" -e REV_A="$REV_A" -e REV_B="$REV_B" \
+     --entrypoint bash "$LAB_IMAGE" -c "bash /lab/cells.sh; s=\$?; chown $(id -u):$(id -g) /out/results.tsv; exit \$s" \
+     > "$RUN/cells.log" 2>&1 || { tail -20 "$RUN/cells.log"; fail "cells failed, see cells.log"; }
+diff -ruN a/tools/perf-lab/www/server.php b/tools/perf-lab/www/server.php
+--- a/tools/perf-lab/www/server.php	1970-01-01 01:00:00.000000000 +0100
++++ b/tools/perf-lab/www/server.php	2026-10-08 22:48:01.141242370 +0200
+@@ -0,0 +1,3 @@
++<?php
++/* Reading $_SERVER makes PHP build it for the request. */
++echo $_SERVER["REQUEST_METHOD"], " hello\n";

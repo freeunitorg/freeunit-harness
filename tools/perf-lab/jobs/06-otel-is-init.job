@@ -1,0 +1,29 @@
+# Job 6: otel: nxt_otel_rs_is_init() reads an atomic flag instead of locking
+# the provider mutex (branch perf/otel-is-init-atomic). B is master plus that
+# patch. The hello workload configures no telemetry, so this measures the
+# unconfigured --otel path, which calls is_init() once per request.
+# PREREQUISITE: --otel needs rustc and cargo plus the crate's dependencies in
+# the lab image. freeunit-perf-lab:1 has neither (checked 2026-10-08, docker
+# run as the invoking user: "cargo: not found"), so the build fails until the
+# image gets a Rust toolchain and an offline cargo registry.
+# The saving is about 30 instructions and two atomic read-modify-write
+# operations per request, under the 2.5 to 3 percent null band on
+# instructions. The job cannot resolve it; it checks for a regression and for
+# a syscall change, and reports the size of the function.
+JOB=06-otel-is-init
+ISSUE=docs/perf/otel-unconfigured-overhead-2026-10-08.md
+REV_A=origin/master
+REV_B=origin/master
+PATCH_B=patches/otel-is-init-atomic.diff
+CONFIGURE_ARGS=--otel
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+STRACE=1
+PRIMARY=r_instructions
+FUNCS=unitd:nxt_otel_rs_is_init unitd:nxt_http_request_create
+EXPECT=r_instructions and s_instructions NO CLAIM (delta inside the null band); nxt_otel_rs_is_init shrinks from 0x120 to 0xd bytes; nxt_http_request_create unchanged; every rsys_ syscall count equal in A and B
+FALSIFY=r_instructions or s_instructions higher in B than the null band, any rsys_ count that differs between A and B, or nxt_otel_rs_is_init not smaller in B

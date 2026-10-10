@@ -1,0 +1,15 @@
+--- a/src/nxt_mp.c	2026-10-07 02:38:09.536267941 +0200
++++ b/src/nxt_mp.c	2026-10-07 02:38:09.557677625 +0200
+@@ -141,8 +141,12 @@
+     map |= (1 << chunk)
+ 
+ 
++#if (NXT_DEBUG)
+ #define nxt_mp_free_junk(p, size)                                             \
+     memset((p), 0x5A, size)
++#else
++#define nxt_mp_free_junk(p, size)
++#endif
+ 
+ 
+ #if !(NXT_DEBUG_MEMORY)

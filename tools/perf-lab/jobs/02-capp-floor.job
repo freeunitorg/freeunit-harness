@@ -1,0 +1,18 @@
+# Job 2: the C external-app floor, FreeUnit's own cost with no interpreter.
+# 597 wave 5. src/test/nxt_unit_app_test.c linked against the plain libunit.a
+# (build/lab_capp), not build/unit_app_test, which links the test-hook archive.
+# Not run yet: its first run is also the test of the capp build step.
+JOB=02-capp-floor
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=origin/master
+WORKLOAD=capp
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=router instructions per request within 10 percent of job 1, app side far below the PHP worker
+FALSIFY=router instructions per request differ from job 1 by more than 10 percent: the floor does not isolate the app side

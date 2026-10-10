@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""session-end: SessionEnd hook (docs/task-ledger.md section 5).
+
+Notes "session ended: <reason>" on the active task. Claude Code gives this hook 1.5 seconds,
+so it reads the ledger in process, runs one short local command and touches no network.
+"""
+import os, sys
+sys.dont_write_bytecode = True                             # no __pycache__ beside the hooks
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ledger as H
+
+def main():
+    data, led = H.start()
+    tid, owner = led.active()
+    if tid: led.note(tid, f"session ended: {data.get('reason') or 'other'}", timeout=0.45, owner=owner)
+
+H.run(main)

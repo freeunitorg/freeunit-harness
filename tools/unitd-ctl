@@ -1,0 +1,209 @@
+#!/bin/bash
+# unitd-ctl — lifecycle for the harness's dev unitd.
+#
+# Why this is a script and not three lines of Makefile: a unitd that is started
+# carelessly is a unitd that outlives you. The main process re-parents its
+# router, controller and application workers; SIGTERM to the main pid alone
+# leaves them running, and a runner that dies abnormally (SIGKILL, a crashed
+# pytest) leaves the whole tree orphaned to init. On a shared box those
+# survivors hold the listen ports and, for io_uring builds, pinned ring memory.
+#
+# So: unitd is started with setsid into its OWN process group, the group id is
+# recorded before anything else can go wrong, and stopping walks a bounded
+# escalation ladder against the GROUP — never an unbounded `wait` on one pid.
+# Every kill target is additionally confirmed to be a real unitd by its process
+# image (/proc/<pid>/exe), because a pid is a recyclable number and this script
+# must never signal a stranger's process.
+#
+# This mirrors the discipline in tools/bench-engines.sh, which arrived at it the
+# hard way.
+
+set -u
+
+RUN_DIR="${RUN_DIR:?RUN_DIR not set}"
+BUILD_DIR="${BUILD_DIR:?BUILD_DIR not set}"
+PORT="${PORT:-8080}"
+
+UNITD="$BUILD_DIR/sbin/unitd"
+CONTROL="${CONTROL:-$RUN_DIR/control.sock}"
+PIDFILE="$RUN_DIR/unit.pid"
+LOGFILE="$RUN_DIR/unit.log"
+PGIDFILE="$RUN_DIR/unitd.pgid"
+STATEDIR="$RUN_DIR/state"
+
+STOP_GRACE="${STOP_GRACE:-10}"     # seconds before escalating TERM -> KILL
+START_TIMEOUT="${START_TIMEOUT:-15}"
+
+die() { echo "unitd-ctl: $*" >&2; exit 1; }
+
+# --- ownership guards --------------------------------------------------------
+
+proc_is_unitd() {   # pid -> 0 if the process image really is our unitd
+    local pid="$1" exe
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    case "$exe" in
+        "$UNITD"|"$UNITD "*|*"/unitd"|*"/unitd (deleted)") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# A recorded pgid is only a kill target if some process in it is a live unitd.
+# Otherwise the id has been recycled and belongs to someone else entirely.
+group_is_ours() {   # pgid -> 0 if safe to signal
+    local pgid="$1" p
+    [ -n "$pgid" ] || return 1
+    for p in $(pgrep -g "$pgid" 2>/dev/null); do
+        proc_is_unitd "$p" && return 0
+    done
+    return 1
+}
+
+read_pgid() {
+    [ -f "$PGIDFILE" ] || return 1
+    tr -d ' \t\r\n' < "$PGIDFILE" 2>/dev/null
+}
+
+# --- commands ----------------------------------------------------------------
+
+cmd_start() {
+    [ -x "$UNITD" ] || die "no $UNITD — run 'make build' first"
+
+    if cmd_status >/dev/null 2>&1; then
+        echo "already running (pgid $(read_pgid)); use 'make restart'"
+        return 0
+    fi
+
+    mkdir -p "$RUN_DIR" "$STATEDIR"
+
+    # AF_UNIX sun_path is ~108 bytes and unitd appends to the control path
+    # while binding; a deep RUN_DIR fails at bind time with a confusing error.
+    if [ ${#CONTROL} -gt 90 ]; then
+        die "control socket path too long (${#CONTROL} chars): $CONTROL
+     set RUN_DIR to something shorter"
+    fi
+
+    rm -f "$PIDFILE"
+    echo "==> starting $UNITD"
+
+    # setsid gives unitd its own session/process group so cleanup has a single
+    # kill target covering router + controller + workers.
+    setsid "$UNITD" --no-daemon \
+        --control "unix:$CONTROL" \
+        --pid "$PIDFILE" \
+        --log "$LOGFILE" \
+        --statedir "$STATEDIR" \
+        --tmpdir "$RUN_DIR" \
+        >>"$LOGFILE" 2>&1 &
+    local spawn_pid=$!
+
+    # Record a kill target NOW. setsid makes the child the leader of its new
+    # group, so its pid IS the pgid. If start fails past this point the stop
+    # path can still reap the group; without this an early failure leaks it.
+    echo "$spawn_pid" > "$PGIDFILE"
+
+    # Integer ticks of 0.2s — no bc, no float arithmetic in a wait loop.
+    local ticks=0 max_ticks=$(( START_TIMEOUT * 5 ))
+    while [ "$ticks" -lt "$max_ticks" ]; do
+        if [ -s "$PIDFILE" ]; then
+            local main
+            main=$(tr -d ' \t\r\n' < "$PIDFILE")
+            # Prefer the authoritative pid unitd reports over the spawn pid.
+            if [ -n "$main" ] && kill -0 "$main" 2>/dev/null; then
+                ps -o pgid= -p "$main" 2>/dev/null | tr -d ' ' > "$PGIDFILE"
+                echo "==> unitd running (pid $main, pgid $(read_pgid))"
+                echo "    log     $LOGFILE"
+                echo "    control $CONTROL"
+                return 0
+            fi
+        fi
+        kill -0 "$spawn_pid" 2>/dev/null || break
+        sleep 0.2
+        ticks=$(( ticks + 1 ))
+    done
+
+    echo "unitd failed to start within ${START_TIMEOUT}s; last log lines:" >&2
+    tail -20 "$LOGFILE" >&2 2>/dev/null || true
+    cmd_stop >/dev/null 2>&1 || true
+    return 1
+}
+
+cmd_stop() {
+    local pgid
+    pgid=$(read_pgid) || { echo "not running (no $PGIDFILE)"; return 0; }
+
+    if ! group_is_ours "$pgid"; then
+        echo "not running (pgid $pgid holds no unitd; stale file)"
+        rm -f "$PGIDFILE" "$PIDFILE"
+        return 0
+    fi
+
+    echo "==> stopping unitd group $pgid"
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+
+    local ticks=0 max_ticks=$(( STOP_GRACE * 5 ))
+    while [ "$ticks" -lt "$max_ticks" ]; do
+        group_is_ours "$pgid" || { echo "==> stopped"; rm -f "$PGIDFILE" "$PIDFILE"; return 0; }
+        sleep 0.2
+        ticks=$(( ticks + 1 ))
+    done
+
+    echo "==> grace period expired, SIGKILL to group $pgid"
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+    sleep 0.5
+
+    if group_is_ours "$pgid"; then
+        die "group $pgid survived SIGKILL — investigate before rerunning"
+    fi
+    echo "==> stopped (killed)"
+    rm -f "$PGIDFILE" "$PIDFILE"
+}
+
+cmd_status() {
+    local pgid
+    pgid=$(read_pgid) || { echo "stopped"; return 1; }
+    if group_is_ours "$pgid"; then
+        local main=""
+        [ -f "$PIDFILE" ] && main=$(tr -d ' \t\r\n' < "$PIDFILE")
+        echo "running (pid ${main:-?}, pgid $pgid)"
+        pgrep -g "$pgid" -a 2>/dev/null | sed 's/^/    /'
+        return 0
+    fi
+    echo "stopped (stale pgid file: $pgid)"
+    return 1
+}
+
+cmd_restart() { cmd_stop; cmd_start; }
+
+cmd_logs() {
+    [ -f "$LOGFILE" ] || die "no log at $LOGFILE"
+    tail -f "$LOGFILE"
+}
+
+# A minimal known-good config so `make dev` ends at something you can curl.
+cmd_config() {
+    [ -S "$CONTROL" ] || die "no control socket at $CONTROL — is unitd running?"
+    local out
+    out=$(curl -s --max-time 10 --unix-socket "$CONTROL" -X PUT -d '{
+      "listeners": {
+        "*:'"$PORT"'": { "pass": "routes" }
+      },
+      "routes": [
+        { "action": { "return": 200 } }
+      ]
+    }' http://localhost/config 2>&1)
+
+    case "$out" in
+        *'"success"'*) echo "==> configured: http://localhost:$PORT/ returns 200" ;;
+        *) echo "config PUT failed:" >&2; echo "$out" >&2; return 1 ;;
+    esac
+}
+
+case "${1:-}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    status)  cmd_status ;;
+    logs)    cmd_logs ;;
+    config)  cmd_config ;;
+    *) die "usage: unitd-ctl {start|stop|restart|status|logs|config}" ;;
+esac

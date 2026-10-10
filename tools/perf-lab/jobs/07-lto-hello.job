@@ -1,0 +1,52 @@
+# Job 7: what LTO alone buys at the project's own -O.
+# A is master 856d23b9e as it builds today (-O). B is the same tree plus
+# patches/cflags-lto-fat.diff: -flto=auto -ffat-lto-objects added after the -O
+# line of auto/cc/test (line 74, gcc branch). remote.sh applies a patch with
+# patch -p1 to the unpacked tree, before ./configure (remote.sh:151).
+# Jobs 07 to 13 pin the SHA, not origin/master. The patches are proven
+# against it with git apply --check, and the jobs then share one base.
+# Write origin/master to follow master; re-run git apply --check first.
+# The three flag patches could become configure arguments (CONFIGURE_ARGS_A and
+# CONFIGURE_ARGS_B) once ./configure has an --lto option; see the proposal in
+# docs/perf/lto-pgo-runner-configure-args-ab.diff. The runner has no such keys today.
+#
+# How the flags reach the build (read from the code; compile-checked on a local
+# gcc 15.2 build of this SHA, not on the lab image):
+# - Every compile gets them through CFLAGS (auto/make:24).
+# - The unitd link passes $(CFLAGS) (auto/make:483), so -flto is on that line.
+# - The PHP module link has no CFLAGS (auto/modules/php:645). The fat objects
+#   are still compiled by LTO there, because gcc's linker plugin claims
+#   objects that hold IR. Seen on the local build: the module has an LTO unit.
+# - Fat objects keep plain ar, nm and the cc link of lab_capp working.
+# - Lab image freeunit-perf-lab:1 (checked 2026-10-08): Debian 13, gcc 14.2.0,
+#   binutils 2.44, liblto_plugin.so in /usr/lib/bfd-plugins, gcc-ar present.
+# - -Werror stays on. The local build had 0 warnings with -O2, with LTO and
+#   with both. gcc 14.2 could differ; a failed build shows as "build B failed".
+#
+# The PHP engine (libphp in the image) is not rebuilt, so s_instructions moves
+# less than r_instructions. PRIMARY is r_instructions.
+# FUNCS is empty on purpose. remote.sh:185 looks up one exact symbol with
+# nm -S, and the runner has no entry for the size of the whole binary. Names
+# and bodies change under LTO and -O2. Local build, gcc 15.2: nxt_http_request_create
+# is 211 bytes at -O and has no symbol under LTO (the runner would record 0);
+# -O2 adds .isra and .part clones; LTO adds .lto_priv clones (220 at -O, 277
+# with -O2). unitd text: -O 506706, -O2 540326, LTO 490432, both 579433 bytes.
+# STRACE is 0: a compiler flag does not change the syscalls, and without the
+# probe cells the job stays a short job (SHORT_JOB_MIN) that can run by day.
+#
+# After the run, prove the flag reached B (the tree names are in meta.txt and
+# build-*.log): readelf -S build/src/nxt_router.o | grep -c gnu.lto is above 0
+# in B and 0 in A; nm build/sbin/unitd | grep -c lto_priv is above 0 in B.
+JOB=07-lto-hello
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=856d23b9ed2cecbd96d5452cf790f828fc55d700
+PATCH_B=patches/cflags-lto-fat.diff
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by more than the null band (guess before any run: 1 to 4 percent, from cross-file inlining of the pool, queue and hash helpers); s_instructions lower by less; ok equal, bad 0, alerts 0; unitd_b in meta.txt differs from unitd_a
+FALSIFY=r_instructions NO CLAIM or NOISY, or higher in B: LTO at -O gives nothing this lab can resolve at hello.php c=6; or the gnu.lto check above fails: the patch did not reach the build

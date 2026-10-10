@@ -1,0 +1,17 @@
+# Job 5: K2, one port message per small PHP response.
+# 597 wave 4. Set REV_B to the K2 branch (pr/NNN) before running.
+# Measured on master 2026-10-07: asys_sendmsg 3.64 to 3.70 per request at hello.php c=6.
+JOB=05-k2-one-message
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=pr/NNN
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_cycles
+EXPECT=asys_sendmsg down by 1 or more per request, rsys_recvmsg down, s_cycles at least 5 percent lower (597 estimates 8 to 15 us)
+FALSIFY=asys_sendmsg unchanged, or s_cycles NO CLAIM in both cells

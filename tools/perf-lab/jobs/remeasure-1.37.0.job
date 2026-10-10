@@ -1,0 +1,16 @@
+# Remeasure 1.37.0 vs 1.36.1 for gist f5982635 (Drupal warm fork) baseline — perf lab hello/capp
+# Gist measured 1.36.1 rootless + PHP 8.4 + Drupal 11.4.6; this reruns the lab's hello gate on the reference bench host at 1.37.0
+JOB=remeasure-1.37.0
+ISSUE=https://gist.github.com/andypost/f5982635f996e48b3973282602c48eae
+REV_A=1.36.1
+REV_B=1.37.0
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=report 1.37.0 vs 1.36.1 delta (improvements/regressions) with null gate
+FALSIFY=null band over 5% or busy

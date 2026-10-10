@@ -1,0 +1,16 @@
+# Job 1: the null gate at production cell length, master against itself.
+# 597 wave 5, rerun protocol. Run it first on any day you run jobs 3 to 5.
+JOB=01-null-hello
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=origin/master
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=null band of s_instructions and r_instructions at or under 2.5 percent in both cells
+FALSIFY=a counter band over 3 percent: the instrument cannot resolve the wave 0 items; fix the lab first

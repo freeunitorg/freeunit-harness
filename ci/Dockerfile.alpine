@@ -1,0 +1,78 @@
+# Alpine build environment for FreeUnit. Same two targets as Dockerfile.dev:
+#
+#   --target test   build unitd + PHP and run the suite.
+#   --target full   adds the other language toolchains and the clang-ast plugin.
+#
+# Why Alpine as well as Debian:
+#
+#  - It is what FreeUnit is packaged for downstream (aports `community/freeunit`),
+#    so musl-vs-glibc differences show up here rather than in a user's bug report.
+#  - Almost everything is precompiled, including php8x-embed, so the image is a
+#    fraction of the Debian one and builds in seconds rather than minutes.
+#  - It is the practical base for emulated cross-architecture runs: alpine:edge
+#    is multi-arch, so the same file builds for linux/arm/v7 under qemu. See
+#    skills/freeunit-cross-arch/references/emulated-repro.md — qemu-user since 6.0 enforces the ARM alignment
+#    checks, which is what makes an emulated reproduction meaningful.
+#
+# alpine:edge is a rolling target on purpose: it is where a toolchain change
+# (a new gcc, a new musl) breaks the build first, which is the point of testing
+# against it. If you need reproducibility rather than early warning, pin a
+# release tag instead.
+
+# ---------------------------------------------------------------- base
+FROM alpine:edge AS base
+
+RUN apk add --no-cache \
+        build-base \
+        openssl-dev pcre2-dev linux-headers \
+        git curl make
+
+WORKDIR /src
+
+# ---------------------------------------------------------------- test
+FROM base AS test
+
+# PHP_V selects the embed SAPI to build against; edge carries several in
+# parallel (php83/php84/php85).
+#
+# Building the PHP module on Alpine needs three things that are not needed on
+# Debian, all verified against this image:
+#
+#  1. --config=php-config<V>. Alpine suffixes the binary; Unit defaults to a
+#     bare `php-config`.
+#  2. --lib-path=/usr/lib/php<V>. php<V>-embed installs libphp.so into
+#     /usr/lib/php<V>/, but Unit links `-lphp` and only emits a -L when
+#     --lib-path is given (auto/modules/php). Without it both the "PHP version"
+#     and "PHP embed SAPI" probes fail and configure stops with
+#     "no PHP embed SAPI found" — which reads like a missing package.
+#  3. -Wno-attributes on the CORE configure's --cc-opt. PHP 8.5's headers
+#     declare __attribute__((preserve_none)) (zend_vm_opcodes.h), which gcc
+#     15.2 does not know. Unit compiles feature probes with -Werror, so the
+#     ignored-attribute warning becomes [-Werror=attributes] and the probe
+#     fails to compile. It must go on the core configure because auto/save
+#     records --cc-opt into build/autoconf.data for the module to inherit.
+#     Clang accepts the attribute, so building with --cc=clang also works.
+ARG PHP_V=85
+ENV PHP_CONFIG=php-config${PHP_V} \
+    PHP_LIB_PATH=/usr/lib/php${PHP_V} \
+    UNIT_CC_OPT=-Wno-attributes
+
+RUN apk add --no-cache \
+        php${PHP_V}-dev php${PHP_V}-embed \
+        python3 py3-pytest \
+        procps-ng apache2-utils
+
+# ---------------------------------------------------------------- full
+FROM test AS full
+
+RUN apk add --no-cache \
+        clang llvm-dev binutils \
+        perl-dev ruby-dev \
+        openjdk21 nodejs npm \
+        cargo cmake
+
+# The clang-ast convention gate; see the note in Dockerfile.dev about why a C++
+# compiler is required. build-base already provides g++ here.
+RUN git clone --depth 1 https://github.com/freeunitorg/clang-ast.git -b unit /opt/clang-ast \
+    && make -C /opt/clang-ast
+ENV CLANG_AST=/opt/clang-ast

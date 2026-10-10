@@ -1,0 +1,31 @@
+# Job 17: static: per-thread memo of the Last-Modified and ETag strings
+# (branch perf/static-meta-memo, not pushed). B is master plus that patch.
+# Item P1 of docs/perf/precompute-audit-2026-10-07.md and the "Wave 4" comment
+# of https://github.com/freeunitorg/freeunit/issues/597 (2026-10-07).
+# Before the change each static response ran nxt_gmtime(), nxt_http_date() and
+# nxt_sprintf() to format both fields. B keeps them in a 16-slot table per
+# router thread, keyed by the whole-second mtime and the size.
+# Measured before the lab (callgrind, user space only, router process, release
+# build at -O, gcc 14.2, 2000 keep-alive GET of a 1 KiB file, two runs each):
+# A 12,746 and 12,744, B 11,177 and 11,178 instructions per request, so 1,566
+# fewer (12.3 percent of user-space router instructions). The lab counts kernel
+# instructions too, so its percentage is smaller; the absolute delta is the
+# check.
+# The workload requests one file, so every request after the first hits the
+# memo. A site with many files hits less often; a miss costs what A costs.
+JOB=17-static-meta-memo
+ISSUE=docs/perf/precompute-audit-2026-10-07.md
+REV_A=origin/master
+REV_B=origin/master
+PATCH_B=patches/static-meta-memo.diff
+WORKLOAD=static1k
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+STRACE=1
+PRIMARY=r_instructions
+FUNCS=unitd:nxt_http_static_send
+EXPECT=r_instructions lower in B by about 1,500 per request, a CLAIM if that is above the null band of job 06-null-static1k (guess 2.5 to 3 percent); every rsys_ syscall count equal in A and B; ok equal, bad 0, alerts 0
+FALSIFY=r_instructions NO CLAIM or higher in B, or any rsys_ count that differs between A and B

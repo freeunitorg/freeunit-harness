@@ -1,0 +1,23 @@
+# Job 13 (not in the first list): LTO alone for libunit in an external app.
+# Job 11 cannot separate LTO from -O2 for libunit, because the cc -O2 of the
+# lab_capp link (remote.sh:156) lifts the fat libunit.a objects to -O2 in B.
+# Here both sides have libunit.a at -O2: A is master 856d23b9e plus
+# patches/cflags-o2.diff, B adds LTO with patches/cflags-o2-lto-fat.diff. The
+# difference between the sides is LTO only (unitd, libnxt.a and libunit).
+# How the patch is applied, the lab image and the reasons for the empty FUNCS
+# and for STRACE=0 are in the header of job 07.
+# PRIMARY is s_instructions, as in job 11.
+JOB=13-o2-lto-capp
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=856d23b9ed2cecbd96d5452cf790f828fc55d700
+PATCH_A=patches/cflags-o2.diff
+PATCH_B=patches/cflags-o2-lto-fat.diff
+WORKLOAD=capp
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=s_instructions
+EXPECT=s_instructions lower in B by more than the null band (guess before any run: 0 to 3 percent); r_instructions lower as in job 09; ok equal, bad 0, alerts 0
+FALSIFY=s_instructions NO CLAIM or NOISY, or higher in B: LTO for libunit gives nothing this lab can resolve once both sides are at -O2

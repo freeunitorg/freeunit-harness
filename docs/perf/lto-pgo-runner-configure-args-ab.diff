@@ -1,0 +1,105 @@
+Proposal, not applied. Optional per-side configure arguments for the perf lab runner.
+Keys CONFIGURE_ARGS_A and CONFIGURE_ARGS_B replace the shared CONFIGURE_ARGS for one side.
+A side that does not set its key keeps CONFIGURE_ARGS, so existing jobs, tree names and build stamps do not change.
+With it, a future ./configure --lto can be tested as CONFIGURE_ARGS_B=--lto, without a source patch.
+Tree name gets -c<hash of the arguments> when they differ from the shared ones, so A and B never build in one tree.
+The build stamp (remote.sh, .lab-build) now hashes the arguments of that side.
+perf-job.sh: one phase only when revs, patches and arguments are all equal.
+Apply from the harness root with: patch -p1 < docs/perf/lto-pgo-runner-configure-args-ab.diff
+Not covered: the CONFIGURE_ARGS row of the key table in docs/perf/perf-lab.md needs two more keys.
+
+--- a/tools/perf-job.sh
++++ b/tools/perf-job.sh
+@@ -69,11 +69,14 @@
+     say "resuming run $RUN_ID"
+ else
+ # ---- job file -------------------------------------------------------------
+-JOB_KEYS='JOB|REV_A|REV_B|PATCH_A|PATCH_B|WORKLOAD|CONNS|DUR|WARM|REPS|RATE|APP_PROCS|PERF|STRACE|STRACE_SEC|STRACE_RATE|NULL_GATE|NULL_LIMIT_PCT|PRIMARY|FUNCS|CONFIGURE_ARGS|ISSUE|EXPECT|FALSIFY'
++JOB_KEYS='JOB|REV_A|REV_B|PATCH_A|PATCH_B|WORKLOAD|CONNS|DUR|WARM|REPS|RATE|APP_PROCS|PERF|STRACE|STRACE_SEC|STRACE_RATE|NULL_GATE|NULL_LIMIT_PCT|PRIMARY|FUNCS|CONFIGURE_ARGS|CONFIGURE_ARGS_A|CONFIGURE_ARGS_B|ISSUE|EXPECT|FALSIFY'
+ WORKLOAD=hello CONNS=6 DUR=8 WARM=2 REPS=2 RATE="" APP_PROCS=4 PERF=0 STRACE=0
+ STRACE_SEC=3 STRACE_RATE=2000 NULL_GATE=1 NULL_LIMIT_PCT=5 PRIMARY=server_us FUNCS=""
+ CONFIGURE_ARGS="" PATCH_A="" PATCH_B="" JOB="" REV_A="" REV_B=""
++unset CONFIGURE_ARGS_A CONFIGURE_ARGS_B
+ read_kv "$JOBFILE" "$JOB_KEYS"
++# Per-side configure arguments replace the shared ones; a side that does not set its key keeps them.
++CONFIGURE_ARGS_A=${CONFIGURE_ARGS_A-$CONFIGURE_ARGS} CONFIGURE_ARGS_B=${CONFIGURE_ARGS_B-$CONFIGURE_ARGS}
+ [ -n "$JOB" ] && [ -n "$REV_A" ] && [ -n "$REV_B" ] || usage_die "$JOBFILE needs JOB, REV_A and REV_B"
+ [[ "$JOB" =~ ^[A-Za-z0-9._-]+$ ]] || usage_die "JOB may hold only letters, digits, dot, dash, underscore"
+ case "$WORKLOAD" in hello|static1k|capp) ;; *) usage_die "WORKLOAD $WORKLOAD is not built yet (hello, static1k, capp)" ;; esac
+@@ -88,7 +91,7 @@
+ done
+ 
+ ncells=$(echo $CONNS | wc -w)
+-nph=2; [ "$REV_A" = "$REV_B" ] && [ -z "$PATCH_A$PATCH_B" ] && nph=1
++nph=2; [ "$REV_A" = "$REV_B" ] && [ -z "$PATCH_A$PATCH_B" ] && [ "$CONFIGURE_ARGS_A" = "$CONFIGURE_ARGS_B" ] && nph=1
+ per_block=$(( 8 * (WARM + DUR + 2) + (STRACE == 1 ? 2 * (WARM + STRACE_SEC + 3) : 0) ))
+ EST_MIN=$(( (REPS * ncells * nph * per_block + 59) / 60 ))
+ RUN_ID="$JOB-$(date -u +%Y%m%dT%H%M%SZ)"
+@@ -107,7 +110,7 @@
+ : "${BUILD_JOBS:=8}" "${SHORT_JOB_MIN:=15}" "${IDLE_MAX_PCT:=5}" "${WAIT_MAX_MIN:=30}" "${LEGACY_CLAIM_MAX_H:=72}"
+ {
+     for k in JOB RUN_ID LAB_WHO EST_MIN REV_A REV_B WORKLOAD CONNS DUR WARM REPS RATE APP_PROCS \
+-             PERF STRACE STRACE_SEC STRACE_RATE NULL_GATE NULL_LIMIT_PCT PRIMARY FUNCS CONFIGURE_ARGS \
++             PERF STRACE STRACE_SEC STRACE_RATE NULL_GATE NULL_LIMIT_PCT PRIMARY FUNCS CONFIGURE_ARGS CONFIGURE_ARGS_A CONFIGURE_ARGS_B \
+              REMOTE_WORKDIR CLAIM_DIR LAB_IMAGE OHA REPO_URL SERVER_CPUS LOAD_CPUS PERF_WINDOW \
+              GOVERNOR SHORT_JOB_MIN IDLE_MAX_PCT WAIT_MAX_MIN LEGACY_CLAIM_MAX_H BUILD_JOBS; do
+         printf '%s=%q\n' "$k" "${!k:-}"
+--- a/tools/perf-lab/remote.sh
++++ b/tools/perf-lab/remote.sh
+@@ -11,6 +11,7 @@
+ cd "$RUN" || exit 1
+ # shellcheck disable=SC1091
+ . ./job.env
++CONFIGURE_ARGS_A=${CONFIGURE_ARGS_A-$CONFIGURE_ARGS} CONFIGURE_ARGS_B=${CONFIGURE_ARGS_B-$CONFIGURE_ARGS}
+ LAB=$(cd "$(dirname "$0")" && pwd)
+ W=$REMOTE_WORKDIR
+ CLAIM="$CLAIM_DIR/CLAIMED-perflab-$RUN_ID"
+@@ -140,10 +141,12 @@
+ SHA_B=$(resolve "$REV_B") || fail "cannot resolve REV_B=$REV_B"
+ IMG=$(docker image inspect "$LAB_IMAGE" --format '{{.Id}}' 2>/dev/null) || fail "no image $LAB_IMAGE on this box; build it from tools/perf-lab/Dockerfile"
+ 
+-prepare() {  # sha patchfile -> prints tree path
+-    local sha=$1 patch=$2 name t
++prepare() {  # sha patchfile configure-args -> prints tree path
++    local sha=$1 patch=$2 cfg=$3 name t
+     name=${sha:0:12}
+     [ -n "$patch" ] && name="$name-p$(sha256sum "$patch" | cut -c1-8)"
++    # Arguments that differ from the shared ones get their own tree, so the two sides never share one.
++    [ "$cfg" != "$CONFIGURE_ARGS" ] && name="$name-c$(echo "$cfg" | sha256sum | cut -c1-8)"
+     t=$W/trees/$name
+     if [ ! -f "$t/.lab-src-ok" ]; then
+         rm -rf "$t"; mkdir -p "$t"
+@@ -154,11 +157,11 @@
+     local extra="" php=""
+     [ "$WORKLOAD" = hello ] && php="./configure php >/dev/null && make -j$BUILD_JOBS php >/dev/null &&"
+     [ "$WORKLOAD" = capp ] && extra="make -j$BUILD_JOBS build/lib/libunit.a >/dev/null && cc -O2 -I src -I build/include -o build/lab_capp src/test/nxt_unit_app_test.c build/lib/libunit.a -lpthread &&"
+-    local stamp; stamp=$(echo "$IMG $CONFIGURE_ARGS $WORKLOAD" | sha256sum | cut -c1-16)
++    local stamp; stamp=$(echo "$IMG $cfg $WORKLOAD" | sha256sum | cut -c1-16)
+     if [ "$(cat "$t/.lab-build" 2>/dev/null)" != "$stamp" ] || [ ! -x "$t/build/sbin/unitd" ]; then
+         log "building $name ($WORKLOAD) in $LAB_IMAGE" >&2
+         docker run --rm --user "$(id -u):$(id -g)" -v "$t:/src" -w /src "$LAB_IMAGE" sh -c \
+-            "./configure $CONFIGURE_ARGS >/dev/null && make -j$BUILD_JOBS unitd >/dev/null && $php $extra true" \
++            "./configure $cfg >/dev/null && make -j$BUILD_JOBS unitd >/dev/null && $php $extra true" \
+             > "$RUN/build-$name.log" 2>&1 || { tail -20 "$RUN/build-$name.log" >&2; return 1; }
+         echo "$stamp" > "$t/.lab-build"
+     fi
+@@ -167,8 +170,8 @@
+ PA=""; PB=""
+ [ -n "${PATCH_A:-}" ] && PA=$RUN/patch-A.diff
+ [ -n "${PATCH_B:-}" ] && PB=$RUN/patch-B.diff
+-TA=$(prepare "$SHA_A" "$PA") || fail "build A failed"
+-TB=$(prepare "$SHA_B" "$PB") || fail "build B failed"
++TA=$(prepare "$SHA_A" "$PA" "$CONFIGURE_ARGS_A") || fail "build A failed"
++TB=$(prepare "$SHA_B" "$PB" "$CONFIGURE_ARGS_B") || fail "build B failed"
+ UA=$(sha256sum "$TA/build/sbin/unitd" | cut -c1-16)
+ UB=$(sha256sum "$TB/build/sbin/unitd" | cut -c1-16)
+ PHASES="null ab"
+@@ -204,6 +207,8 @@
+ sha_b=$SHA_B
+ patch_a=${PATCH_A:-}
+ patch_b=${PATCH_B:-}
++configure_args_a=$CONFIGURE_ARGS_A
++configure_args_b=$CONFIGURE_ARGS_B
+ unitd_a=$UA
+ unitd_b=$UB
+ phases=$PHASES

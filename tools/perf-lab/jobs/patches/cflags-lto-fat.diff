@@ -1,0 +1,17 @@
+Perf lab mutation for jobs 07, 10, 11 and 12 (LTO, -O2, PGO series). Base: freeunit master 856d23b9e.
+Adds -flto=auto -ffat-lto-objects after the -O line of the gcc branch of auto/cc/test.
+Fat objects hold machine code and gcc IR, so plain ar, nm and the cc link of lab_capp keep working.
+The clang branch is not changed: the lab image has gcc only (clang 21 also accepts -flto=auto, as full LTO).
+tools/perf-lab/remote.sh applies this with patch -p1 to the unpacked tree, before ./configure.
+diff --git a/auto/cc/test b/auto/cc/test
+index ac4d5f3..151de3d 100644
+--- a/auto/cc/test
++++ b/auto/cc/test
+@@ -72,6 +72,7 @@ case $NXT_CC_NAME in
+         NXT_CFLAGS="$NXT_CFLAGS -std=gnu11"
+ 
+         NXT_CFLAGS="$NXT_CFLAGS -O"
++        NXT_CFLAGS="$NXT_CFLAGS -flto=auto -ffat-lto-objects"
+         NXT_CFLAGS="$NXT_CFLAGS -Wall -Wextra"
+ 
+         #NXT_CFLAGS="$NXT_CFLAGS -Wunused-result"

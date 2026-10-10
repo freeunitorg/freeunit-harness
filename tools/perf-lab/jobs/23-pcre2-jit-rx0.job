@@ -1,0 +1,20 @@
+# PR 551, opt-in PCRE2 JIT: router cost per request, workload rx0.
+# Control: the Drupal how-to deny list as 32 globs, no regex, then return 200 (/node/42/edit).
+# A and B are the same SHA (head of perf/optional-pcre2-jit, pinned);
+# B adds ./configure --regex-jit. No application: router only.
+# Check that meta.txt shows regex_jit_b=yes and pcre2_jit=yes before reading the verdict.
+JOB=23-pcre2-jit-rx0
+ISSUE=https://github.com/freeunitorg/freeunit/pull/551
+REV_A=b6589ae2921f0726c9dcc94534137a8beaf7ceca
+REV_B=b6589ae2921f0726c9dcc94534137a8beaf7ceca
+CONFIGURE_ARGS_A=
+CONFIGURE_ARGS_B=--regex-jit
+WORKLOAD=rx0
+CONNS=16
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_cycles
+EXPECT=no change: r_cycles NO CLAIM, delta inside the null band
+FALSIFY=a CLAIM on r_cycles: the JIT build changes the router without any regex, so the other three jobs measure more than the matcher

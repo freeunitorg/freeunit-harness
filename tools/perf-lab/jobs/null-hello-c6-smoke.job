@@ -1,0 +1,15 @@
+# Smoke and null gate of the day: master against itself, hello.php, c=6.
+# About 1 minute of cells. Use it to check the lab and to read today's noise.
+JOB=null-hello-c6-smoke
+REV_A=origin/master
+REV_B=origin/master
+WORKLOAD=hello
+CONNS=6
+WARM=1
+DUR=2
+REPS=2
+PERF=1
+STRACE=1
+STRACE_SEC=2
+STRACE_RATE=2000
+PRIMARY=s_cycles

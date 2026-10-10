@@ -1,0 +1,24 @@
+# Job 19: PR 629 as merged, a pure revision A/B (no patch).
+# https://github.com/freeunitorg/freeunit/pull/629
+# A = 24ea96ed2, the parent of the PR commit on origin/master.
+# B = 1a695b4f3, "static: keep the Last-Modified and ETag strings per thread".
+# Replaces 17-static-meta-memo.job (B = master + patch). The merged code differs
+# from patches/static-meta-memo.diff in 33 changed lines (review rounds).
+# Callgrind before the lab (user space, router): about 1,566 fewer instructions
+# per static response. The lab counts kernel instructions too.
+# One cell (c=6), so the job stays under SHORT_JOB_MIN and runs outside PERF_WINDOW.
+JOB=19-static-memo-merged
+ISSUE=https://github.com/freeunitorg/freeunit/pull/629
+REV_A=24ea96ed27e4f1459ab9ccf11752ed40e96db4c9
+REV_B=1a695b4f3146163e5a27e2ff91c349d14c05a251
+WORKLOAD=static1k
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+STRACE=1
+PRIMARY=r_instructions
+FUNCS=unitd:nxt_http_static_send
+EXPECT=r_instructions lower in B by about 1,500 per request; every rsys_ syscall count equal in A and B; ok equal, bad 0, alerts 0
+FALSIFY=r_instructions NO CLAIM or higher in B, or any rsys_ count that differs between A and B

@@ -1,0 +1,26 @@
+# Job 17: config-time decisions in set_headers and compression (branch
+# perf/http-config-precompute, not pushed; B is master d50d12c26 plus
+# patches/http-config-precompute.diff, the four commits of that branch).
+# Workload static1k-hdrs: the static1k share plus three constant
+# "response_headers", compression off.  oha sends the Accept-Encoding of a
+# browser on every request.
+# NEEDS the runner patch jobs/17-runner-ae-workload.patch (the AE key and the
+# static1k-hdrs workload); without it perf-job.sh refuses the WORKLOAD.
+# Callgrind on the reference bench host (fixed request count, 1300 minus 300 requests, one
+# keep-alive connection) counted the router per request: master 18368.5,
+# B 16847.0 (-8.3%).  Without Accept-Encoding and headers (plain static1k)
+# the count was 15035.1 against 14797.3 (-1.6%), under the lab band.
+JOB=17-http-config-precompute
+REV_A=d50d12c26fd390d92542ecc69cdc9e0aca7b1ba9
+REV_B=d50d12c26fd390d92542ecc69cdc9e0aca7b1ba9
+PATCH_B=patches/http-config-precompute.diff
+WORKLOAD=static1k-hdrs
+AE=gzip, deflate, br, zstd
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by 6 to 10 percent (callgrind: 8.3 percent); s_instructions follows; ok equal, bad 0, alerts 0
+FALSIFY=r_instructions NO CLAIM, NOISY or a drop under 5 percent: the counted saving does not reach the oha path (check that the header arrives: a response to "identity;q=0" must be 406 in A and B)

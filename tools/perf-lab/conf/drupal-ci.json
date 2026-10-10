@@ -1,0 +1,57 @@
+{
+ "listeners": {
+  "127.0.0.1:@PORT@": {
+   "pass": "routes/rx"
+  }
+ },
+ "routes": {
+  "rx": [
+   {
+    "match": {
+     "uri": [
+      "!~(?i)/\\.well-known/",
+      "~(?i)^/vendor/",
+      "~(?i)^/core/profiles/demo_umami/modules/demo_umami_content/default_content/",
+      "~(?i)\\.engine$",
+      "~(?i)\\.inc$",
+      "~(?i)\\.install$",
+      "~(?i)\\.make$",
+      "~(?i)\\.module$",
+      "~(?i)\\.po$",
+      "~(?i)\\.profile$",
+      "~(?i)\\.sh$",
+      "~(?i)\\.theme$",
+      "~(?i)\\.tpl$",
+      "~(?i)\\.twig$",
+      "~(?i)\\.xtmpl$",
+      "~(?i)\\.yml$",
+      "~(?i)/\\.",
+      "~(?i)/Entries",
+      "~(?i)/Repository$",
+      "~(?i)/Root$",
+      "~(?i)/Tag$",
+      "~(?i)/Template$",
+      "~(?i)/composer\\.json$",
+      "~(?i)/composer\\.lock$",
+      "~(?i)/web\\.config$",
+      "~(?i)sql$",
+      "~(?i)\\.bak$",
+      "~(?i)\\.orig$",
+      "~(?i)\\.save$",
+      "~(?i)\\.swo$",
+      "~(?i)\\.swp$",
+      "~(?i)~$"
+     ]
+    },
+    "action": {
+     "return": 404
+    }
+   },
+   {
+    "action": {
+     "return": 200
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,415 @@
+#!/bin/bash
+# test-isolated — run the pytest suite without colliding with another agent's
+# unitd, so several worktrees can be tested at once.
+#
+# THE PROBLEM
+#   The suite names its listeners literally. test/unit/check/chroot.py and
+#   check/isolation.py bind "*:8080" during session-startup capability
+#   probing, before any test is selected, and the language helpers
+#   (test/unit/applications/lang/*.py) bind it per application.
+#
+#   So when a second unitd holds :8080 — another agent, another worktree, a
+#   leftover daemon — EVERY pytest invocation in that checkout fails during
+#   startup, whichever test file you asked for:
+#
+#     [alert] bind("0.0.0.0:8080") failed (98: Address already in use)
+#     INTERNALERROR> ... pytest_sessionstart ... Log.check_alerts()
+#
+#   Selecting a different test does not help; the probe runs first. And
+#   "*:8080" is a wildcard bind, so the collision is host-wide — you cannot
+#   dodge it by binding a different interface.
+#
+# THE FIX, SINCE FREEUNIT 2149f582
+#   FreeUnit commit 2149f5829903d65637709641de7429fbcf83083f ("test: take the
+#   suite off a fixed *:8080", PR 406) gave the suite a "--port N" option.
+#   test/unit/port.py shifts every known literal (8080-8085, 8090, 8443 and
+#   the helper ports 7976-7999) by "N - 8080", and the capability probes go
+#   through the same map. A base must be 8080 + k * 1000 up to 32080. The
+#   mapped band of one base is 468 ports wide, so two bases never share a
+#   port.
+#
+#   Moving the ports is cheaper than isolating a namespace: no root, no
+#   docker, no AppArmor question. So this script uses "--port" when it can:
+#
+#   port       the checkout has test/unit/port.py. Run pytest with --port N
+#              and nothing else. The base comes from --port, or the script
+#              picks the first free one. This is the default.
+#
+#   The namespace ladder stays, for the cases --port does not cover (see
+#   below) and for a checkout older than 2149f582:
+#
+#   direct     you already have a private netns — a Claude Code web session, a
+#              devcontainer, any container-per-agent setup. Nothing to
+#              isolate; just run. This is the common case in hosted
+#              environments, where Docker-in-Docker is usually unavailable
+#              anyway.
+#   container  a shared host with docker: each container gets its own netns, so
+#              *:8080 inside is private. No root required.
+#   serialize  a shared host without docker: take an exclusive lock so only one
+#              suite runs at a time. No parallelism, but you wait instead of
+#              failing at startup.
+#
+#   Unprivileged `unshare --net` would be lighter than a container, but it needs
+#   CAP_SYS_ADMIN, and the user-namespace route is blocked wherever
+#   kernel.apparmor_restrict_unprivileged_userns=1. Checked automatically below.
+#
+# WHAT --port DOES NOT COVER
+#   Two tests bind the abstract Unix socket "unix:@sock" by that fixed name:
+#
+#     test/test_unix_abstract.py
+#     test/test_asgi_application_unix_abstract.py
+#
+#   An abstract socket name is per network namespace, not per port, so --port
+#   cannot move it. Two runs that reach either file at the same time collide.
+#   PORT_UNSAFE below lists them; auto mode sees them in your selection and
+#   uses the namespace ladder instead. The default selection is the whole
+#   "test" tree, which contains them, so the default stays on the ladder.
+#
+#   Separately, two runs on ONE checkout share files no namespace separates:
+#
+#     test/test_asgi_lifespan.py writes its startup and shutdown cookies into
+#     <src>/test/python/lifespan/empty.
+#     test/unit/applications/lang/go.py sets GOPATH to <src>/build/go, which
+#     a concurrent `go build` corrupts.
+#
+#   Both are shared state inside the checkout, and the container mode mounts
+#   that same checkout. Use two checkouts, not a namespace. `--port` is for
+#   two checkouts on one host.
+#
+#   Not a problem, despite what PR 406's commit message suggests: the ":8080"
+#   in test/go/*/app.go and the ".listen(8080)" in test/node/**/app.js are
+#   dead literals. go/unit.go:141 passes the address to http.ListenAndServe()
+#   only when nxt_cgo_run() fails, which means the app is not under Unit, and
+#   src/nodejs/unit-http/http_server.js:467 ignores every argument of
+#   listen(). Neither fixture binds a TCP port under Unit.
+#
+# USAGE
+#   tools/test-isolated [options] [pytest args...]
+#
+#     -s, --src DIR    checkout to test (default: harness-managed ./src)
+#     --port N         base TCP port: 8080, 9080, ... 32080, or "auto"
+#     --mode MODE      auto | port | direct | container | serialize
+#                      (default auto)
+#     --distro NAME    debian | alpine        (default alpine — smaller/faster)
+#     --platform P     linux/amd64, linux/arm/v7, …  (default: host)
+#
+#   tools/test-isolated -s /path/to/worktree --port 9080 test/test_static.py
+#   tools/test-isolated -s /path/to/worktree --port auto test/test_static.py
+#   tools/test-isolated -s /path/to/worktree test/test_unix_abstract.py
+#   tools/test-isolated --distro debian test/test_php_application.py
+#   tools/test-isolated --platform linux/arm/v7 test/test_static.py
+
+set -euo pipefail
+
+HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="${UNIT_SRC:-$HARNESS/src}"
+MODE="${MODE:-auto}"
+DISTRO="${DISTRO:-alpine}"
+PLATFORM="${PLATFORM:-}"
+LOCKFILE="${LOCKFILE:-/tmp/freeunit-test-suite.lock}"
+PORT="${PORT:-}"
+
+# The map in test/unit/port.py: MIN_BASE, STEP and MAX_BASE. Kept here so the
+# script can pick a base without importing the suite. If port.py changes
+# these, change them here.
+MIN_BASE=8080
+STEP=1000
+MAX_BASE=32080
+# The lowest and the highest literal the map knows, for the band check.
+BAND_LOW=7976
+BAND_HIGH=8443
+
+# The tests --port does not isolate, because they name a resource that is not
+# a port. Verified against FreeUnit 2149f582.
+PORT_UNSAFE=(
+    test/test_unix_abstract.py              # binds "unix:@sock"
+    test/test_asgi_application_unix_abstract.py  # binds "unix:@sock"
+)
+
+mode_given=0
+port_given=0
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -s|--src)   SRC="$2"; shift 2 ;;
+        --port)     PORT="$2"; port_given=1; shift 2 ;;
+        --mode)     MODE="$2"; mode_given=1; shift 2 ;;
+        --distro)   DISTRO="$2"; shift 2 ;;
+        --platform) PLATFORM="$2"; shift 2 ;;
+        --help|-h)  sed -n '2,100p' "$0"; exit 0 ;;
+        *)          args+=("$1"); shift ;;
+    esac
+done
+[ ${#args[@]} -gt 0 ] || args=(test)
+
+[ -f "$SRC/configure" ] || { echo "not a FreeUnit checkout: $SRC" >&2; exit 1; }
+
+SRC="$(cd "$SRC" && pwd)"
+
+# --- situation detection -----------------------------------------------------
+
+in_container() {
+    if [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then
+        return 0
+    fi
+    # pid 1 being an init system is good evidence we are NOT containerized.
+    case "$(ps -o comm= -p 1 2>/dev/null)" in
+        systemd|init|launchd) return 1 ;;
+    esac
+    grep -qE '(docker|libpod|kubepods|containerd)' /proc/1/cgroup 2>/dev/null
+}
+
+port_is_held() {
+    command -v ss >/dev/null || return 1
+    ss -lntH 'sport = :8080' 2>/dev/null | grep -q .
+}
+
+docker_usable() { command -v docker >/dev/null && docker info >/dev/null 2>&1; }
+
+# Does this checkout understand --port? port.py is what PR 406 added, and
+# conftest.py reads it. An older checkout gets the namespace ladder.
+port_supported() { [ -f "$SRC/test/unit/port.py" ]; }
+
+# Is any port of the band of this base already listening? The band is the
+# mapped range of the whole literal set, so one free band is one free suite.
+band_is_held() {
+    local base=$1 low=$((BAND_LOW + $1 - MIN_BASE)) high=$((BAND_HIGH + $1 - MIN_BASE))
+    command -v ss >/dev/null || return 1
+    ss -lntH "sport >= :$low and sport <= :$high" 2>/dev/null | grep -q .
+}
+
+base_is_valid() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge "$MIN_BASE" ] && [ "$1" -le "$MAX_BASE" ] \
+        && [ $((($1 - MIN_BASE) % STEP)) -eq 0 ]
+}
+
+# Take the lock of a base, and keep it for the run. Two scripts that check the
+# same free band in the same second would otherwise both pick it.
+LOCKFD=
+take_base_lock() {
+    command -v flock >/dev/null || return 0
+    exec {LOCKFD}>"/tmp/freeunit-test-port-$1.lock" || return 0
+    flock -n "$LOCKFD"
+}
+
+# The first base whose band is free and whose lock is free, into PICKED_BASE.
+# It writes a variable and prints nothing on purpose: a command substitution
+# runs in a subshell, and the subshell would exit and drop the lock.
+PICKED_BASE=
+pick_base() {
+    local base
+    for ((base = MIN_BASE; base <= MAX_BASE; base += STEP)); do
+        band_is_held "$base" && continue
+        take_base_lock "$base" || continue
+        PICKED_BASE=$base
+        return 0
+    done
+    return 1
+}
+
+# Does the pytest selection reach a test that --port does not isolate?
+# A positional argument is a path or a node id; anything starting with "-" is
+# an option. With no positional argument pytest walks the whole rootdir, so
+# the answer is yes.
+selection_is_port_unsafe() {
+    local arg path file positional=0
+
+    for arg in "${args[@]}"; do
+        case "$arg" in -*) continue ;; esac
+        path="${arg%%::*}"
+        [ -e "$SRC/$path" ] || [ -e "$path" ] || continue
+        positional=1
+
+        for file in "${PORT_UNSAFE[@]}"; do
+            # The selection reaches the file when it IS the file, or when it
+            # is a directory above it.
+            case "$file" in
+                "$path"|"${path%/}"/*) return 0 ;;
+            esac
+        done
+    done
+
+    [ "$positional" -eq 1 ] && return 1
+    return 0
+}
+
+unsafe_reason() {
+    local file
+    echo "     the selection reaches a test that --port does not isolate:" >&2
+    for file in "${PORT_UNSAFE[@]}"; do
+        echo "       $file" >&2
+    done
+    echo "     Those bind the abstract socket \"unix:@sock\" by that fixed" >&2
+    echo "     name, which is per network namespace, not per port." >&2
+}
+
+# --- mode selection ----------------------------------------------------------
+
+if [ "$MODE" = auto ]; then
+    if [ "$port_given" -eq 1 ]; then
+        MODE=port
+        if selection_is_port_unsafe; then
+            echo "WARNING: --port was given, so the suite runs with it, but" >&2
+            unsafe_reason
+            echo "     Use --mode container, or deselect those files." >&2
+        fi
+    elif ! port_supported; then
+        echo "==> $SRC/test/unit/port.py is absent: this checkout predates"
+        echo "    FreeUnit 2149f582, so --port does not exist. Isolating the"
+        echo "    namespace instead."
+    elif selection_is_port_unsafe; then
+        echo "==> not using --port:" >&2
+        unsafe_reason
+    else
+        MODE=port
+    fi
+
+    if [ "$MODE" = auto ]; then
+        if in_container; then
+            MODE=direct
+        elif docker_usable; then
+            MODE=container
+        else
+            MODE=serialize
+        fi
+    fi
+    echo "==> mode: $MODE (auto-detected)"
+fi
+
+# An explicit --mode wins, and an explicit --port is still passed to pytest in
+# that mode. Nothing changes for a caller that passes only --mode.
+if [ "$mode_given" -eq 1 ] && [ "$port_given" -eq 1 ] && [ "$MODE" != port ]; then
+    base_is_valid "$PORT" || { echo "--port must be $MIN_BASE, $((MIN_BASE + STEP)), ... $MAX_BASE" >&2; exit 2; }
+    args=(--port "$PORT" "${args[@]}")
+fi
+
+# --- port --------------------------------------------------------------------
+
+if [ "$MODE" = port ]; then
+    port_supported || {
+        echo "ERROR: $SRC/test/unit/port.py is absent, so this checkout has no" >&2
+        echo "       --port option. It predates FreeUnit 2149f582. Use" >&2
+        echo "       --mode direct, --mode container or --mode serialize." >&2
+        exit 1
+    }
+
+    if [ -z "$PORT" ] || [ "$PORT" = auto ]; then
+        pick_base || {
+            echo "ERROR: every base from $MIN_BASE to $MAX_BASE is in use." >&2
+            exit 1
+        }
+        PORT=$PICKED_BASE
+        echo "==> base port $PORT (first free band)"
+    else
+        base_is_valid "$PORT" || { echo "--port must be $MIN_BASE, $((MIN_BASE + STEP)), ... $MAX_BASE, or auto" >&2; exit 2; }
+        if ! take_base_lock "$PORT"; then
+            echo "WARNING: another test-isolated run holds base $PORT." >&2
+        fi
+        if band_is_held "$PORT"; then
+            echo "WARNING: a port in the band of base $PORT is already listening." >&2
+            echo "         The suite will fail at session start. Try --port auto." >&2
+        fi
+    fi
+
+    cd "$SRC"
+    status=0
+    python3 -m pytest --print-log --port "$PORT" "${args[@]}" || status=$?
+    exit "$status"
+fi
+
+# --- direct ------------------------------------------------------------------
+
+if [ "$MODE" = direct ]; then
+    if port_is_held; then
+        echo "WARNING: something already holds :8080 in this namespace." >&2
+        echo "         The suite wildcard-binds it and will fail at session start." >&2
+        echo "         Stop it, or use --port, --mode container or --mode serialize." >&2
+    fi
+    cd "$SRC"
+    exec python3 -m pytest --print-log "${args[@]}"
+fi
+
+# --- serialize ---------------------------------------------------------------
+
+if [ "$MODE" = serialize ]; then
+    command -v flock >/dev/null || { echo "flock not found; try --mode container" >&2; exit 1; }
+    echo "==> waiting for the suite lock ($LOCKFILE)"
+    exec flock "$LOCKFILE" bash -c '
+        cd "$1"; shift
+        echo "==> got the lock; running pytest $*"
+        python3 -m pytest --print-log "$@"
+    ' _ "$SRC" "${args[@]}"
+fi
+
+# --- container ---------------------------------------------------------------
+
+docker_usable || { echo "docker not usable; try --mode serialize" >&2; exit 1; }
+
+case "$DISTRO" in
+    alpine) DOCKERFILE=Dockerfile.alpine ;;
+    debian) DOCKERFILE=Dockerfile.dev ;;
+    *) echo "unknown --distro '$DISTRO' (debian|alpine)" >&2; exit 2 ;;
+esac
+
+PLAT_ARGS=()
+TAG_SUFFIX=""
+if [ -n "$PLATFORM" ]; then
+    PLAT_ARGS=(--platform "$PLATFORM")
+    TAG_SUFFIX="-$(echo "$PLATFORM" | tr '/' '-')"
+    # Emulated runs need a binfmt handler on the host; without one the container
+    # starts and every exec dies with "exec format error".
+    if ! ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -qi qemu; then
+        echo "WARNING: no qemu binfmt handlers registered; a foreign --platform will fail." >&2
+        echo "         Register them with: docker run --privileged --rm tonistiigi/binfmt --install all" >&2
+    fi
+fi
+
+IMAGE="freeunit-harness/ci:${DISTRO}-test${TAG_SUFFIX}"
+
+docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+    echo "==> building $IMAGE (target: test)"
+    docker build "${PLAT_ARGS[@]}" --target test -t "$IMAGE" \
+        -f "$HARNESS/ci/$DOCKERFILE" "$HARNESS/ci"
+}
+
+# A build made inside the image and a build made on the host are not
+# interchangeable — different libc (musl vs glibc on alpine especially),
+# different module ABI — and conftest.py insists on <source-root>/build for
+# both. Mixing them in one tree produces failures that look like code bugs.
+#
+# Absence of the marker means a foreign build, not an unknown one: only this
+# script writes it. Keying off "marker says host" instead would let every
+# host-built tree through unchecked.
+MARKER="$SRC/build/.built-by"
+WANT="container:${DISTRO}${TAG_SUFFIX}"
+if [ -x "$SRC/build/sbin/unitd" ] && [ "$(cat "$MARKER" 2>/dev/null)" != "$WANT" ]; then
+    echo "ERROR: $SRC/build was not built by this image ($WANT)." >&2
+    echo "       Found: $(cat "$MARKER" 2>/dev/null || echo 'a host build')" >&2
+    echo "       Running it here mixes libc/module ABIs and fails in ways that" >&2
+    echo "       look like code bugs. Use a checkout dedicated to this target," >&2
+    echo "       or rebuild:  rm -rf $SRC/build" >&2
+    exit 1
+fi
+
+echo "==> running the suite in a container (own netns; host :8080 irrelevant)"
+docker run --rm "${PLAT_ARGS[@]}" --init \
+    -v "$SRC:/src" -w /src \
+    -e WANT="$WANT" \
+    "$IMAGE" sh -euc '
+        if [ ! -x build/sbin/unitd ]; then
+            echo "==> building in-container (first run; incremental afterwards)"
+            # The image exports whatever extra flags its toolchain needs
+            # (see ci/Dockerfile.alpine for why Alpine needs three of them).
+            # Output is NOT suppressed: a hidden configure failure here is
+            # indistinguishable from a code bug at the pytest step.
+            ./configure --tests --openssl --debug \
+                ${UNIT_CC_OPT:+--cc-opt="$UNIT_CC_OPT"}
+            make -j"$(nproc)" unitd
+            ./configure php ${PHP_CONFIG:+--config=$PHP_CONFIG} \
+                           ${PHP_LIB_PATH:+--lib-path=$PHP_LIB_PATH}
+            make -j"$(nproc)" php
+            echo "$WANT" > build/.built-by
+        fi
+        exec python3 -m pytest --print-log "$@"
+    ' _ "${args[@]}"

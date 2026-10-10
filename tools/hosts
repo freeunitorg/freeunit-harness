@@ -1,0 +1,151 @@
+#!/bin/bash
+# hosts — resolve a machine ROLE to the ssh name this checkout should use.
+#
+# WHY
+#   Contributor kits differ: a laptop, one or two build boxes, a box with a GPU,
+#   maybe a musl builder and a bot host. Tools that hardcode one person's host
+#   name work for exactly one person, and the failure is quiet: a run meant for
+#   the build box happens on the laptop and measures the laptop.
+#
+# WHERE THE VALUES LIVE
+#   One file, the one the configuration convention already chose:
+#   ${LAB_ENV:-run/lab.env}, gitignored, template tools/perf-lab/lab.env.example.
+#   There is deliberately no second hosts file — two files holding the same fact
+#   is how they drift apart.
+#
+#   | role   | variable in lab.env | falls back to   |
+#   |--------|---------------------|-----------------|
+#   | build  | BUILD_HOST          | - (no fallback) |
+#   | alpine | ALPINE_HOST         | LAB_DOCKER_HOST |
+#   | lab    | PERF_HOST           | -               |
+#   | infer  | INFER_HOST          | -               |
+#   | bot    | BOT_HOST            | -               |
+#   | any    | SSH_USER (all roles)                  |
+#
+#   build has no fallback to PERF_HOST: nothing may share the bench cores, so
+#   `hosts ssh build` with no BUILD_HOST is an error (exit 1).
+#   The file is read by tools/lib/env.sh, as in perf-job.sh and unit-build: a
+#   value may be quoted ("x" or 'x'), and a value set in the environment wins.
+#   ssh port and key belong in ~/.ssh/config under the alias, never here.
+#
+# USAGE
+#   tools/hosts list                 every role, with its ssh target
+#   tools/hosts ssh build            the ssh target for a role (empty if unset)
+#   tools/hosts show build           every value that applies to a role
+#   tools/hosts root build           remote work root (UNIT_REMOTE_ROOT, BUILD_ROOT, REMOTE_WORKDIR)
+#   tools/hosts cache build          remote cache dir (UNIT_REMOTE_CACHE, BUILD_CACHE, root/cache)
+#   tools/hosts reverse HOST         which role uses this ssh name; exit 1 if none
+#   tools/hosts check                consistency report; exit 1 on a real problem
+#
+#   LAB_ENV=/path/to/file overrides the default. tools/unit-build passes -H
+#   through `hosts ssh`, so `-H build` resolves and a literal ssh name still works.
+#   No value from this file is ever printed into an agent prompt.
+set -u
+
+HARNESS=$(cd "$(dirname "$0")/.." && pwd)
+LAB_HARNESS=$HARNESS
+# shellcheck source=lib/env.sh
+. "$HARNESS/tools/lib/env.sh"
+
+die() { printf 'hosts: %s\n' "$*" >&2; exit 1; }
+
+# Shell variables only, not exported: nothing this tool starts needs them.
+lab_env_load
+
+# val NAME: the loaded value of NAME, empty when unset or not a valid name.
+val() {
+    case $1 in ''|[0-9]*|*[!A-Z0-9_]*) printf '\n'; return 0 ;; esac
+    printf '%s\n' "${!1:-}"
+}
+UPPER() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
+
+# host_for ROLE — the ssh name, following the fallback chain in the header.
+host_for() {
+    local h
+    case $(UPPER "$1") in
+        BUILD)  val BUILD_HOST ;;
+        ALPINE) h=$(val ALPINE_HOST); [ -n "$h" ] || h=$(val LAB_DOCKER_HOST); printf '%s\n' "$h" ;;
+        LAB)    val PERF_HOST ;;
+        INFER)  val INFER_HOST ;;
+        BOT)    val BOT_HOST ;;
+        *)      val "$(UPPER "$1")_HOST" ;;
+    esac
+}
+
+ROLES="build alpine lab infer bot"
+
+CMD=${1:-list}
+case $CMD in
+    list)
+        if [ ! -f "$LAB_ENV" ]; then
+            printf 'hosts: no %s — copy tools/perf-lab/lab.env.example there and fill it in\n' "$LAB_ENV"
+            exit 0
+        fi
+        for role in $ROLES; do
+            host=$(host_for "$role")
+            case $role in build|lab) none='unset (needed)' ;; *) none='unset (optional)' ;; esac
+            if [ -n "$host" ]; then mark=ok; else mark=$none; fi
+            printf '%-8s %-24s %s\n' "$role" "${host:-<unset>}" "$mark"
+        done
+        printf '\nfile: %s\n' "$LAB_ENV"
+        ;;
+    ssh)
+        [ -n "${2:-}" ] || die "usage: hosts ssh ROLE"
+        h=$(host_for "$2")
+        if [ -z "$h" ] && [ "$(UPPER "$2")" = BUILD ]; then
+            die "role build has no host: set BUILD_HOST in $LAB_ENV (builds never fall back to PERF_HOST, the bench box)"
+        fi
+        [ -z "$h" ] || printf '%s\n' "$h"
+        ;;
+    show)
+        [ -n "${2:-}" ] || die "usage: hosts show ROLE"
+        printf 'HOST=%s\n' "$(host_for "$2")"
+        printf 'SSH_USER=%s\n' "$(val SSH_USER)"
+        printf 'REMOTE_ROOT=%s\n' "$(val REMOTE_WORKDIR)"
+        printf 'BUILD_JOBS=%s\n' "$(val BUILD_JOBS)"
+        ;;
+    root|remote-root)
+        [ -n "${2:-}" ] || die "usage: hosts root ROLE"
+        lab_build_root
+        ;;
+    cache)
+        [ -n "${2:-}" ] || die "usage: hosts cache ROLE"
+        lab_build_cache
+        ;;
+    reverse)
+        [ -n "${2:-}" ] || die "usage: hosts reverse HOST"
+        found=0
+        for role in $ROLES; do
+            if [ "$(host_for "$role")" = "$2" ]; then printf '%s\n' "$role"; found=1; fi
+        done
+        [ $found -eq 1 ]
+        ;;
+    check)
+        status=0
+        if [ ! -f "$LAB_ENV" ]; then
+            printf 'PROBLEM %s absent; every tool would fall back to localhost\n' "$LAB_ENV"
+            exit 1
+        fi
+        if [ -z "$(host_for build)" ]; then
+            printf 'PROBLEM build has no host (BUILD_HOST); -H build fails\n'
+            status=1
+        fi
+        if [ -z "$(host_for lab)" ]; then
+            printf 'PROBLEM lab has no host (PERF_HOST); perf-job.sh cannot run\n'
+            status=1
+        fi
+        for role in alpine infer bot; do
+            [ -n "$(host_for "$role")" ] || printf 'note    %s unset (optional)\n' "$role"
+        done
+        dupes=$(for role in $ROLES; do host_for "$role"; done | grep -v '^$' | sort | uniq -d)
+        [ -n "$dupes" ] && printf 'note    %s used by more than one role\n' "$(printf '%s' "$dupes" | tr '\n' ' ')"
+        [ $status -eq 0 ] && printf 'ok      host roles consistent (%s)\n' "$LAB_ENV"
+        exit $status
+        ;;
+    -h|--help|help)
+        awk 'NR>1 && /^set -u/{exit} NR>1' "$0"
+        ;;
+    *)
+        die "unknown command $CMD; see tools/hosts help"
+        ;;
+esac

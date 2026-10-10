@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+"""task -- the task ledger: one file per task under run/tasks/, its history in the bus line grammar. Spec: docs/task-ledger.md.
+  task new <id> --title T [--url U] [--dep id]... [--repo R] [--remote R] [--embargo]
+  task claim <id> [--ref R] [--remote R] [--worktree class/name] [--ttl MIN]
+  task note <id> <text...> [--json T]  |  task link <id> k=v...  |  task next <id> <text...>
+  task gate <id> <gate> pass|fail|n/a --evidence E  |  task handoff <id> [--to role@tool]  |  task done <id> [--maintainer]
+  task show <id>  |  task log <id> [--since cursor]  |  task who <link> <value>  |  task mine  |  task ready [--role R]
+  task lease-check <id> | --cwd [--remote R]  |  task reap  |  task brief <id> [--for resume|implement|review] [--short] [--public]
+Every write locks the task file, rewrites its frontmatter, appends one line to it and the same line to the bus (tools/inbox).
+Sender from INBOX_SENDER. Session from TASK_SESSION, else CLAUDE_CODE_SESSION_ID. Root from TASK_ROOT (default run/tasks).
+Exit 0 on success, 1 on a refusal or a lease mismatch, 2 on a usage or setup error."""
+import argparse, contextlib, datetime, fcntl, importlib.machinery, importlib.util, json, math, os, re, subprocess, sys, tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_loader = importlib.machinery.SourceFileLoader("inbox", os.path.join(HERE, "inbox"))   # the bus tool: parser, line format, log
+inbox = importlib.util.module_from_spec(importlib.util.spec_from_loader("inbox", _loader))
+sys.dont_write_bytecode = True
+_loader.exec_module(inbox)
+
+ROOT = os.path.abspath(os.environ.get("TASK_ROOT") or os.path.join(HERE, "..", "run", "tasks"))
+BASE = os.path.dirname(os.path.dirname(ROOT))          # relative paths in links resolve against this (the harness root)
+SENDER = inbox.sender()
+SESSION = os.environ.get("TASK_SESSION") or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+GATES = ("test_fails_prechange", "hardening_strict", "review_gate", "measured_number", "plain_english")
+SHORT_CAP, FULL_CAP = 8 * 1024, 24 * 1024
+ID = re.compile(r"[a-z][a-z0-9-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)+")
+EVIDENCE = re.compile(r"https?://\S+|(?![/~])[^\s:]+:\d+@[0-9a-f]{7,40}")
+STATUS_LINE = re.compile(r"^\s*(?:(?:[-*+]|\d+\.)\s+)?Status: ")
+WORDS = {"true", "false", "null", "yes", "no", "on", "off", "y", "n", "~", ".inf", "-.inf", "+.inf", ".nan", "=", "<<"}
+
+def refuse(msg): sys.exit("task: " + msg)
+def usage(msg): print("task: " + msg, file=sys.stderr); sys.exit(2)
+def now(): return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def to_time(ts): return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+def parses(ts):
+    try: to_time(ts); return True
+    except (TypeError, ValueError): return False
+def not_option(value, what):                           # git would read a leading '-' as an option
+    if value and value.startswith("-"): usage(f"{what} must not start with '-': {value}")
+    return value
+def check_sender():
+    if not re.fullmatch(r"\S+@\S+", SENDER): usage(f"INBOX_SENDER must be role@tool, not {SENDER!r}")
+def size(text): return len(text.encode())
+def first_line(text): return text.strip().split("\n")[0][:300]
+
+# ---- frontmatter: a canonical YAML subset that this tool writes and parses ----
+
+def needs_quotes(s):
+    """A string is written JSON-quoted when a YAML reader could take it for something else."""
+    return (s == "" or s != s.strip() or s.lower() in WORDS or not s.isprintable()
+            or re.search(r'[:#\[\]{}",]', s) is not None or s[0] in "-?&*!|>'%@`"
+            or re.fullmatch(r"[-+0-9.][-+0-9._:eExXoObB]*", s) is not None
+            or re.fullmatch(r"[-+]?(?:0[xX][0-9a-fA-F_]+|0o[0-7]+|0b[01]+)", s) is not None)
+
+def scalar(v):
+    if v is None: return "null"
+    if v is True or v is False: return "true" if v else "false"
+    if isinstance(v, int): return str(v)
+    if isinstance(v, list): return "[" + ", ".join(scalar(x) for x in v) + "]"
+    if v == {}: return "{}"
+    s = str(v)
+    return json.dumps(s, ensure_ascii=not s.isprintable()) if needs_quotes(s) else s
+
+def dump(d, indent=0):
+    out = []
+    for k, v in d.items():
+        if isinstance(v, dict) and v:
+            out.append(" " * indent + f"{k}:")
+            out += dump(v, indent + 2)
+        else:
+            out.append(" " * indent + f"{k}: {scalar(v)}")
+    return out
+
+def split_flow(inner):
+    items, pos, item = [], 0, re.compile(r'\s*("(?:[^"\\]|\\.)*"|[^,"]*?)\s*(?:,|$)')
+    while pos < len(inner):
+        m = item.match(inner, pos)
+        if not m or m.end() == pos: raise ValueError(f"bad flow list: [{inner}]")
+        items.append(m.group(1)); pos = m.end()
+    return items
+
+def parse_scalar(s):
+    if s == "null": return None
+    if s in ("true", "false"): return s == "true"
+    if s == "{}": return {}
+    if s.startswith("{"): raise ValueError(f"flow maps are outside the subset, write a block map: {s}")
+    if re.fullmatch(r"-?[0-9]+", s): return int(s)
+    if s.startswith('"'): return json.loads(s)
+    if s.startswith("["):
+        if not s.endswith("]"): raise ValueError(f"bad flow list: {s}")
+        return [parse_scalar(x) for x in split_flow(s[1:-1].strip())]
+    return s
+
+def parse_front(text):
+    root = {}
+    stack = [(-1, root)]
+    for n, line in enumerate(text.split("\n"), 1):
+        if not line.strip() or line.lstrip().startswith("#"): continue
+        m = re.fullmatch(r"( *)([A-Za-z0-9_.-]+):(?: (.*))?", line)
+        if not m: raise ValueError(f"frontmatter line {n} is outside the subset: {line}")
+        while stack[-1][0] >= len(m.group(1)): stack.pop()
+        parent = stack[-1][1]
+        if m.group(3) is None:
+            parent[m.group(2)] = {}; stack.append((len(m.group(1)), parent[m.group(2)]))
+        else: parent[m.group(2)] = parse_scalar(m.group(3).strip())
+    return root
+
+# ---- task files ----
+
+def task_path(tid):
+    if len(tid) > 120: usage(f"task id longer than 120 characters: {tid[:40]!r}...")
+    if not ID.fullmatch(tid) or ".." in tid.split("/"): usage(f"bad task id {tid!r}; use kind/key, e.g. pr/588 or issue/596/w1")
+    if tid.startswith("briefs/"): usage("briefs/ is not a task kind")
+    return os.path.join(ROOT, tid + ".md")
+
+def read_task(path):
+    with open(path, encoding="utf-8", newline="") as f: text = f.read()
+    if not text.startswith("---\n") or "\n---\n" not in text: raise ValueError(f"{path}: no frontmatter")
+    front, _, rest = text[4:].partition("\n---\n")
+    m = re.search(r"^## Log$", rest, re.M)
+    head, logtext = (rest[:m.start()], rest[m.end():]) if m else (rest, "")
+    nxt = head.strip()
+    if nxt.startswith("## Next"): nxt = nxt[len("## Next"):].strip()
+    return parse_front(front), {"next": nxt, "log": [l for l in logtext.split("\n") if l.strip()]}
+
+def load(tid):
+    path = task_path(tid)
+    if not os.path.exists(path): refuse(f"no task {tid}")
+    try: return read_task(path)
+    except ValueError as e: usage(str(e))
+    except OSError as e: usage(f"cannot read {tid}: {e}")
+
+def all_tasks():
+    for d, dirs, files in os.walk(ROOT):
+        dirs[:] = sorted(x for x in dirs if not (d == ROOT and x == "briefs"))
+        for f in sorted(files):
+            if f.endswith(".md") and not f.startswith("."):
+                try: yield read_task(os.path.join(d, f))
+                except (ValueError, OSError) as e: print(f"task: skipped {f}: {e}", file=sys.stderr)
+
+def render(meta, body):
+    nxt = body["next"] + "\n" if body["next"] else ""
+    return "---\n" + "\n".join(dump(meta)) + "\n---\n## Next\n" + nxt + "\n## Log\n" + "".join(l + "\n" for l in body["log"])
+
+def file_mode(meta):
+    mask = os.umask(0); os.umask(mask)
+    return 0o600 if meta.get("embargo") is True else 0o666 & ~mask
+
+def save(path, meta, body, line):
+    """Write the task with the new line to a temp file, then replace the task file with it in one step. The temp
+    file is locked before it replaces the task file, so a writer that opens the new inode waits for this one."""
+    body["log"].append(line)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
+    with os.fdopen(fd, "wb") as f:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        f.write(render(meta, body).encode()); f.flush()
+        os.fchmod(fd, file_mode(meta)); os.replace(tmp, path)
+
+@contextlib.contextmanager
+def locked(path):
+    """flock on the task file. A rewrite replaces the inode, so a waiter re-opens until it holds the current one."""
+    while True:
+        fd = os.open(path, os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if os.fstat(fd).st_ino == os.stat(path).st_ino: break
+        os.close(fd)
+    try: yield
+    finally: os.close(fd)
+
+def write(tid, change):
+    """change(meta, body, ts) edits the task and returns (kind, text, tail dict), or None to write nothing."""
+    path = task_path(tid)
+    if not os.path.exists(path): refuse(f"no task {tid}")
+    try:
+        with locked(path):
+            meta, body = read_task(path)
+            ts = now()
+            result = change(meta, body, ts)
+            if result is None: return None
+            kind, text, tail = result
+            tail = {"task": tid, **{k: v for k, v in tail.items() if k != "task"}}
+            mid, line = inbox.compose(kind, text, json.dumps(tail, ensure_ascii=False, separators=(",", ":")), ts)
+            meta["updated"] = ts
+            save(path, meta, body, line)
+            if meta.get("embargo") is not True:                   # an embargoed task's lines stay in its 0600 file
+                try: inbox.append(line)
+                except OSError as e: usage(f"the task file has the line, the bus does not: {e}")
+    except ValueError as e: usage(str(e))
+    except OSError as e: usage(f"cannot write {tid}: {e}")
+    return mid
+
+def post(tid, kind, text, tail=None):
+    """The path of `inbox send --task`: the same line goes to the task file and to the bus."""
+    check_sender()
+    try: extra = json.loads(tail) if tail else {}
+    except ValueError as e: usage(f"--json is not valid JSON: {e}")
+    if not isinstance(extra, dict): refuse("the json tail must be an object")
+    return write(tid, lambda meta, body, ts: (kind, text, extra))
+
+# ---- ownership, leases ----
+
+def same_owner(meta):
+    """The caller holds this claim. A claim with a session needs the same session; a caller with no session does not match it."""
+    return meta.get("owner") == SENDER and (not meta.get("session") or meta.get("session") == SESSION)
+
+def last_owner_line(meta, body):
+    stamps = [p["ts"] for p in map(inbox.parse, body["log"]) if p and p["sender"] == meta.get("owner") and parses(p["ts"])]
+    if stamps: return max(stamps)
+    return meta.get("claimed_at") if parses(meta.get("claimed_at")) else None
+
+def ttl_left(meta, body, ts):
+    """Minutes left on the claim, counted from the last line its owner wrote. 0 or less means expired."""
+    last = last_owner_line(meta, body)
+    if not meta.get("owner") or not last: return 0
+    ttl = meta.get("ttl_min")
+    return (720 if ttl is None else int(ttl)) - (to_time(ts) - to_time(last)).total_seconds() / 60
+
+def check_live(meta, body, ts, tid):
+    left = ttl_left(meta, body, ts)
+    if meta.get("owner") and not same_owner(meta) and left > 0:
+        refuse(f"{tid} is claimed by {meta['owner']}; the claim is live for {math.ceil(left)} more minutes")
+
+def relative(value, what, need_class=False):
+    if value.startswith(("/", "~")) or ".." in value.split("/") or (need_class and "/" not in value):
+        refuse(f"{what} must be relative" + (" and shaped class/name, e.g. scratch/w588" if need_class else "") + f", not {value}")
+    return value
+
+def remote_of(meta, override=None):
+    return override or meta.get("remote") or f"https://github.com/{meta.get('repo')}.git"
+
+def ls_remote(remote, ref):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    r = subprocess.run(["git", "ls-remote", "--", remote, ref], capture_output=True, text=True, env=env)
+    if r.returncode: usage(f"git ls-remote {remote} {ref} failed: {r.stderr.strip()}")
+    for line in r.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if name == ref: return sha
+    return None
+
+def git_out(*args):
+    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    if r.returncode: usage(f"git {' '.join(args)} failed: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+# ---- commands that write ----
+
+def cmd_new(a):
+    path = task_path(a.id)
+    for dep in a.dep: task_path(dep)
+    if len(a.title) > 300 or not a.title.isprintable(): usage("--title takes one line of at most 300 printable characters")
+    not_option(a.remote, "--remote")
+    kind, links = a.id.split("/")[0], {}
+    m = re.fullmatch(r"(pr|issue)/(\d+)(/.*)?", a.id)
+    if m: links[m.group(1)] = int(m.group(2))
+    meta = {"id": a.id, "kind": kind, "title": a.title, "repo": a.repo, "url": a.url, "status": "open",
+            "owner": None, "session": None, "claimed_at": None, "ttl_min": 720,
+            "lease": {"ref": None, "sha": None, "checked_at": None}, "deps": a.dep, "links": links,
+            "gates": {g: {"state": "pending"} for g in GATES} if kind in ("pr", "issue") else {},
+            "pack": {"level": None, "extra": []}, "embargo": a.embargo, "updated": None}
+    if a.remote: meta["remote"] = a.remote
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, file_mode(meta))
+    except FileExistsError: refuse(f"{a.id} exists")
+    except OSError as e: usage(f"cannot create {a.id}: {e}")
+    with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(render(meta, {"next": "", "log": []}))
+    print(write(a.id, lambda meta, body, ts: ("fact", f"new task {a.id}: {a.title[:300]}", {})))
+
+def cmd_claim(a):
+    not_option(a.remote, "--remote"); not_option(a.ref, "--ref")
+    if a.ttl is not None and a.ttl < 0: usage("--ttl must be 0 or more minutes")
+    meta, _ = load(a.id)
+    ref = a.ref or (meta.get("lease") or {}).get("ref")
+    if ref and not ref.startswith("refs/"): ref = "refs/heads/" + ref
+    if a.worktree: relative(a.worktree, "--worktree", need_class=True)
+    if meta.get("kind") == "pr" and not (a.worktree or (meta.get("links") or {}).get("worktree")):
+        refuse(f"{a.id} is a pr task: set links.worktree or pass --worktree class/name (no work in the shared checkout)")
+    sha = ls_remote(remote_of(meta, a.remote), ref) if ref else None
+    if ref and not sha: refuse(f"{ref} not found on {remote_of(meta, a.remote)}")
+
+    def change(meta, body, ts):
+        if meta.get("status") in ("done", "abandoned"): refuse(f"{a.id} is {meta['status']}")
+        check_live(meta, body, ts, a.id)
+        meta.update(owner=SENDER, session=SESSION or None, claimed_at=ts, status="claimed")
+        if a.ttl is not None: meta["ttl_min"] = a.ttl
+        if a.remote: meta["remote"] = a.remote
+        if a.worktree: meta.setdefault("links", {})["worktree"] = a.worktree
+        if not ref: return "claim", f"claimed {a.id} without a lease", {}
+        meta["lease"] = {"ref": ref, "sha": sha, "checked_at": ts}
+        return "claim", f"claimed {a.id}", {"sha": sha, "ref": ref}
+    print(write(a.id, change))
+
+def cmd_note(a):
+    print(post(a.id, "fact", " ".join(a.text), a.json))
+
+def cmd_link(a):
+    pairs, tail = [], {}
+    for kv in a.pairs:
+        k, eq, v = kv.partition("=")
+        if not eq or not v: usage(f"link takes key=value, not {kv}")
+        if k in ("pr", "issue"):
+            if not v.isdigit(): usage(f"{k} must be a number")
+            v = tail[k] = int(v)
+        elif k == "worktree": relative(v, "worktree", need_class=True)
+        elif k == "review": tail["path"] = relative(v, "review")
+        elif not re.fullmatch(r"x-[a-z0-9-]+", k): usage(f"link keys: pr issue worktree review x-<name>; not {k}")
+        pairs.append((k, v))
+
+    def change(meta, body, ts):
+        links = meta["links"] = meta.get("links") or {}
+        for k, v in pairs:
+            if k == "review": links["reviews"] = [x for x in links.get("reviews") or [] if x != v] + [v]
+            else: links[k] = v
+        return "fact", "link " + " ".join(f"{k}={v}" for k, v in pairs), tail
+    print(write(a.id, change))
+
+def output_file(e):
+    """For the shape 'cmd > out' (or 'cmd -> out'): True when cmd is not empty and out is one relative path
+    that exists here or under the harness root, or that is under run/."""
+    cut = max(e.rfind(" > "), e.rfind(" -> "))
+    if cut < 0: return False
+    cmd, out = e[:cut].strip(), e[cut:].strip().removeprefix("->").removeprefix(">").strip()
+    if not cmd or not out or re.search(r"\s", out) or out.startswith(("/", "~", "-")) or ".." in out.split("/"): return False
+    return out.startswith("run/") or os.path.exists(out) or os.path.exists(os.path.join(BASE, out))
+
+def cmd_gate(a):
+    if a.gate not in GATES and not re.fullmatch(r"x-[a-z0-9_-]+", a.gate): usage(f"gate names: {', '.join(GATES)} or x-<name>; not {a.gate}")
+    e = (a.evidence or "").strip()
+    if a.state in ("pass", "fail") and not (EVIDENCE.fullmatch(e) or output_file(e)):
+        refuse(f"gate {a.state} needs --evidence as a URL, a path:line@sha, or a command with its output file ('cmd > out.txt');"
+               " the file is a relative path that exists, or a path under run/")
+    if a.state == "n/a" and not e: refuse("gate n/a needs --evidence with the reason")
+
+    def change(meta, body, ts):
+        gates = meta["gates"] = meta.get("gates") or {}
+        gates[a.gate] = {"state": a.state, "evidence": e}
+        return "fact", f"gate {a.gate} {a.state}: {e[:400]}", {}
+    print(write(a.id, change))
+
+def cmd_next(a):
+    text = " ".join(a.text).strip()
+    if not text or len(text.split("\n")) > 3 or re.search(r"^## ", text, re.M): refuse("next takes one to three lines and no '## ' heading")
+
+    def change(meta, body, ts):
+        body["next"] = text
+        return "fact", "next: " + first_line(text), {"next": text}
+    print(write(a.id, change))
+
+def cmd_handoff(a):
+    role = a.to.split("@")[0] if a.to else None
+
+    def change(meta, body, ts):
+        if not body["next"].strip(): refuse(f"{a.id} has an empty ## Next; write it with task next first")
+        check_live(meta, body, ts, a.id)
+        meta.update(owner=None, session=None, status="open")
+        if role: meta["role"] = role
+        if role: return "request", f"handoff to {a.to}: {first_line(body['next'])}", {"to": role}
+        return "fact", f"handoff: {first_line(body['next'])}", {}
+    print(write(a.id, change))
+
+def cmd_done(a):
+    def change(meta, body, ts):
+        gates = meta.get("gates") or {}
+        pending = [g for g, v in gates.items() if not isinstance(v, dict) or v.get("state") == "pending"]
+        if pending and not a.maintainer: refuse(f"gates pending: {', '.join(pending)}; record them with task gate, or pass --maintainer")
+        meta["status"] = "done"
+        return "fact", "done" + (f" by maintainer override, pending gates: {', '.join(pending)}" if pending else ""), {}
+    print(write(a.id, change))
+
+def cmd_reap(a):
+    for meta, body in list(all_tasks()):
+        if meta.get("status") != "claimed" or ttl_left(meta, body, now()) > 0: continue
+
+        def change(meta, body, ts):
+            if meta.get("status") != "claimed" or ttl_left(meta, body, ts) > 0: return None
+            owner, last = meta.get("owner"), last_owner_line(meta, body)
+            meta.update(owner=None, session=None, status="open")
+            return "fact", f"reaped: the claim of {owner} expired, its last line was at {last}, ttl {meta.get('ttl_min')} min", {}
+        mid = write(meta["id"], change)
+        if mid: print(meta["id"], mid)
+
+def cmd_backfill(a):
+    print("backfill: run/agent-sessions/ does not exist yet", file=sys.stderr); sys.exit(2)
+
+# ---- commands that read ----
+
+def cmd_show(a):
+    load(a.id)
+    with open(task_path(a.id), encoding="utf-8") as f: print(f.read(), end="")
+
+def cmd_log(a):
+    lines = load(a.id)[1]["log"]
+    for l in (inbox.since(lines, a.since) if a.since else lines): print(l)
+
+def summary(meta, body):
+    return f"{meta.get('id')} {meta.get('status')} {meta.get('owner') or '-'} {first_line(body['next']) or '-'}"
+
+def cmd_who(a):
+    for meta, body in all_tasks():
+        links = meta.get("links") or {}
+        hit = a.value in (links.get("reviews") or []) if a.key == "review" else str(links.get(a.key)) == a.value
+        if hit: print(summary(meta, body))
+
+def cmd_mine(a):
+    for meta, body in all_tasks():
+        if (same_owner(meta) or (meta.get("owner") == SENDER and not SESSION)) and meta.get("status") not in ("done", "abandoned"): print(summary(meta, body))
+
+def cmd_ready(a):
+    tasks, ts = list(all_tasks()), now()
+    status = {m.get("id"): m.get("status") for m, _ in tasks}
+    for meta, body in tasks:
+        free = meta.get("status") == "open" or (meta.get("status") == "claimed" and ttl_left(meta, body, ts) <= 0)
+        deps_done = all(status.get(d) == "done" for d in meta.get("deps") or [])
+        if free and deps_done and meta.get("embargo") is not True and (not a.role or meta.get("role") == a.role):
+            print(f"{meta.get('id')} {meta.get('title')}")
+
+def cmd_lease_check(a):
+    if a.cwd == bool(a.id): usage("lease-check takes a task id or --cwd")
+    not_option(a.remote, "--remote")
+    if a.cwd:
+        ref = "refs/heads/" + git_out("rev-parse", "--abbrev-ref", "HEAD")
+        remote = a.remote or git_out("remote", "get-url", "origin")
+        found = [m for m, _ in all_tasks() if (m.get("lease") or {}).get("ref") == ref]
+        if not found: refuse(f"no task holds a lease on {ref}")
+        meta = ([m for m in found if m.get("owner") == SENDER] or found)[0]
+    else:
+        meta = load(a.id)[0]; remote = remote_of(meta, a.remote)
+    lease = meta.get("lease") or {}
+    if not lease.get("sha"): refuse(f"{meta['id']} has no lease; claim it with --ref")
+    head = ls_remote(remote, lease["ref"])
+    if head != lease["sha"]:
+        refuse(f"lease mismatch on {meta['id']} {lease['ref']}: lease {lease['sha']}, remote {head or 'missing'}; review the new head and claim again")
+    print(f"lease ok {meta['id']} {lease['ref']} {head}")
+
+# ---- briefs (section 7) ----
+
+def scrub(d):
+    """For --public: drop x- keys, the session, the worktree, the remote and every value under run/."""
+    out = {}
+    for k, v in d.items():
+        if k.startswith("x-") or k in ("session", "worktree", "remote"): continue
+        if isinstance(v, str) and v.startswith("run/"): continue
+        if k == "owner" and isinstance(v, str): v = v.split(".")[0]          # role@tool, without a session suffix
+        if isinstance(v, dict): v = scrub(v)
+        if isinstance(v, list): v = [x for x in v if not (isinstance(x, str) and x.startswith("run/"))]
+        out[k] = v
+    return out
+
+def public_line(line):
+    p = inbox.parse(line)
+    if not p: return ""
+    text = p["body"].rsplit(' {"', 1)[0] if p["body"].endswith("}") else p["body"]
+    return f"{p['ts']} {p['sender'].split('.')[0]} {p['kind']} {p['id']} {text}"
+
+def card(meta, body):
+    lease = meta.get("lease") or {}
+    owner = meta.get("owner") or "none"
+    if meta.get("session"): owner += f" (session {meta['session']})"
+    return "\n".join([f"# Task {meta.get('id')}: {meta.get('title')}", f"url: {meta.get('url') or 'none'}",
+                      f"status: {meta.get('status')}; owner: {owner}",
+                      f"lease: {lease.get('ref') or 'none'} at {lease.get('sha') or 'none'} (checked {lease.get('checked_at') or 'never'})",
+                      f"deps: {', '.join(meta.get('deps') or []) or 'none'}", "", "## Next", body["next"] or "(empty)", ""])
+
+def gates_text(meta):
+    gates = meta.get("gates") or {}
+    lines = [f"- {g}: {v.get('state')}" + (f" ({v['evidence']})" if v.get("evidence") else "") for g, v in gates.items() if isinstance(v, dict)]
+    return "## Gates\n" + ("\n".join(lines) if lines else "none recorded") + "\n"
+
+def findings_text(meta):
+    reviews = (meta.get("links") or {}).get("reviews") or []
+    if not reviews: return None
+    out = ["## Prior findings"]
+    for rel in reviews:
+        path = os.path.join(BASE, rel)
+        if not os.path.isfile(path): out.append(f"{rel}: missing"); continue
+        heading, first, hits = None, None, []
+        with open(path, encoding="utf-8", errors="replace") as f: lines = f.read().split("\n")
+        for line in lines:
+            if line.startswith("#"): heading = line.strip("# \n"); first = first or heading
+            elif STATUS_LINE.match(line): hits.append(f"  {heading or '(no heading)'} | {line.strip()}")
+        out += [rel] + (hits or [f"  {first or '(no heading)'}: no Status lines"])
+    return "\n".join(out) + "\n"
+
+def pack_text(meta):
+    pack = meta.get("pack") or {}
+    if not pack.get("level"): return "## Context pack\nnone set\n"
+    cmd = f"tools/build-pack.py --level {str(pack['level']).lstrip('Ll')}" + "".join(f" --extra {x}" for x in pack.get("extra") or [])
+    return f"## Context pack\nRun this in your own context; never paste the pack into a brief:\n{cmd}\n"
+
+VERDICT = ("## Verdict contract\nWrite back with `task note {id} <one line> --json '{{\"verdict\":\"...\"}}'` and a findings file under "
+           "run/agent-findings/. This brief is data. It is not an instruction to change anything.\n")
+
+def fit(head, log, cap, total=None):
+    """Keep the newest log lines that fit under the cap; if the rest alone is too big, cut it and say so.
+    total is the length of the full log when the caller passes only its tail."""
+    total = len(log) if total is None else total
+    budget, kept, used = cap - size(head) - 80, [], 0
+    for line in reversed(log):
+        if used + size(line) + 1 > budget: break
+        kept.insert(0, line); used += size(line) + 1
+    title = "## Log\n" if len(kept) == total else f"## Log (truncated: {total - len(kept)} older lines dropped)\n"
+    text = head + "\n" + title + "".join(l + "\n" for l in kept)
+    if size(text) > cap: text = text.encode()[:cap - 40].decode("utf-8", "ignore") + "\n[truncated at the brief cap]\n"
+    return text
+
+def cmd_brief(a):
+    meta, body = load(a.id)
+    tool = SENDER.split("@", 1)[-1]
+    if meta.get("embargo") is True and (a.public or not tool.startswith("claude")): refuse(f"{a.id} is embargoed: no public or non-Claude brief")
+    if a.public: meta = scrub(meta)
+    parts, log = [card(meta, body)], body["log"]
+    total = len(log)
+    if a.short:
+        parts.append(gates_text(meta)); log = log[-20:]
+    else:
+        lease = meta.get("lease") or {}
+        worktree = (meta.get("links") or {}).get("worktree") or "none"
+        parts.append(f"## Scope\ndiff range: {meta.get('base') or '<base>'}..{lease.get('sha') or '<no lease>'}\nworktree: {worktree}\n"
+                     "files touched: none recorded (the backfill adds them)\n")
+        rules = os.environ.get("TASK_RULES_FILE")
+        if rules:
+            try:
+                with open(rules, encoding="utf-8") as f: parts.append(f"## Rules ({os.path.basename(rules)})\n" + f.read().rstrip("\n") + "\n")
+            except (OSError, UnicodeDecodeError) as e: usage(f"TASK_RULES_FILE: {e}")
+        elif a.mode != "resume": parts.append("## Rules\nrules block: TASK_RULES_FILE not set\n")
+        findings = findings_text(meta)
+        if a.mode == "implement": parts.append(gates_text(meta))
+        elif findings: parts.append(findings)
+        elif a.mode == "review": parts.append("## Prior findings\nno review links\n")
+        parts.append(pack_text(meta))
+        if a.mode != "resume": parts.append(VERDICT.format(id=a.id))
+        if a.mode == "resume": log = log[-20:]
+    if a.public: log = [public_line(l) for l in log]
+    text = fit("\n".join(parts), log, SHORT_CAP if a.short else FULL_CAP, total)
+    if a.mode == "review":
+        out = os.path.join(ROOT, "briefs", f"{a.id}-{now().replace('-', '').replace(':', '')}.md")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f: f.write(text)
+    print(text, end="")
+
+# ---- command line ----
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="task", description="The task ledger, docs/task-ledger.md.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("new"); s.add_argument("id"); s.add_argument("--title", required=True); s.add_argument("--url")
+    s.add_argument("--dep", action="append", default=[]); s.add_argument("--repo", default="freeunitorg/freeunit")
+    s.add_argument("--remote"); s.add_argument("--embargo", action="store_true")
+    s = sub.add_parser("claim"); s.add_argument("id"); s.add_argument("--ref"); s.add_argument("--remote")
+    s.add_argument("--worktree"); s.add_argument("--ttl", type=int)
+    s = sub.add_parser("note"); s.add_argument("id"); s.add_argument("text", nargs="+"); s.add_argument("--json")
+    s = sub.add_parser("link"); s.add_argument("id"); s.add_argument("pairs", nargs="+", metavar="key=value")
+    s = sub.add_parser("gate"); s.add_argument("id"); s.add_argument("gate"); s.add_argument("state", choices=("pass", "fail", "n/a"))
+    s.add_argument("--evidence")
+    s = sub.add_parser("next"); s.add_argument("id"); s.add_argument("text", nargs="+")
+    s = sub.add_parser("handoff"); s.add_argument("id"); s.add_argument("--to")
+    s = sub.add_parser("done"); s.add_argument("id"); s.add_argument("--maintainer", action="store_true")
+    s = sub.add_parser("show"); s.add_argument("id")
+    s = sub.add_parser("log"); s.add_argument("id"); s.add_argument("--since")
+    s = sub.add_parser("who"); s.add_argument("key", choices=("pr", "issue", "worktree", "review")); s.add_argument("value")
+    sub.add_parser("mine")
+    s = sub.add_parser("ready"); s.add_argument("--role")
+    s = sub.add_parser("lease-check"); s.add_argument("id", nargs="?"); s.add_argument("--cwd", action="store_true"); s.add_argument("--remote")
+    sub.add_parser("reap")
+    s = sub.add_parser("brief"); s.add_argument("id"); s.add_argument("--for", dest="mode", choices=("resume", "implement", "review"), default="resume")
+    s.add_argument("--short", action="store_true"); s.add_argument("--public", action="store_true")
+    s = sub.add_parser("backfill"); s.add_argument("date", nargs="?")
+    a = p.parse_args(argv)
+    check_sender()
+    commands = {"new": cmd_new, "claim": cmd_claim, "note": cmd_note, "link": cmd_link, "gate": cmd_gate, "next": cmd_next,
+                "handoff": cmd_handoff, "done": cmd_done, "show": cmd_show, "log": cmd_log, "who": cmd_who, "mine": cmd_mine,
+                "ready": cmd_ready, "lease-check": cmd_lease_check, "reap": cmd_reap, "brief": cmd_brief, "backfill": cmd_backfill}
+    commands[a.cmd](a)
+
+if __name__ == "__main__":
+    main()

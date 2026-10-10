@@ -1,0 +1,19 @@
+# Job 22: closing comparison after PRs 629, 630 and 631, a copy of
+# remeasure-1.37.0.job with B = origin/master of 2026-10-08.
+# A = 1.36.1 (90c5ffb8df). B = 067e6be93 (origin/master head at write time).
+# The 1.37.0 regression (commit 39700f2946) is still in master; its fix is draft
+# https://github.com/freeunitorg/freeunit/pull/638. This is the "before" number for 638.
+JOB=22-master-vs-1.36.1
+ISSUE=https://github.com/freeunitorg/freeunit/pull/638
+REV_A=90c5ffb8df6b4594826cdaa48f293839ca83ab52
+REV_B=067e6be93731b9d1c62b33869fb821413bc3a467
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=s_instructions still 13 to 15 percent higher in B than 1.36.1, as in 1.37.0 (39700f2946 not reverted)
+FALSIFY=null band over 5 percent, or B within the null band of 1.36.1

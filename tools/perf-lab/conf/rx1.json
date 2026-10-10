@@ -1,0 +1,24 @@
+{
+ "listeners": {
+  "127.0.0.1:@PORT@": {
+   "pass": "routes/rx"
+  }
+ },
+ "routes": {
+  "rx": [
+   {
+    "match": {
+     "uri": "~^/(?:[[:alnum:]_.-]+/){0,4}(?:article|product|item)[0-9]+(?:/[[:alnum:]_-]+)?$"
+    },
+    "action": {
+     "return": 200
+    }
+   },
+   {
+    "action": {
+     "return": 404
+    }
+   }
+  ]
+ }
+}

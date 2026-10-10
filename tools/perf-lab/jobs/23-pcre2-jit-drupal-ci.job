@@ -1,0 +1,20 @@
+# PR 551, opt-in PCRE2 JIT: router cost per request, workload drupal-ci.
+# The Drupal how-to deny list rewritten as 32 case-insensitive regexes (~(?i)...), unanchored except two; /node/42/edit misses all of them, then return 200.
+# A and B are the same SHA (head of perf/optional-pcre2-jit, pinned);
+# B adds ./configure --regex-jit. No application: router only.
+# Check that meta.txt shows regex_jit_b=yes and pcre2_jit=yes before reading the verdict.
+JOB=23-pcre2-jit-drupal-ci
+ISSUE=https://github.com/freeunitorg/freeunit/pull/551
+REV_A=b6589ae2921f0726c9dcc94534137a8beaf7ceca
+REV_B=b6589ae2921f0726c9dcc94534137a8beaf7ceca
+CONFIGURE_ARGS_A=
+CONFIGURE_ARGS_B=--regex-jit
+WORKLOAD=drupal-ci
+CONNS=16
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_cycles
+EXPECT=r_cycles lower in B, by about as much as rx32 or more (32 regexes per request)
+FALSIFY=NO CLAIM on r_cycles at a null band under 5 percent: JIT does not help this real-world config

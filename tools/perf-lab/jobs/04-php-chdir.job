@@ -1,0 +1,17 @@
+# Job 4: no chdir() per request for a PHP target with only "root".
+# 597 wave 0, src/nxt_php_sapi.c. Set REV_B to the fix (pr/NNN) before running.
+# Measured on master 2026-10-07: asys_chdir = 1.000 per request at hello.php.
+JOB=04-php-chdir
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=pr/NNN
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=asys_chdir 1.000 to 0, asys_total down by 1 per request, s_instructions down
+FALSIFY=asys_chdir still 1.000 in B

@@ -1,0 +1,17 @@
+# Job 3: pool junk fill (memset 0x5A on every small free) only in debug builds.
+# 597 wave 0, src/nxt_mp.c. B is master plus the mutation patch.
+JOB=03-mp-junk-fill
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=origin/master
+PATCH_B=patches/mp-junk-debug-only.diff
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+FUNCS=unitd:nxt_mp_free unitd:nxt_mp_chunk_free
+EXPECT=router instructions per request 0.5 to 2 percent lower, a smaller nxt_mp_free or nxt_mp_chunk_free
+FALSIFY=r_instructions NO CLAIM at a null band of 2.5 percent or less, or no size change in either function

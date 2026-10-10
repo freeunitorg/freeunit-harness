@@ -1,0 +1,76 @@
+# Job 12: PGO (profile-guided optimization) of the request path, hello.php.
+# BLOCKED on the runner. Nothing here can run today. PERF_JOB_CHECK accepts the
+# file, because it only parses it. A real run stops at "cannot resolve
+# REV_B", which is the point of the REV_B value below.
+#
+# Why it cannot run: PGO needs three steps in order. Build B with
+# -fprofile-generate, run the workload once so that the processes write the
+# profile, then rebuild B with -fprofile-use. remote.sh builds each side once,
+# before any workload runs (remote.sh:143-171), and the trees are mounted
+# read-only in the measuring container (remote.sh:235). A patch cannot supply a
+# profile, because the profile does not exist before a run.
+# PATCH_B is left out on purpose. perf-job.sh:86 refuses a PATCH_B file that
+# does not exist, so a placeholder name does not pass PERF_JOB_CHECK. With
+# REV_A equal to REV_B and no patch the job would be a null gate only, so REV_B
+# names no revision: a run fails fast and does not give a misleading result.
+#
+# Proposal for the runner (the job parser refuses unknown keys, so these are not
+# keys yet; none of them is written below):
+#   PGO_SIDE=B             the side that gets profile feedback; the other side stays plain
+#   PGO_TRAIN=hello static1k capp
+#                          workloads for the training run. Do not train on the
+#                          measured request alone: that overstates the gain.
+#   PGO_TRAIN_SEC=30       seconds of oha per training workload
+#   PGO_TRAIN_CONNS=6      oha -c during training
+# Steps in remote.sh, between the build and the idle gate (remote.sh:193):
+#   1. Build the PGO side in its own tree (name with a -pgo suffix). Mount it
+#      at /src, as the other builds do. CFLAGS in the build container:
+#        -fprofile-generate=/prof -fprofile-update=prefer-atomic
+#      Link lines without CFLAGS need the same flag in --ld-opt, or libgcov is
+#      missing: the PHP module link (auto/modules/php:645) and the libnxt.so
+#      link (auto/make:158) have none; the unitd link passes CFLAGS
+#      (auto/make:483). Not tried.
+#   2. Training container: the instrumented tree at /src, read-write, and a
+#      directory /prof with mode 1777, bind-mounted from the run directory. The
+#      app processes run as nobody (cells.sh:99) and must be able to write it.
+#      For each training workload: start unitd as start_unit does (cells.sh:95),
+#      warm up, run oha for PGO_TRAIN_SEC at PGO_TRAIN_CONNS, send QUIT, and wait
+#      until no unitd process is left. Do not use stop_unit: its pkill -9
+#      after 5 s (cells.sh:114) loses the profile of any process that is slow to exit.
+#   3. Assert the profile: files in /prof for at least src/nxt_router.c,
+#      src/nxt_http_request.c and src/nxt_unit.c, and for the PHP module. Fail
+#      if one is missing. Record the sha256 of the sorted file hashes in
+#      meta.txt as profile=, so two runs can be shown to use the same profile.
+#   4. Rebuild the same tree at the same /src path: delete the *.o files and the
+#      binaries, keep /prof, and build with
+#        -fprofile-use=/prof -fprofile-partial-training -Wno-missing-profile
+#      -Wmissing-profile is on by default and -Werror (auto/cc/test:97) would
+#      make any object without data fatal. -fprofile-partial-training keeps the
+#      code that training never ran optimized for speed, not for size.
+#   5. Measure as for any other job. Trees stay read-only; the profile is not read again.
+# Where the files land: with -fprofile-generate=/prof, gcc writes
+# /prof/<object path with each slash turned into #>.gcda, for example
+# /prof/#src#build#src#nxt_router.gcda. The name comes from the object path, so the
+# generate and the use build must both compile in /src. Without =/prof the
+# file would sit beside the object, in the tree (/src/build/src/), where nobody
+# can write it.
+# Why unitd's processes must leave through exit(): gcc writes the profile from
+# an exit handler. Checked on a small program with gcc 15.2: exit() wrote the
+# .gcda; _exit() and a kill by an unhandled signal wrote nothing. In unitd every process type
+# ends its loop in exit(status) (nxt_runtime.c:764) and the PHP app process calls
+# exit(0) (nxt_php_sapi.c:498). The state-store child ends with _exit()
+# (nxt_main_process.c:2556 and :2621), so it writes no profile; it is not on the request path.
+# The processes have threads, so the counters need -fprofile-update=prefer-atomic.
+# PERF=1 and r_instructions as in jobs 07 to 09. FUNCS is empty for the reasons in job 07.
+JOB=12-pgo-hello
+REV_A=856d23b9ed2cecbd96d5452cf790f828fc55d700
+REV_B=BLOCKED-pgo-needs-runner-training-phase
+WORKLOAD=hello
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+PRIMARY=r_instructions
+EXPECT=r_instructions lower in B by more than the null band (guess before any run: 5 to 15 percent for the router, branch layout and inlining by measured counts); s_instructions lower by less, because the PHP engine is not rebuilt; ok equal, bad 0, alerts 0
+FALSIFY=r_instructions NO CLAIM or NOISY, or higher in B; or profile= in meta.txt differs between two runs of the same training; or a training workload is the only workload measured

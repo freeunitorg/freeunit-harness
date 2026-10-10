@@ -1,0 +1,20 @@
+# Job 14: libunit message cost. A = origin/master, B = origin/master plus the
+# perf/libunit-message-cost patch: a request moves to the port queue for good
+# (shared memory data, 28-byte messages), so a small response sends no datagram.
+# 39700f29 (1.37.0) sent the ack and the body to the socket: +13.7% s_instructions.
+JOB=14-msgcost-master
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=origin/master
+PATCH_B=patches/libunit-message-cost.diff
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+FUNCS=unitd:nxt_port_queue_read_handler php.unit.so:nxt_unit_get_outgoing_buf php.unit.so:nxt_unit_req_send
+EXPECT=s_instructions and r_instructions 10 to 20 percent lower at c=32; asys_sendmsg from about 3 to under 1 per request; rsys_recvmsg down by about 2
+FALSIFY=NO CLAIM for s_instructions at c=32, or asys_sendmsg not lower in B

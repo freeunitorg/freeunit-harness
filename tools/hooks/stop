@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""stop: Stop hook (docs/task-ledger.md section 5).
+
+Appends the first line of the turn's last message to the session's active task. Prints nothing.
+"""
+import os, sys
+sys.dont_write_bytecode = True                             # no __pycache__ beside the hooks
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ledger as H
+
+def main():
+    data, led = H.start()
+    if data.get("stop_hook_active"): return
+    raw = str(data.get("last_assistant_message") or "").splitlines()
+    lines = [l.strip() for l in ("".join(c if c.isprintable() else " " for c in r) for r in raw) if l.strip()]
+    if not lines or len(lines[0]) < 12: return
+    tid, owner = led.active()
+    if tid: led.note(tid, lines[0][:300], {"hook": "stop"}, owner=owner)
+
+H.run(main)

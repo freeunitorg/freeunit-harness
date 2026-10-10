@@ -1,0 +1,24 @@
+Perf lab mutation for jobs 07 to 12 (LTO, -O2, PGO series). Base: freeunit master 856d23b9e.
+Adds -O2 after the -O line of auto/cc/test, in the gcc and the clang branch. The last -O wins.
+The explicit -fno-strict-aliasing and -fno-strict-overflow stay in force: gcc does not let -O2 switch off a flag the user set.
+tools/perf-lab/remote.sh applies this with patch -p1 to the unpacked tree, before ./configure.
+diff --git a/auto/cc/test b/auto/cc/test
+index ac4d5f3..ad5b4d4 100644
+--- a/auto/cc/test
++++ b/auto/cc/test
+@@ -72,6 +72,7 @@ case $NXT_CC_NAME in
+         NXT_CFLAGS="$NXT_CFLAGS -std=gnu11"
+ 
+         NXT_CFLAGS="$NXT_CFLAGS -O"
++        NXT_CFLAGS="$NXT_CFLAGS -O2"
+         NXT_CFLAGS="$NXT_CFLAGS -Wall -Wextra"
+ 
+         #NXT_CFLAGS="$NXT_CFLAGS -Wunused-result"
+@@ -116,6 +117,7 @@ case $NXT_CC_NAME in
+         NXT_CFLAGS="$NXT_CFLAGS -std=gnu11"
+ 
+         NXT_CFLAGS="$NXT_CFLAGS -O"
++        NXT_CFLAGS="$NXT_CFLAGS -O2"
+         NXT_CFLAGS="$NXT_CFLAGS -Wall -Wextra"
+ 
+         #NXT_CFLAGS="$NXT_CFLAGS -Wunused-result"

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""install -- merge the task-ledger hooks (tools/hooks/settings.json) into the Claude Code user settings.
+
+  install [--dry-run]           print the diff the merge would make; change nothing (the default)
+  install --apply               write the merge, after a backup copy settings.json.bak-<timestamp>
+  install --remove [--apply]    take the harness hooks out again: print the diff, or write it with --apply
+  --settings PATH               the settings file (default ~/.claude/settings.json)
+
+The merge adds an entry only when no hook of that event runs the same command. Other keys and
+other hooks are kept. __HARNESS__ in the template becomes the absolute path of this harness.
+"""
+import argparse, datetime, difflib, json, os, shlex, shutil, sys, tempfile
+
+HOOKS = os.path.dirname(os.path.abspath(__file__))
+HARNESS = os.path.dirname(os.path.dirname(HOOKS))
+
+def template():
+    with open(os.path.join(HOOKS, "settings.json"), encoding="utf-8") as f:
+        text = f.read().replace("__HARNESS__", shlex.quote(HARNESS).replace("\\", "\\\\").replace('"', '\\"'))
+    return json.loads(text)["hooks"]
+
+def merge(settings, ours):
+    hooks = settings.setdefault("hooks", {})
+    for event, groups in ours.items():
+        have = hooks.setdefault(event, [])
+        commands = {h.get("command") for g in have for h in g.get("hooks", [])}
+        have += [g for g in groups if not any(h["command"] in commands for h in g["hooks"])]
+    return settings
+
+def remove(settings):
+    prefix = shlex.quote(HARNESS) + "/tools/hooks/"            # as template() writes it
+    hooks = settings.get("hooks") or {}
+    for event in list(hooks):
+        for g in hooks[event]: g["hooks"] = [h for h in g.get("hooks", []) if not str(h.get("command", "")).startswith(prefix)]
+        hooks[event] = [g for g in hooks[event] if g["hooks"]]
+        if not hooks[event]: del hooks[event]
+    if "hooks" in settings and not hooks: del settings["hooks"]
+    return settings
+
+def main():
+    p = argparse.ArgumentParser(description="Merge the task-ledger hooks into the Claude Code settings.")
+    p.add_argument("--dry-run", action="store_true", help="print the diff only (the default)")
+    p.add_argument("--apply", action="store_true", help="write the settings file, after a backup copy")
+    p.add_argument("--remove", action="store_true", help="take the harness hooks out instead of adding them")
+    p.add_argument("--settings", default=os.path.expanduser("~/.claude/settings.json"))
+    a = p.parse_args()
+    before = {}
+    if os.path.exists(a.settings):
+        with open(a.settings, encoding="utf-8") as f: before = json.load(f)
+    after = json.loads(json.dumps(before))
+    after = remove(after) if a.remove else merge(after, template())
+    old, new = (json.dumps(x, indent=2) + "\n" for x in (before, after))
+    if old == new:
+        print(f"{a.settings}: no change"); return
+    sys.stdout.writelines(difflib.unified_diff(old.splitlines(True), new.splitlines(True), a.settings, a.settings + " (new)"))
+    if not a.apply or a.dry_run:
+        print(f"\nDry run: nothing written. To write it: {sys.argv[0]}{' --remove' if a.remove else ''} --apply"); return
+    if os.path.exists(a.settings):
+        backup = a.settings + ".bak-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(a.settings, backup); print(f"backup: {backup}")
+    os.makedirs(os.path.dirname(os.path.abspath(a.settings)), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(a.settings)), prefix=".settings-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(new)
+    if os.path.exists(a.settings): shutil.copymode(a.settings, tmp)
+    os.replace(tmp, a.settings)
+    print(f"wrote {a.settings}")
+
+if __name__ == "__main__":
+    main()

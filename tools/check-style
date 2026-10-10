@@ -1,0 +1,65 @@
+#!/bin/bash
+# check-style — run the style gates CI runs, locally, before you push.
+#
+# FreeUnit has no .clang-format and no formatter that can be run over the tree;
+# style is enforced by review plus two mechanical gates in .github/workflows/:
+#
+#   lint-whitespace.yml    `git log --check` over the commits in the PR
+#   analysis-clang-ast.yml a clang plugin (freeunitorg/clang-ast, branch `unit`)
+#                          that validates nginx/Unit-specific conventions the
+#                          compiler cannot — e.g. that nxt_sprintf format
+#                          specifiers use the Unit dialect (%02Xd, not %02X).
+#                          -Werror will NOT catch that class of mistake.
+#
+# This script runs the first gate always, and the second when a clang-ast build
+# is available (it is expensive to build, so it is opt-in via CLANG_AST=path or
+# `make ci-local`, which has it in the image).
+#
+# Usage: check-style [base-ref]     default base: origin/master
+
+set -u
+
+UNIT_SRC="${UNIT_SRC:-$(cd "$(dirname "$0")/.." && pwd)/src}"
+BASE="${1:-origin/master}"
+status=0
+
+cd "$UNIT_SRC" 2>/dev/null || { echo "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
+
+echo "==> whitespace gate: git log --check $BASE.."
+if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
+    echo "  ! base ref '$BASE' not found; skipping (pass one explicitly)" >&2
+else
+    # git log --check prints offending lines and says nothing when clean.
+    out=$(git log --check --pretty=format:'--- %h %s' "$BASE"..)
+    if [ -n "$out" ]; then
+        echo "$out"
+        echo "  ✗ whitespace errors above (trailing space, space-before-tab, blank EOF)"
+        status=1
+    else
+        echo "  ✓ clean"
+    fi
+fi
+
+echo
+echo "==> clang-ast convention gate"
+if [ -n "${CLANG_AST:-}" ] && [ -f "${CLANG_AST}/ngx-ast.so" ]; then
+    echo "  using plugin ${CLANG_AST}/ngx-ast.so"
+    if ./configure --cc=clang \
+        --cc-opt="-Xclang -load -Xclang ${CLANG_AST}/ngx-ast.so -Xclang -add-plugin -Xclang ngx-ast -Wno-default-const-init-field-unsafe" \
+        --openssl --debug --tests >/dev/null 2>&1 && make -j"$(nproc)" unitd >/dev/null; then
+        echo "  ✓ clean"
+    else
+        echo "  ✗ clang-ast build failed — rerun without redirection to see the diagnostics:"
+        echo "      cd $UNIT_SRC && make unitd"
+        status=1
+    fi
+else
+    echo "  - skipped (no clang-ast plugin)"
+    echo "    build it once:  git clone https://github.com/freeunitorg/clang-ast.git -b unit && make -C clang-ast"
+    echo "    then:           CLANG_AST=\$PWD/clang-ast tools/check-style"
+    echo "    or just:        make ci-local"
+fi
+
+echo
+[ "$status" -eq 0 ] && echo "style: OK" || echo "style: FAILED"
+exit "$status"

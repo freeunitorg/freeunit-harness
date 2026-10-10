@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""subagent-stop: SubagentStop hook (docs/task-ledger.md section 5).
+
+Links every run/agent-findings/*.md file that the subagent's last message names, and that exists,
+to the session's active task as a review. Prints nothing.
+"""
+import os, re, sys
+sys.dont_write_bytecode = True                             # no __pycache__ beside the hooks
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ledger as H
+
+FINDINGS = re.compile(r"run/agent-findings/[^\s)`'\"<>]+\.md")
+
+def main():
+    data, led = H.start()
+    paths = []
+    for p in FINDINGS.findall(str(data.get("last_assistant_message") or "")):
+        if p not in paths and ".." not in p.split("/") and os.path.isfile(os.path.join(led.base, p)): paths.append(p)
+    tid, owner = led.active() if paths else (None, None)
+    if tid: led.task("link", tid, *("review=" + p for p in paths), owner=owner)
+
+H.run(main)

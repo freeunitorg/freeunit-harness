@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""pre-compact: PreCompact hook (docs/task-ledger.md section 5). Notes the compaction on the active task."""
+import os, sys
+sys.dont_write_bytecode = True                             # no __pycache__ beside the hooks
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ledger as H
+
+def main():
+    data, led = H.start()
+    tid, owner = led.active()
+    if tid: led.note(tid, f"compacting ({data.get('trigger') or 'unknown'})", owner=owner)
+
+H.run(main)

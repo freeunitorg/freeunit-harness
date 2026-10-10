@@ -1,0 +1,15 @@
+# Single-commit test: 39700f29 libunit msg-order — parent vs commit.
+JOB=bisect-39700f29s
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=39700f29^
+REV_B=39700f29
+WORKLOAD=hello
+CONNS=32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+EXPECT=asys_sendmsg jump + s_instructions CLAIM if this commit added the message
+FALSIFY=NO CLAIM on both

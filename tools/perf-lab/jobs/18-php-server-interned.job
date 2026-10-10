@@ -1,0 +1,29 @@
+# Job 18: PHP builds $_SERVER with interned fixed names and a presized array.
+# Branch perf/php-server-interned. B is master plus that commit.
+# 597 wave 4, src/nxt_php_sapi.c.
+# PREREQUISITE: the "server" workload, a PHP script that reads $_SERVER.
+# The lab has hello, static1k and capp only. Apply
+# jobs/18-runner-server-workload.patch to the harness first (git apply
+# from the harness root). It adds the workload to perf-job.sh and cells.sh
+# and adds www/server.php. Until then perf-job.sh refuses WORKLOAD=server.
+# Callgrind on PHP 8.5.10 with opcache, root target, 3 header fields:
+# 52,665 to 49,394 instructions per request inside nxt_php_request_handler,
+# -3,272 (-6.2%). The lab's s_instructions also counts libunit and the
+# router, so the expected change there is smaller, about 2 to 3 percent, at
+# the null band (2.5 to 2.6 percent). Syscalls do not change.
+JOB=18-php-server-interned
+ISSUE=https://github.com/freeunitorg/freeunit/issues/597
+REV_A=origin/master
+REV_B=origin/master
+PATCH_B=patches/php-server-interned.diff
+WORKLOAD=server
+CONNS=6
+WARM=2
+DUR=8
+REPS=4
+PERF=1
+STRACE=1
+PRIMARY=s_instructions
+FUNCS=php.unit.so:nxt_php_register_variables
+EXPECT=s_instructions down about 3,300 per request (near the null band); every asys_ and rsys_ syscall count equal in A and B; nxt_php_register_variables larger in B (inlined registration)
+FALSIFY=s_instructions higher in B than the null band, or any syscall count that differs between A and B
