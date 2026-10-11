@@ -67,7 +67,8 @@ is the task ledger and `tools/inbox` the message bus that agents share
 libunit and port IPC source for a long-context model ([docs/context-priming.md](docs/context-priming.md)).
 Performance: `tools/bench-engines.sh` (A/B of two builds, noise floor first),
 `tools/bench-release.sh` and `tools/bench-crossover.py` (release A/B with swapped slots),
-`tools/bench-startup.sh` (startup latency), and the perf lab: `tools/perf-job.sh` runs
+`tools/bench-startup.sh` (startup latency), `tools/ktls-bench.sh` (sender CPU per MiB,
+user-space OpenSSL against kTLS, in C), and the perf lab: `tools/perf-job.sh` runs
 one job on the lab machine, `tools/perf-compare.py` writes the verdict,
 `tools/perf-bisect.sh` finds the first slower commit ([docs/perf/perf-lab.md](docs/perf/perf-lab.md)).
 
