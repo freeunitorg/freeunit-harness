@@ -1,0 +1,16 @@
+# Job 24: PR 638 head against its base, master of 2026-10-11.
+# A = 4fef769d (origin/master, the merge base). B = 56b54721 (PR head after the drain fix 1e69621d).
+# Job 22 is the "before" number; this one checks that the regression fix holds on the final head.
+JOB=24-638-drain-vs-master
+ISSUE=https://github.com/freeunitorg/freeunit/pull/638
+REV_A=4fef769dd8f4c902c8a19a679831dcd0ea4ca7ab
+REV_B=56b54721a9323aa41b65e63312bd9e4b4cc50ae7
+WORKLOAD=hello
+CONNS=6 32
+WARM=2
+DUR=8
+REPS=2
+PERF=1
+PRIMARY=s_instructions
+EXPECT=s_instructions lower in B than A, by 10 percent or more, as the 13 to 27 percent CPU drop on the earlier head
+FALSIFY=null band over 5 percent, or B within the null band of A

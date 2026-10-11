@@ -34,6 +34,7 @@ id, so "per 01:06" was the only way to thread.
 | A directory of message files | no | an ack needs a second file; ordering needs a listing; same as the log with more inodes |
 | sqlite inbox behind a command | no | the command is the only reader; a model with no tool cannot `cat` it; locks across ssh |
 | GitHub issues or discussions | for cross-machine durable items only | promoted findings and decisions; never for "box is busy" |
+| One shared GitHub issue, `tools/relay` | **yes, between machines** | claim, done and perf request lines that a cloud session, the Hermes bot and the laptop all read; [relay.md](relay.md) |
 | MCP server | no | four tools, four MCP formats (agent-tools.md section 7); the workflow needs none today |
 
 The contract (fixed prefix, json tail, reserved keys, roles, acks, cursor, `ttl_min`, claim
@@ -49,6 +50,7 @@ laptop, and the lock there is the claim file under `CLAIM_DIR` ([perf/perf-lab.m
 | Build and test in its own worktree or scratch; `tools/unit-build` on a role host with the claim | any agent | | |
 | Write under `run/` (own files), own scratchpad, `run/agent-findings/<agent>-*.md`, `run/inbox/` | any agent | | |
 | Start a lab job through `tools/perf-job.sh` | perf-runner role | | |
+| `tools/relay perf --run`: run a lab job a trusted login asked for on the relay issue | | yes, with an end time | |
 | Claim a box for anything but a lab job; build on the lab box in the perf window | | yes | |
 | Delete, kill, strace or gdb anything it did not start (worktrees, caches, images, claims, unitd) | never | yes, each path named | |
 | Write under `docs/`, `skills/`, `agents/`, `AGENTS.md` | never | yes, as a patch for the maintainer to apply | |

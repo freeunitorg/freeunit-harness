@@ -30,6 +30,7 @@ How FreeUnit works, written against the source tree, and how this harness is run
 | [host-roles.md](host-roles.md) | which machine does which job: `tools/hosts`, roles from `run/lab.env`, and why host names never live in tracked files |
 | [task-ledger.md](task-ledger.md) | the task ledger: one file per task, `tools/task`, claims, leases, gates, briefs and the Claude Code hooks |
 | [agent-messages.md](agent-messages.md) | the line format of the agent message bus (`tools/inbox`) |
+| [relay.md](relay.md) | the cross-machine channel: one GitHub issue, `tools/relay`, claim lines and perf requests from machines with no lab |
 | [agent-coordination.md](agent-coordination.md) | how agents coordinate: bus decisions, authority, spending, the harness as shared memory, learning from sessions. Draft. |
 | [agent-tools.md](agent-tools.md) | agy, dsh and OpenCode next to Claude Code and Codex: install state, instruction and skill discovery, scripted use, models and cost, which tool for which job. Draft. |
 | [model-routing.md](model-routing.md) | which LLM gets which job; what may leave Claude (embargoed GHSA, client code). Draft. |
