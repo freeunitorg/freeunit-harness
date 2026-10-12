@@ -61,6 +61,9 @@ runs everywhere, and no one needs the hardware to catch it again.
 
 - [`references/emulated-repro.md`](references/emulated-repro.md) — the container
   invocation, the build inside it, and why the pytest teardown errors there.
+- [`references/aarch64-host.md`](references/aarch64-host.md) — using a native aarch64
+  host (the `alpine` role) for build, test and benchmark: the PHP `--lib-path`,
+  `modprobe tls`, ini-scan-dir and 2-core gotchas, and the three-variant load method.
 - [`references/arm-alignment.md`](references/arm-alignment.md) — capturing a
   faulting PC without a usable core, and the measured ARMv7 alignment rules.
 
