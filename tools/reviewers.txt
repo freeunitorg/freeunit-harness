@@ -1,0 +1,16 @@
+# Canonical model names for commit and comment trailers (Co-Authored-By, Reviewed-by).
+# One model per line: canonical name, TAB, "addr" if the name takes <noreply@anthropic.com>,
+# TAB, comma-separated aliases seen in the wild (case-insensitive). Lines starting with # are comments.
+# tools/check-trailers.py reads this file. Add a model here before its first trailer.
+Claude Fable 5.1	addr	claude-fable-5-1,fable
+Claude Opus 5.5	addr	claude-opus-5-5,opus
+Claude Sonnet 5.5	addr	claude-sonnet-5-5,sonnet
+Claude Haiku 5.5	addr	claude-haiku-5-5,haiku
+Claude Opus 5	addr	claude-opus-5
+DeepSeek V4.1 Flash	-	DeepSeek,DeepSeek (deepseek-flash),deepseek/deepseek-v4.1-flash,deepseek-flash
+Codex	-	OpenAI Codex,codex
+Grok Bot	-	Grok,grok
+Kimi K3	-	moonshotai/kimi-k3
+Qwen3.8 Max	-	qwen/qwen3.8-max-0902
+GLM 5.3	-	z-ai/glm-5.3
+MiniMax M3	-	minimax/minimax-m3

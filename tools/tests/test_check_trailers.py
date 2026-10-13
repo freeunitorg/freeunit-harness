@@ -1,0 +1,66 @@
+"""Tests of tools/check-trailers.py against tools/reviewers.txt."""
+import importlib.util, os, subprocess, sys, unittest
+
+sys.dont_write_bytecode = True
+TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(TOOLS, "check-trailers.py")
+spec = importlib.util.spec_from_file_location("check_trailers", SCRIPT)
+ct = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ct)
+CANON, ALIAS = ct.load()
+ADDR = ct.ADDR
+
+
+class TrailerTest(unittest.TestCase):
+    def problems(self, text):
+        return ct.check(text, CANON, ALIAS)
+
+    def test_clean_commit(self):
+        msg = "lib: fix\n\nBody.\n\nCo-Authored-By: Claude Opus 5.5 %s\nReviewed-by: Claude Fable 5.1 %s\nReviewed-by: DeepSeek V4.1 Flash\n" % (ADDR, ADDR)
+        self.assertEqual(self.problems(msg), [])
+
+    def test_alias_is_rejected_with_canonical_hint(self):
+        p = self.problems("x\n\nReviewed-by: DeepSeek (deepseek-flash)\n")
+        self.assertEqual(len(p), 1)
+        self.assertIn("'DeepSeek V4.1 Flash'", p[0])
+
+    def test_plain_deepseek_is_an_alias(self):
+        self.assertIn("alias", self.problems("x\n\nReviewed-by: DeepSeek\n")[0])
+
+    def test_claude_needs_address(self):
+        self.assertIn("needs", self.problems("x\n\nCo-Authored-By: Claude Fable 5.1\n")[0])
+
+    def test_non_claude_takes_no_address(self):
+        self.assertIn("no address", self.problems("x\n\nReviewed-by: Codex %s\n" % ADDR)[0])
+
+    def test_unknown_model(self):
+        self.assertIn("unknown model", self.problems("x\n\nReviewed-by: Llama 9\n")[0])
+
+    def test_claude_session_rejected(self):
+        self.assertIn("Claude-Session", self.problems("x\n\nClaude-Session: abc\n")[0])
+
+    def test_blank_line_inside_block(self):
+        p = self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 %s\n\nReviewed-by: Codex\n" % ADDR)
+        self.assertTrue(any("blank line" in q for q in p), p)
+
+    def test_key_spelling(self):
+        self.assertIn("spell the key", self.problems("x\n\nCo-authored-by: Claude Opus 5.5 %s\n" % ADDR)[0])
+
+    def test_comment_block_with_harness_line(self):
+        self.assertEqual(self.problems("Review.\n\nReviewed-by: DeepSeek V4.1 Flash\nHarness: DeepSeek Harness\nTools: bash, read\n"), [])
+
+    def test_cli_file_and_exit_codes(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write("x\n\nReviewed-by: OpenAI Codex\n")
+        r = subprocess.run([sys.executable, SCRIPT, "-f", f.name], capture_output=True, text=True)
+        os.unlink(f.name)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("'Codex'", r.stdout)
+        r = subprocess.run([sys.executable, SCRIPT, "-"], input="x\n\nReviewed-by: Codex\n", capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_every_list_entry_is_self_consistent(self):
+        for key, (name, addr) in CANON.items():
+            line = "Reviewed-by: %s%s\n" % (name, " " + ADDR if addr else "")
+            self.assertEqual(self.problems("x\n\n" + line), [], line)
