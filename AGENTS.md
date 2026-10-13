@@ -181,6 +181,14 @@ carries a private detail (a host name, an address, a private path).
   build host. The gate table is in [README.md](README.md), section "Local gates before a
   push".
 - If the source disagrees with a doc, the source wins and the doc gets fixed.
+- Trailers: `Co-Authored-By: <model>` for the model that wrote the code, and
+  `Reviewed-by: <model>` only for a model whose finding changed the commit.
+  Spell the model as `tools/reviewers.txt` does; Claude models add
+  `<noreply@anthropic.com>`, others take no address. Whatever tool you use
+  (Claude Code, Codex, OpenCode, dsh, aider, Pi), run
+  `tools/check-trailers.py <commit>` before a push and
+  `tools/check-trailers.py -f <file>` before posting a review comment. It names
+  the canonical spelling on a miss. A model not in the list goes into the list first.
 - `/src/`, `/build/`, `/run/`, `/scratch/` are local working state and are
   gitignored. Nothing under them belongs in a commit.
 

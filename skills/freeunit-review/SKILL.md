@@ -9,6 +9,11 @@ description: >-
 **Trigger:** you are about to open a pull request, or you are reviewing someone
 else's.
 
+**Trailers:** `Co-Authored-By` for the model that wrote the code; `Reviewed-by`
+only for a model whose finding changed the commit. Canonical spellings live in
+`tools/reviewers.txt`; run `tools/check-trailers.py <commit>` before you push and
+`tools/check-trailers.py -f comment.md` before you post a review.
+
 ```bash
 make lint          # whitespace + convention gates
 make ctest         # C unit tests
