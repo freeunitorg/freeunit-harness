@@ -14,3 +14,4 @@ Kimi K3	-	moonshotai/kimi-k3
 Qwen3.8 Max	-	qwen/qwen3.8-max-0902
 GLM 5.3	-	z-ai/glm-5.3
 MiniMax M3	-	minimax/minimax-m3
+Muse Spark 1.3	-	pi muse-spark-1.3,muse-spark-1.3
