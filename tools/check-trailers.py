@@ -9,6 +9,8 @@ Usage:
 Rules (AGENTS.md, "Attribution: the trailer pair"):
 - Co-Authored-By and Reviewed-by name a model from tools/reviewers.txt, spelled as its
   canonical name. An alias is an error; the message names the canonical spelling.
+- The model may be followed by the harness that ran it, in parentheses:
+  "Reviewed-by: DeepSeek V4.1 Flash (DSH)".  A Claude address goes after it.
 - Claude models carry " <noreply@anthropic.com>"; other models carry no address.
 - Trailers sit in the last paragraph, one per line, with no blank line between them.
 - Claude-Session trailers are not allowed.
@@ -67,6 +69,12 @@ def check(text, canon, alias):
         if re.search(r"<[^>]*>$", name):
             problems.append("line %d: unexpected address %r; only %s is used" % (i, name, ADDR))
             continue
+        # A whole value in the list wins, so an alias that ends in parentheses
+        # is still reported as an alias; otherwise drop a "(harness)" suffix.
+        if name.lower() not in canon and name.lower() not in alias:
+            h = re.match(r"^(.*\S)\s+\([^()]+\)$", name)
+            if h:
+                name = h.group(1)
         if name.lower() in canon:
             cname, want_addr = canon[name.lower()]
             if cname != name:

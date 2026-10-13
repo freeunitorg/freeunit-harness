@@ -49,6 +49,21 @@ class TrailerTest(unittest.TestCase):
     def test_comment_block_with_harness_line(self):
         self.assertEqual(self.problems("Review.\n\nReviewed-by: DeepSeek V4.1 Flash\nHarness: DeepSeek Harness\nTools: bash, read\n"), [])
 
+    def test_harness_suffix_is_accepted(self):
+        self.assertEqual(self.problems("x\n\nReviewed-by: DeepSeek V4.1 Flash (DSH)\n"), [])
+        self.assertEqual(self.problems("x\n\nCo-Authored-By: Muse Spark 1.3 (Pi)\n"), [])
+        self.assertEqual(self.problems("x\n\nReviewed-by: Claude Fable 5.1 (Claude Code) %s\n" % ADDR), [])
+
+    def test_harness_suffix_still_checks_the_model(self):
+        self.assertIn("unknown model", self.problems("x\n\nReviewed-by: Llama 9 (DSH)\n")[0])
+        self.assertIn("alias", self.problems("x\n\nReviewed-by: DeepSeek (DSH)\n")[0])
+        self.assertIn("needs", self.problems("x\n\nReviewed-by: Claude Fable 5.1 (Claude Code)\n")[0])
+
+    def test_alias_with_parentheses_is_still_an_alias(self):
+        p = self.problems("x\n\nReviewed-by: DeepSeek (deepseek-flash)\n")
+        self.assertEqual(len(p), 1)
+        self.assertIn("alias", p[0])
+
     def test_cli_file_and_exit_codes(self):
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:

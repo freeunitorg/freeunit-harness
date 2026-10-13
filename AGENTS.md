@@ -183,8 +183,9 @@ carries a private detail (a host name, an address, a private path).
 - If the source disagrees with a doc, the source wins and the doc gets fixed.
 - Trailers: `Co-Authored-By: <model>` for the model that wrote the code, and
   `Reviewed-by: <model>` only for a model whose finding changed the commit.
-  Spell the model as `tools/reviewers.txt` does; Claude models add
-  `<noreply@anthropic.com>`, others take no address. Whatever tool you use
+  Spell the model as `tools/reviewers.txt` does, optionally followed by the
+  harness in parentheses (`Reviewed-by: DeepSeek V4.1 Flash (DSH)`); Claude
+  models add `<noreply@anthropic.com>`, others take no address. Whatever tool you use
   (Claude Code, Codex, OpenCode, dsh, aider, Pi), run
   `tools/check-trailers.py <commit>` before a push and
   `tools/check-trailers.py -f <file>` before posting a review comment. It names
