@@ -29,10 +29,15 @@ echo "==> whitespace gate: git log --check $BASE.."
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
     echo "  ! base ref '$BASE' not found; skipping (pass one explicitly)" >&2
 else
-    # git log --check prints offending lines and says nothing when clean.
-    out=$(git log --check --pretty=format:'--- %h %s' "$BASE"..)
+    # git log --check prints the offending lines and nothing when clean.
+    # --pretty=format: keeps the per-commit header out of the output: with a
+    # header every commit in the range looks like a hit, and the gate then
+    # fails on a clean branch and passes on an empty range.
+    out=$(git log --check --pretty=format: "$BASE"..)
     if [ -n "$out" ]; then
         echo "$out"
+        echo "  commits checked:"
+        git log --oneline "$BASE".. | sed 's/^/    /'
         echo "  ✗ whitespace errors above (trailing space, space-before-tab, blank EOF)"
         status=1
     else

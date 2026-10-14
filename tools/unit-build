@@ -114,8 +114,14 @@
 #
 # PORTS
 #   8080 is taken on every host we use, including the remotes. The pytest verb
-#   shifts the suite to $UNIT_TEST_PORT (default 8099) in the *copy* it runs
-#   from, never in your worktree.
+#   moves the suite off it in the *copy* it runs from, never in your worktree.
+#
+#   A tree with test/unit/port.py (since 2149f582) gets --port: that map shifts
+#   every literal, including the bases test_port_map.py asserts on, so
+#   $UNIT_TEST_PORT must be on its grid, 8080 + k * 1000. The default is 9080,
+#   because 8080 itself is taken. An older tree has no map, and keeps the sed
+#   rewrite of 8080 to $UNIT_TEST_PORT (default 8099); that rewrite leaves
+#   every other base on the old grid, so the two cannot be mixed.
 #
 #   The shift covers every *.py under test/, not just test/unit/*.py and
 #   test/*.py -- measured 2026-09-12: the narrower glob missed
@@ -225,6 +231,29 @@ NAME=${SRC##*/}
 # checkout, and syncing it with --delete would replace a real one of the
 # same name on the host.
 [ -f "$SRC/configure" ] || die "$SRC has no configure: not a FreeUnit checkout (pass -s DIR, or run make src)"
+
+# The suite gained --port in 2149f582 (test/unit/port.py): it shifts every
+# literal through one map. The sed below rewrites only 8080, which turns
+# MIN_BASE into the new port while the bases test_port_map.py asserts on stay
+# on the old grid, so the run dies in pytest_sessionstart. Use --port when the
+# tree has the map, and keep the sed for an older tree.
+PORT_ARG=
+if [ -f "$SRC/test/unit/port.py" ]; then
+    # --port needs a base on the 8080 + k * 1000 grid. 8080 is taken on the
+    # boxes we use, so 9080 is the first free one.
+    [ -n "${UNIT_TEST_PORT:-}" ] || PORT=9080
+
+    if [ "$PORT" -lt 8080 ] || [ "$PORT" -gt 32080 ] \
+        || [ $(( (PORT - 8080) % 1000 )) -ne 0 ]
+    then
+        die "--port needs 8080, 9080, ... 32080 on a tree with test/unit/port.py, got $PORT"
+    fi
+
+    PORT_ARG="--port $PORT"
+    PYTEST_SHIFT=
+else
+    PYTEST_SHIFT="find test -name '*.py' -exec sed -i -e s/8080-8090/$PORT-$((PORT+10))/g -e s/8080/$PORT/g {} + && "
+fi
 
 # config: print what this run would use, and stop. Touches no host.
 if [ "$VERB" = config ]; then
@@ -425,8 +454,7 @@ run_remote() {
 
     case $VERB in
         tests)  cmd="$cmd && $TESTS_CMD" ;;
-        pytest) cmd="$cmd && find test -name '*.py' -exec sed -i -e s/8080-8090/$PORT-$((PORT+10))/g -e s/8080/$PORT/g {} + && \
-                     ~/venv-unit/bin/pytest test/ -x -q" ;;
+        pytest) cmd="$cmd && ${PYTEST_SHIFT}~/venv-unit/bin/pytest test/ -x -q $PORT_ARG" ;;
         shell)  exec ssh -t "$HOST" "cd $REMOTE_ROOT/$name && exec \$SHELL" ;;
     esac
 
@@ -525,8 +553,7 @@ run_alpine() {
         # which is exactly the green-but-empty run this verb exists to prevent.
         pytest) cmd="$cmd && cargo build --release --manifest-path test/fake_otlp/Cargo.toml \
                      && cp test/fake_otlp/target/release/fake_otlp /usr/local/bin/ \
-                     && find test -name '*.py' -exec sed -i -e s/8080-8090/$PORT-$((PORT+10))/g -e s/8080/$PORT/g {} + \
-                     && pytest test/ -x -q" ;;
+                     && ${PYTEST_SHIFT}pytest test/ -x -q $PORT_ARG" ;;
         debug)  cmd="$cmd && gdb build/sbin/unitd" ;;
         shell)  ssh -t "$HOST" "docker exec -it $c sh"; return ;;
     esac
