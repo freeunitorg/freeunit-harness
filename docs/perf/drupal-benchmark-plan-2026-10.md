@@ -71,14 +71,14 @@ Verified on the GitHub mirror `drupal/drupal` on 2026-10-07:
 | branch | tip | latest tag | note |
 |---|---|---|---|
 | `11.x` | 89f3e765b (2026-10-05) | | development |
-| `11.4.x` | 0077935ed (2026-10-03) | 11.4.8 | current stable series |
+| `11.4.x` | 0077935ed (2026-10-03) | 11.4.10 | current stable series |
 | `main` | 47430c368 (2026-10-06) | 12.0.0-beta1 | Drupal 12 development; there is no `12.x` branch |
 | `12.0.x` | cb1b6c0c7 (2026-10-06) | | release branch for 12.0.0 |
 
 Core profiles on both lines: `demo_umami`, `minimal`, `standard` (`core/profiles` on `11.x` and `main`).
 `demo_umami` is still marked "(Experimental)" in `demo_umami.info.yml`.
 
-Pin tags, never branches: `drupal/recommended-project:11.4.8` and `drupal/recommended-project:12.0.0-beta1`
+Pin tags, never branches: `drupal/recommended-project:11.4.10` and `drupal/recommended-project:12.0.0-beta1`
 (12.0.0 is planned for the week of 2026-12-07; rebuild the 12 site at 12.0.0 and keep both result sets).
 Build with `composer create-project` inside the PHP image, commit `composer.lock`, and record the
 `drupal/core` version in `meta.txt`. The Yii3 run did not commit its lock file and so its runner versions are
@@ -282,7 +282,7 @@ reports `cli-server`, `src/nxt_php_sapi.c:302`; Drupal only tests `cli`, so the 
    `tools/perf-lab/cells.sh:69-92`) and a `RUNTIME` axis so a cell can start httpd or nginx+fpm instead of unitd.
    This is the largest change: today `start_unit` is the only server starter.
 3. Job 01 of the lab first, on the same day, to set the bands (`perf-lab.md:231-235`).
-4. `front-anon` and `front-auth` on 11.4.8 for the three runtimes, then 12.0.0-beta1.
+4. `front-anon` and `front-auth` on 11.4.10 for the three runtimes, then 12.0.0-beta1.
 5. Cron and queue arms A, B, C on FreeUnit; A and B on nginx+FPM and Apache.
 6. First page publishes with the null bands printed under every chart.
 
