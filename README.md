@@ -118,6 +118,33 @@ root `Makefile` and `build/` of the tree it runs in, so a gate that builds would
 the configured state of a worktree you are editing. Use `--allow-local-build` only on a
 checkout you can throw away.
 
+### 32-bit test runs (opt-in)
+
+`tools/unit-build --m32` builds FreeUnit with
+`--cc-opt='-m32 -D_FILE_OFFSET_BITS=64' --ld-opt=-m32` and runs the C tests or the
+Python suite on that build. It is off by default. Turn it on per run with `--m32`, or for
+every run with `UNIT_BUILD_M32=1` in the environment or in the lab env file.
+
+```bash
+tools/unit-build -t alpine -H alpine --m32 tests     # build/tests and the hook gate
+tools/unit-build -t alpine -H alpine --m32 pytest    # the Python suite
+tools/unit-build -t remote -H build --m32 tests      # needs gcc-multilib on the host
+```
+
+The alpine target is the one to use. It runs in a 32-bit x86 Alpine edge container
+(`--platform linux/386`, image `ALPINE_M32_IMAGE`, default `i386/alpine:edge`) with
+Alpine edge apk packages only, so OpenSSL and PCRE are real 32-bit libraries and only
+FreeUnit is built. The Docker host must run 386 binaries: any x86_64 host does natively,
+an arm64 host only under qemu. The remote target has no 32-bit OpenSSL or PCRE, so it
+builds without `--openssl` and with `--no-regex`, as the CI job does. A 32-bit run uses
+its own synced tree and tmux session, with a `-m32` suffix, and never touches the 64-bit
+`build/`. `--otel` and the `debug` verb are refused with `--m32`, and so is `-t local`,
+which would build in place in your checkout.
+
+FreeUnit CI only compiles this configuration, in the `build-m32` job
+([freeunitorg/freeunit#725](https://github.com/freeunitorg/freeunit/pull/725), for
+[#632](https://github.com/freeunitorg/freeunit/issues/632)). This option runs the tests on it.
+
 ## Lab env file
 
 Host names never go into a tracked file. Copy the template and fill in your own hosts:
