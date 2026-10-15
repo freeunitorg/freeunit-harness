@@ -14,16 +14,37 @@ Layout
 - pkg/            deb, rpm, docker, npm packaging; eol.json = runtime EOL data
 - CHANGES         user-visible changes; must match docs/changes.xml
 
-C style (nginx style; match surrounding code)
+C style (summary of docs/style.md, which wins on any conflict;
+the code wins over both)
 - 4 spaces, no tabs, 80 columns, /* */ comments only.
-- Declarations at block top, aligned; one blank line between groups.
-- Unlikely branches use nxt_slow_path(); likely use nxt_fast_path().
-- Error cleanup via goto fail; return NXT_OK / NXT_ERROR / NXT_DECLINED.
-- Use nxt_sprintf, nxt_memcpy, nxt_str_t, nxt_mp_* pools, nxt_log_* —
-  not libc printf/malloc in core code.
+- Return type on its own line, name at column 1; two blank lines
+  between top-level functions.
+- Locals in one block at the top, names aligned in one column, `*` on
+  the name, ordered by type-name length, shortest first (92% of
+  blocks). No blank lines inside the block. Match an existing block.
+- Error branches use nxt_slow_path(); likely ones nxt_fast_path().
+- Cleanup via goto fail (or the label the function already uses).
+  Return NXT_OK / NXT_ERROR, NXT_AGAIN / NXT_DECLINED only where the
+  distinction is real.
+- nxt_sprintf grammar is not printf: hex is %Xd, not %X.
+- nxt_mp_get aligned, nxt_mp_nget unaligned, nxt_mp_alloc freeable:
+  the wrong one is a bug (SIGBUS on 32-bit ARM). Prefer
+  nxt_list_zero_add().
+- Since #444/#413: nxt_size_add()/nxt_size_mul() for length maths,
+  nxt_span_t for untrusted records, nxt_fallthrough; not a comment,
+  no VLAs, clean under --hardening=strict, test hooks under
+  #if (NXT_TESTS) in NXT_LIB_SRCS / NXT_LIB_UNIT_SRCS only.
 - Watch integer widths: nxt_conf_map types write their own size (32-bit bug
   class from #581); check 32-bit, big-endian (s390x), musl and weak-memory
   (riscv64, loongarch64, ppc64le) behaviour.
+
+Early feedback (docs/style.md, "Close the feedback loop early")
+- State the expected result before each run or check.
+- Read each result as soon as it lands: build, first test, each CI
+  job. Report a failure, red job or broken assumption in the next
+  status line with the quoted log line, not only in the final review.
+- Try the narrowest fix on the spot and re-run the failed step. Stop
+  and report after two failed attempts or when it needs a decision.
 
 Project rules
 - Bug fixes need a regression test that fails before and passes after.

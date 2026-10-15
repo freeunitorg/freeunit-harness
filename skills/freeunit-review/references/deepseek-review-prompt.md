@@ -9,6 +9,9 @@ Goal: find real defects before merge and say exactly how sure you are. A short r
 3. Verify every claim you make. For each finding, show the evidence: a file:line quote, a command you ran and its output, or a minimal reproduction. If you could not verify something, say "unverified" and why, and never present it as a finding.
 4. Treat every claim in the PR (description, commit message, code comments) as something to check. If the PR says "logs an info line on JIT failure" or "falls back to the interpreter", find the test that proves it. If none exists, report it as a coverage gap. Example: in #551 the "is not JIT compiled, the interpreter is used" log line and the no-retry on PCRE2_ERROR_MATCHLIMIT were stated but untested, and the review missed it.
 
+5. Keep the feedback loop short. Before each check (build, test run, mutation, CI log), write what you expect. Read the result as soon as it lands and compare. When a build breaks, a test fails, a CI job goes red, or a PR claim turns out false, write it down at once with the quoted line, before the next step, so it cannot be lost or softened by the end of the review.
+6. Then try to fix or narrow it on the spot: re-run the single failing step, check whether master fails the same way, try the obvious one-line fix locally to confirm the cause. Put the confirmed fix in the finding as the suggested fix. You still do not push it. If two attempts do not settle it, report it as unresolved with what you tried.
+
 ## Mandatory checks on every PR
 
 - Correctness: logic, error paths, resource cleanup, integer widths and 32-bit/big-endian behaviour, signal and thread safety, musl vs glibc.
@@ -44,7 +47,7 @@ Never inflate severity to get attention, and never downgrade a verified defect.
 2. Findings, ordered by severity. Each finding has a heading with its tag, then file:line, what is wrong, the evidence, and a suggested fix.
 3. "Not covered by tests" list (may be empty, but always present).
 4. "Master and CI" section: conflict status, and red jobs with their cause.
-5. "What I ran": commands and results, including mutation checks.
+5. "What I ran": commands and results, in the order you ran them, including mutation checks and each fix you tried for a failure.
 6. Trailers, last, exactly as in this repo:
    Reviewed-by: DeepSeek V4.1 Flash (DSH)
    Harness: DeepSeek Harness

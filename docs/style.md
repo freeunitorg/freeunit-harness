@@ -49,8 +49,12 @@ single column and `*` bound to the name:
 ```
 
 Not alphabetical, not grouped by meaning — by type-name width, shortest first.
-The alignment column sits two spaces past the longest type. Consistent in
-`nxt_mp.c`, `nxt_router.c`, `nxt_conn.c`, `nxt_http_request.c`.
+The alignment column sits two spaces past the longest type. The ordering is a
+strong habit, not a law: of 727 top-of-function blocks with three or more
+declarations at `82e17fbb`, 670 (92%) are in non-decreasing type-name order
+(`nxt_router_conf_create()` is one that is not). New code follows the rule;
+when editing a function, match its existing block rather than reorder it.
+There is no blank line between groups inside the block.
 
 ## Idioms
 
@@ -193,6 +197,29 @@ platform is usually undefined behaviour everywhere that one platform happens to
 detect. Where you can, land the invariant as an assertion or unit test that
 runs on every architecture, so the next regression is caught without the
 hardware.
+
+**Close the feedback loop early, not at the end.** An experiment, a review
+round or a fix is a sequence of checkpoints, and each one is a chance to find
+out that you are wrong while it is still cheap:
+
+1. Before the run, write down what you expect: the test that should fail on
+   the parent, the number that should move, the CI job that should go green.
+2. After each step (configure, build, first test, first benchmark cell, first
+   CI job to finish), compare against that expectation at once. Do not queue
+   the next step behind an unread result.
+3. When something fails, a CI job goes red, or an assumption turns out false,
+   say so in the next status line, with the failing line quoted, before you
+   do anything else. A failure first reported in the final summary is a late
+   report, even if the summary is correct.
+4. Then try the fix on the spot: the narrowest change, re-run only the step
+   that failed, and confirm it now passes. Carry on only when it does.
+5. If the fix is out of scope, needs a decision, or fails twice, stop and
+   report what failed, what you tried and what is left. Do not route around
+   it or finish the remaining steps as if it had passed.
+
+A red CI job counts the same as a local failure: read its log as soon as it
+fails (`tools/watch-run.sh`), not when the whole run ends, and decide whether
+it is this change or infrastructure, with the log line as evidence.
 
 **Separate a latent finding from the fix in hand.** If you find a second bug
 while proving the first, document it in the PR and file it — do not grow the

@@ -27,7 +27,7 @@ nothing here restates them.
 
 ## Rules that go in every brief
 
-Six sentences, verbatim, at the top of any brief. Each one is here because
+Seven sentences, verbatim, at the top of any brief. Each one is here because
 leaving it out cost hours on 2026-08-28/29.
 
 **1. Name the revision you read.** A long-lived server checkout sat ~40 commits
@@ -65,6 +65,14 @@ patch for you to apply. Anything that needs its own tree gets a worktree
 **6. End every report with what you could not verify.** A report with no such
 section is not a clean report, it is an unlabelled one — and the unlabelled part
 is where the next false claim comes from.
+
+**7. Report a failure when it happens, then try to fix it.** A run that
+breaks in its first minute and is reported in its final summary has wasted the
+rest of the run, and the summary tends to soften it. Brief: *"state what you
+expect before each step; the moment a step fails, a CI job goes red or an
+assumption is false, report it with the quoted line, try the narrowest fix,
+and re-run that step. After two failed attempts, stop and report."* See
+[`../docs/style.md`](../docs/style.md), section "Approach".
 
 ## The tools these roles lean on
 
