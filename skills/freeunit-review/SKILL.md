@@ -74,6 +74,28 @@ before it goes into a PR body or an issue comment
 judged harmless under some earlier operation
 ([`references/bots-and-gh.md`](references/bots-and-gh.md#commands)).
 
+## The layout and protocol surface
+
+Four things are shared with a process or a module this tree did not build. When
+a patch touches one of them, the check in the right column has to see it, and
+`tools/perf/layout-structs.txt` is the manifest that turns a forgotten entry
+into a failure instead of a warning.
+
+| the change touches | what catches it |
+|---|---|
+| a struct or an enumerator in a header `make install` copies (the rule is in `auto/make`) | `Layout check (pahole)`; `tools/perf/layout-coverage.py` needs an entry for each |
+| a struct in shared memory: `nxt_port*.h`, `nxt_app_queue.h`, `nxt_app_nncq.h`, `nxt_nncq.h` | the same job, as a `shm` entry: a layout change fails |
+| a handler slot in `nxt_port_handlers_t`, or any `_NXT_PORT_MSG_*` value | the same job, as an `enum` entry: a number is the offset of a slot, so inserting or reordering renumbers the wire protocol, and appending is the only safe edit |
+| `PORT_MMAP_*`, or a message payload both sides decode | the same job, as a `const` or `shm` entry |
+
+The header comment of the list is the long form: what each kind means, why a
+`local` entry is a warning rather than a failure, and the map from a file to
+the entries it needs. Two review habits follow. A diff that inserts a slot in
+the middle of `nxt_port_handlers_t` renumbers the protocol and is a protocol
+change even when it looks like a local edit. A diff that changes a struct a
+module lays out itself needs its list entry in the same commit, and CI will say
+so if it is missing.
+
 ## Rebases and stacked branches
 
 **Fold review fixes into the commit they correct.** Amend or squash and
