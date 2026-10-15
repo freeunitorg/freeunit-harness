@@ -11,6 +11,7 @@ How FreeUnit works, written against the source tree, and how this harness is run
 | [architecture.md](architecture.md) | processes, ports, shared memory, threads and event engines; where to put a change |
 | [http-flow.md](http-flow.md) | one request from accept to response, with the symbols to follow |
 | [php-lifecycle.md](php-lifecycle.md) | how an app worker runs your PHP: MINIT once, RINIT/RSHUTDOWN per request |
+| [shell.md](shell.md) | portable shell: POSIX sh only, portable sed, multishell testing, which harness scripts are still bash |
 | [glossary.md](glossary.md) | the vocabulary, including the words that mean something else elsewhere |
 | [release-version-sites.md](release-version-sites.md) | every file that carries the release version, how a bump updates it, what check-version.sh covers, and the version strings a bump must never touch |
 | [otel-retry-config-2026-10-07.md](otel-retry-config-2026-10-07.md) | OTLP export retries after PR 577: what controls them, and a non-blocking design |

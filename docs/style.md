@@ -224,3 +224,9 @@ it is this change or infrastructure, with the log line as evidence.
 **Separate a latent finding from the fix in hand.** If you find a second bug
 while proving the first, document it in the PR and file it — do not grow the
 diff. Reviewers can only verify what they can hold in their head.
+
+## Shell scripts
+
+Shell scripts are POSIX `sh`, sed expressions are POSIX BRE, and Python is
+preferred for anything larger than an entry point. Rules and test commands:
+[shell.md](shell.md).
