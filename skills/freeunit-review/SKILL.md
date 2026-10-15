@@ -117,6 +117,11 @@ successive fixes are how a converging review round reopens.
 - [`references/bots-and-gh.md`](references/bots-and-gh.md) — verifying bot
   findings, what an automated reviewer actually diffed, re-triggering, and the
   `gh` commands that fail.
+- [`references/deepseek-review-prompt.md`](references/deepseek-review-prompt.md) —
+  the system prompt for the DeepSeek reviewer (`dsh`). Pass it verbatim.
+- [`references/freeunit-review-primer.md`](references/freeunit-review-primer.md) —
+  context primer: layout, C style, project rules, review history, output
+  format. Inject it before every review, after the prompt above.
 
 ### API width audits: read the emitter, not the struct
 
