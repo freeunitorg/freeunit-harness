@@ -45,7 +45,7 @@
 #
 # USAGE
 #   unit-build [-t local|remote|alpine] [-H host] [-s srcdir] [-j jobs]
-#              [--otel] [--debug] [--hardening[=LEVEL]] [--no-tests] VERB
+#              [--otel] [--debug] [--hardening[=LEVEL]] [--no-tests] [--m32] VERB
 #
 #   -s is the FreeUnit checkout. Without it: $UNIT_SRC, else the harness
 #   ./src (`make src` clones it). It must hold ./configure; a tree without
@@ -142,6 +142,27 @@
 #   and note there is no rg on the remote hosts, so piping to it fails in a way
 #   that looks like success.
 #
+# 32-BIT (--m32, opt-in)
+#   Off by default. --m32, or UNIT_BUILD_M32=1 in the environment or the lab
+#   env file, builds with --cc-opt='-m32 -D_FILE_OFFSET_BITS=64' --ld-opt=-m32
+#   and runs the same verbs (tests, pytest) against that build. It covers what
+#   freeunit CI only compiles (freeunit #632, freeunit PR #725): CI checks that
+#   a 32-bit build links; this runs the suites on one.
+#
+#   Prefer -t alpine. There the build runs in a 32-bit x86 Alpine edge
+#   container (--platform linux/386, image $ALPINE_M32_IMAGE, default
+#   i386/alpine:edge) with Alpine edge apk packages only, so OpenSSL and PCRE
+#   are real 32-bit libraries and nothing but unit is built. The image has a
+#   distinct name on purpose: pulling linux/386 under a shared tag such as
+#   alpine:edge would hand every later amd64 run a 386 image.
+#
+#   -t remote needs a multilib toolchain (gcc-multilib) on that host and
+#   has no 32-bit OpenSSL or PCRE, so there the build drops --openssl and
+#   adds --no-regex, like the CI job. The synced tree and tmux session get a
+#   -m32 suffix, so the 64-bit build/ of the same checkout is left alone.
+#   -t local is refused: it builds in place in your checkout. --otel is refused: the
+#   Rust crate is not cross-built for i686.
+#
 # CORES
 #   Remote hosts are shared. Default is 5 jobs, and on the alpine target all
 #   three of --cpus, CARGO_BUILD_JOBS and -j are set: --cpus alone still lets
@@ -161,6 +182,7 @@ JOBS=5
 OTEL=
 DEBUG=
 HARDENING=
+M32=
 TESTS=--tests
 PORT=${UNIT_TEST_PORT:-8099}
 
@@ -195,6 +217,7 @@ while [ $# -gt 0 ]; do
         --hardening) HARDENING=--hardening=strict; shift ;;
         --hardening=*) HARDENING=$1; shift ;;
         --no-tests) TESTS=; shift ;;
+        --m32) M32=1; shift ;;
         # Printing a literal line range went stale the first time the header
         # grew. Print from line 2 up to wherever the code actually starts.
         -h|--help) awk 'NR>1 && /^set -/{exit} NR>1' "$0"; exit 0 ;;
@@ -204,6 +227,15 @@ while [ $# -gt 0 ]; do
 done
 
 VERB=${VERB:-build}
+
+# 32-bit is opt-in: --m32, else UNIT_BUILD_M32 (environment, then lab env file).
+[ -n "$M32" ] || case $(lab_env_get UNIT_BUILD_M32) in 1|yes|true) M32=1 ;; esac
+if [ -n "$M32" ]; then
+    [ -z "$OTEL" ] || die "--m32 with --otel is not supported (no i686 Rust build)"
+    [ "$VERB" != debug ] || die "--m32 has no debug verb"
+    IMAGE=$(lab_env_get ALPINE_M32_IMAGE)
+    IMAGE=${IMAGE:-i386/alpine:edge}
+fi
 [ "$TARGET" = local ] || [ -n "$HOST" ] || die "target $TARGET needs -H host"
 [ "$TARGET" = local ] || [ -n "$REMOTE_ROOT" ] \
     || die "target $TARGET needs a remote root: set BUILD_ROOT in $LAB_ENV or UNIT_REMOTE_ROOT"
@@ -257,8 +289,8 @@ fi
 
 # config: print what this run would use, and stop. Touches no host.
 if [ "$VERB" = config ]; then
-    printf 'TARGET=%s\nHOST=%s\nSRC=%s\nNAME=%s\nREMOTE_ROOT=%s\nREMOTE_CACHE=%s\nIMAGE=%s\n' \
-        "$TARGET" "$HOST" "$SRC" "$NAME" "$REMOTE_ROOT" "$REMOTE_CACHE" "$IMAGE"
+    printf 'TARGET=%s\nHOST=%s\nSRC=%s\nNAME=%s\nREMOTE_ROOT=%s\nREMOTE_CACHE=%s\nIMAGE=%s\nM32=%s\n' \
+        "$TARGET" "$HOST" "$SRC" "$NAME" "$REMOTE_ROOT" "$REMOTE_CACHE" "$IMAGE" "${M32:-0}"
     exit 0
 fi
 
@@ -268,6 +300,26 @@ fi
 SESSION=unitbuild-${NAME//[.:]/_}
 
 CONF="--openssl $OTEL $DEBUG $HARDENING $TESTS"
+PLATFORM=linux/amd64
+if [ -n "$M32" ]; then
+    # configure keeps only the last --cc-opt, so both flags share one word.
+    # The space is escaped, not quoted: quotes would break the alpine
+    # target's sh -c '...', and the backslash survives every hop to the
+    # shell that finally runs configure. -t local splits $CONF itself, where
+    # the escape means nothing, hence the refusal below.
+    M32_OPT="--cc-opt=-m32\\ -D_FILE_OFFSET_BITS=64 --ld-opt=-m32"
+    [ "$TARGET" != local ] || die "--m32 needs -t alpine (preferred) or -t remote"
+    if [ "$TARGET" = alpine ]; then
+        CONF="--openssl $DEBUG $HARDENING $TESTS $M32_OPT"
+        PLATFORM=linux/386
+    else
+        CONF="--no-regex $DEBUG $HARDENING $TESTS $M32_OPT"
+    fi
+    # Separate tmux session and synced tree name: a 32-bit build must not
+    # reuse, or clobber, the 64-bit build/ of the same checkout.
+    NAME=$NAME-m32
+    SESSION=$SESSION-m32
+fi
 
 # The tests verb, one string for all three targets. See TESTS above.
 #
@@ -526,7 +578,7 @@ run_alpine() {
     # These three mounts used to point into $HOME, i.e. the 40 G root
     # filesystem; a musl registry and a 420 MB apk cache do not belong there.
     ssh "$HOST" "mkdir -p $REMOTE_CACHE/cargo-musl $REMOTE_CACHE/apk $REMOTE_CACHE/logs"
-    ssh "$HOST" "docker run -d --name $c --platform linux/amd64 --cpus=$JOBS $caps \
+    ssh "$HOST" "docker run -d --name $c --platform $PLATFORM --cpus=$JOBS $caps \
         -e CARGO_HOME=/cargo -e CARGO_BUILD_JOBS=$JOBS \
         -v $REMOTE_CACHE/cargo-musl:/cargo -v $REMOTE_CACHE/apk:/var/cache/apk \
         -v $REMOTE_ROOT/$name:/mnt --user root -w /mnt $IMAGE sleep infinity" >/dev/null
