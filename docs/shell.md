@@ -93,6 +93,55 @@ cmp gnu.out bb.out
 None of these tests Solaris or BSD `sh` directly. When a script is on the
 `configure` path, say in the PR which shells it was run under.
 
+## The server gate
+
+The server repo has a full-tree gate, `.github/scripts/lint-shell.sh`, run by
+`Lint (shell)` on every pull request and on every push to master. A
+`#!/bin/sh` file gets `shellcheck -s sh -S warning` and `dash -n`; a
+`#!/bin/bash` file gets `shellcheck -s bash -S warning` and `bash -n`.
+`configure` and the generated `*.in` files are skipped. A `#!/bin/sh` file
+may not run a bare `set -o pipefail`; the guarded form is allowed.
+
+`tools/check-style` (`make lint`) runs the gate when shellcheck and dash are
+installed. The CI image is pinned by digest in the server's
+`.github/workflows/lint-shell.yml`; from the server checkout:
+
+```sh
+sh .github/scripts/lint-shell.sh \
+    "docker run --rm -v $PWD:/mnt -w /mnt \
+     koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d"
+```
+
+## What the lint cannot see
+
+The gate checks syntax and the known bashisms. These failures passed it; they
+come from the server's 743-748 and 756 conversions.
+
+- **Quote a URL, not an option string.** The `unitc` control target is
+  `--unix-socket <path> _` for the local socket, `docker://` and `ssh://`.
+  `$UNIT_CTRL"$URI"` keeps the option words and the `_/config` URL; quoting
+  the concatenation hands curl one argument and it fails with "is unknown".
+  ShellCheck accepts both. A script that builds a command line needs a stub
+  test that asserts the argv on every transport; `test/unitc/argv_test.sh`
+  ([freeunit#763](https://github.com/freeunitorg/freeunit/pull/763)) is the
+  example.
+- **`producer | grep -q` under `pipefail`.** grep exits at the first match,
+  the producer takes SIGPIPE, and the pipeline status is 141, so the `if`
+  takes the false branch. Drop `-q`, use a here-document, or keep the data
+  off the pipe.
+- **`for x in $list` performs pathname expansion.** Store the list
+  newline-separated and read it with `IFS= read -r`, or disable globbing.
+- **`set -u` and `"$@"` with no positional parameters.** POSIX exempts `@`
+  and `*`; posh 0.14.3 treats them as unset. dash, ash, bash, ksh and yash
+  accept the idiom; do not add a workaround for posh unless it is a target.
+- **A signal does not run the EXIT trap in dash or ash.** Trap HUP, INT,
+  QUIT and TERM and exit 128 plus the signal number. After a hangup, stdout
+  is gone and `echo` fails; under `set -e` that aborts the trap before the
+  cleanup, so a log line must not fail.
+- **dash's `echo` expands backslashes in user text.** Use `printf '%s\n'`.
+- **A new `set -e` or `set -f` changes failure behaviour.** Say so in the
+  commit, or the next reader tests the wrong contract.
+
 ## Status in this harness
 
 These tracked scripts use a bash shebang today and are **not yet compliant**.

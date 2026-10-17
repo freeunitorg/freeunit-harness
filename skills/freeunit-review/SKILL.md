@@ -57,6 +57,17 @@ it will read as a race for days.
 **Does the new test fail on the unpatched code?** Prove it in a worktree at the
 base commit ([test skill](../freeunit-test/SKILL.md)).
 
+**Does the PR touch a shell script?** The server gate is
+`sh .github/scripts/lint-shell.sh` (shellcheck 0.11.0 `-S warning`, `dash -n`,
+and `bash -n` for bash files); `tools/check-style` runs it. A clean shellcheck
+is not proof: the 745 `unitc` conversion passed it while quoting the whole
+control target as one argument. A script that builds a command line needs a
+stub argv test on every path; the server test `test/unitc/argv_test.sh`
+([freeunit#763](https://github.com/freeunitorg/freeunit/pull/763)) is the
+example. Check the `pipefail` plus `grep -q` combination, `for x in $list`,
+`$@` under `set -u`, and the signal EXIT trap. Rules:
+[docs/shell.md](../../docs/shell.md).
+
 **If it touches process lifecycle, what happens when the runner is killed?**
 Anything that spawns must be reapable by process group, not by a single pid.
 

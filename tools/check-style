@@ -46,6 +46,23 @@ else
 fi
 
 echo
+echo "==> shell gate: .github/scripts/lint-shell.sh"
+if command -v shellcheck >/dev/null 2>&1 && command -v dash >/dev/null 2>&1; then
+    shellcheck_version=$(shellcheck --version | awk '/^version:/ {print $2}')
+    if [ "$shellcheck_version" != "0.11.0" ]; then
+        echo "  ! shellcheck $shellcheck_version, CI uses 0.11.0" >&2
+    fi
+    if sh .github/scripts/lint-shell.sh; then
+        echo "  ✓ clean"
+    else
+        echo "  ✗ shellcheck or dash reported a finding"
+        status=1
+    fi
+else
+    echo "  - skipped (shellcheck or dash not found)"
+fi
+
+echo
 echo "==> clang-ast convention gate"
 if [ -n "${CLANG_AST:-}" ] && [ -f "${CLANG_AST}/ngx-ast.so" ]; then
     echo "  using plugin ${CLANG_AST}/ngx-ast.so"
