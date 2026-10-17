@@ -12,7 +12,8 @@ Rules (AGENTS.md, "Attribution: the trailer pair"):
   canonical name. An alias is an error; the message names the canonical spelling.
 - The model may be followed by the harness that ran it, in parentheses:
   "Reviewed-by: DeepSeek V4.1 Flash (DSH)".  A Claude address goes after it.
-- In a commit, Claude models carry " <noreply@anthropic.com>"; other models carry no address.
+- In a commit, Claude models carry " <noreply@anthropic.com>" or end with "(claude <version>)",
+  for example "Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)"; other models carry no address.
 - In a comment (-c), no model carries an address.
 - Trailers sit in the last paragraph, one per line, with no blank line between them.
 - Claude-Session trailers are not allowed.
@@ -26,6 +27,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIST = os.path.join(HERE, "reviewers.txt")
 ADDR = "<noreply@anthropic.com>"
+# "(claude 2.1.302)": the Claude Code version that ran the model; stands in for the address.
+CLAUDE_VER = re.compile(r"\(claude \d+\.\d+\.\d+\)$")
 KEYS = ("co-authored-by", "reviewed-by")
 
 
@@ -83,8 +86,8 @@ def check(text, canon, alias, comment=False):
                 problems.append("line %d: %r should be spelled %r" % (i, name, cname))
             if comment and has_addr:
                 problems.append("line %d: a comment takes no address" % i)
-            elif want_addr and not has_addr and not comment:
-                problems.append("line %d: %r needs ' %s'" % (i, cname, ADDR))
+            elif want_addr and not has_addr and not comment and not CLAUDE_VER.search(value):
+                problems.append("line %d: %r needs ' %s' or a '(claude <version>)' suffix" % (i, cname, ADDR))
             elif not want_addr and has_addr:
                 problems.append("line %d: %r takes no address" % (i, cname))
         elif name.lower() in alias:
