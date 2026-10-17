@@ -410,6 +410,10 @@ master-HEAD column; 4b powersave + record (instructions/req headline).
 3. `strace -p` on a claimed box is still forbidden on others' pids: check `ps` owner first even when idle.
 4. Gist numbers (8.5x, 0.97x) stay barred from the page until `reproduce.sh` reruns at 1.37.0 — done above
    for hello-gate; Drupal `total_s` rerun still open (needs `/tmp/fu-pkgs-1.37.0` stand).
+5. The suite-side traps of a 2026-10-17 matrix (PostgreSQL 18, the sqlite write permission, the
+   WordPress `.htaccess`, a shared load generator, a past `DEADLINE_UTC`) are collected at the
+   end of this log. Most were already handled in the suite scripts; the ones left were comments
+   or checks, never a second copy of the same rule.
 
 ### 2026-10-08 — PR 616 merged (php chdir hook removed)
 
@@ -466,3 +470,114 @@ Run `02-capp-floor-20261009T000759Z`: the capp build step works; null c32 band 1
 c6 band 5.4 NOISY. Floor TSVs are in `run/perf-lab/02-capp-floor-20261009T000759Z/` for the
 K2 comparison. Lesson: c6 at short cells is NOISY across workloads (hello and capp alike) —
 default future wave-0/4 jobs to 8s cells and treat 2s c6 as smoke only.
+
+### 2026-10-17 — the traps a matrix runs into before it produces a number
+
+Measured across Drupal 11.4, 12.0.0-beta1 and 12.0.0-beta2, a Symfony 7.4 app, a
+WordPress 7.1.3 site and the musl image, on Apache+mod_php, nginx+FPM, Angie,
+FreeNginx and FreeUnit. Each item is the symptom first, because that is what the
+reader has at 2 a.m.; the cause second; the fix third. The fixes that can be
+enforced are checks in the suite's own scripts, and the ones marked "already
+fixed" were left as they are on purpose.
+
+#### Setup: the site never becomes measurable
+
+- **`server version 17.11 is less than the minimum required 18`, every `DB=pgsql`
+  build, mysql arms fine.** Cause: Drupal 12 requires PostgreSQL >= 18 and
+  Drupal 11.4 does not, so only the 12.0 pgsql arms fail and the matrix looks
+  half-broken instead of mis-pinned. Fix: pin `postgres:18`. Already fixed in
+  the builder; the two backend tables that still said 17 were the stale copy.
+- **`could not translate host name db`, for a container that no longer exists.**
+  Cause: PostgreSQL 18 moved `PGDATA` under `/var/lib/postgresql/18/docker`, so
+  the named volume belongs at `/var/lib/postgresql` and never at
+  `.../postgresql/data`; and a volume holding a version-17 cluster makes the 18
+  server exit at once rather than start on it. Fix: mount the parent directory,
+  and treat a database container that never becomes ready as a volume to remove,
+  not as DNS.
+- **`attempt to write a readonly database`, and a whole run of INVALID cells.**
+  Cause: the sqlite database is a file under `sites/default/files`, the install
+  writes it as root, and the runtime drops privileges to `www-data` or `nobody`,
+  so the application cannot write its own database. Fix: `chmod -R a+rwX` the
+  files directory at build time. Already fixed, with the symptom in the comment.
+- **`/wp-json/...` 404 on the Apache arm only, front page still 200.** Cause: the
+  nginx arms route pretty URLs with `try_files`, while Apache needs both
+  `mod_rewrite` enabled and the canonical `.htaccess` written at build time; the
+  front page is a real file and hides the gap. Fix: enable the module and write
+  the file, not just the rewrite structure. Already fixed at all three points.
+- **drush cannot be installed on Drupal 12, and the standard profile has no front
+  page.** Cause: drush 13 needs guzzle `^7` and Symfony `^7` while
+  core-recommended pins guzzle 8 and Symfony 8, and the `standard` profile ships
+  no content types and points the front page at an admin-only path that answers
+  403 anonymously. Fix: Drupal 12's own `vendor/bin/dr` plus a core installer for
+  the install, and `demo_umami` (or create a page type and a node) for a page to
+  serve. Already handled in the builder; the suite README still said 12.0 was
+  blocked.
+
+#### Honesty: a result that cannot be published
+
+- **An alert counter with no alert text.** Cause: the counter came from a log
+  grep whose output was discarded, and the container is removed at the end of
+  the cell. Fix: log the matched lines with the cell they came from. Already
+  fixed in the cell runner.
+- **INVALID and NO DATA are failed measurements.** They are skipped at collection,
+  the job exits nonzero so the campaign retries it, and the null band is printed
+  beside every claim. Already fixed; kept as a rule because it is the rule that
+  makes the rest of this list worth reading.
+- **A 1-3 % claim a small box cannot resolve.** Cause: the effect was measured
+  only through `rps`, which at that size is dominated by generator noise. Fix:
+  measure the mechanism separately from the effect. Counting `pthread_mutex_lock`
+  calls with a bpftrace uprobe on the router process resolved a claim that `rps`
+  could not, at no cost in cell time.
+- **A concurrency sweep on two cores is worthless.** Cause: the generator was
+  pinned to one core with more threads than it owns (`wrk -t2` on a single
+  pinned core), so it shared the server's core and inflated the null band to
+  30-42 %. Fix: the generator never shares a server core, its thread count never
+  exceeds the cores it owns, and the null (same image, same point) comes from the
+  same run. Now enforced: a run whose `SERVER_CPUS`, `DB_CPUS` and `LOAD_CPUS`
+  share a cpu refuses to start.
+
+#### Queue and publishing
+
+- **`43-` matched two jobs, and the supervisor never reached zero.** Cause: a
+  numeric prefix is not an identity. Fix: exact job names in the sets.
+- **A cell was never re-measured after the master pin moved.** Cause: the job
+  marker is keyed on the job name and recorded the old pin. Fix: clear the
+  markers recorded at the old pin; `meta.txt` names the pin, which is what makes
+  a stale marker visible.
+- **The supervisor exits silently, and again on relaunch.** Cause: `DEADLINE_UTC`
+  was in the past, because it passed during the run or because the value was left
+  at an earlier session's default. Fix: extend it before restarting, and make a
+  past deadline loud instead of a clean exit. The campaign script's own default
+  was a date in the past, so every relaunch printed "deadline reached" and looked
+  like a finished steps file.
+- **The idle gate never opens.** Cause: it needs N consecutive quiet samples on
+  the CPUs the measurement uses, and a box shared with another session's
+  containers may not produce them for hours. Fix: put the cell you most want
+  answered first in the chain, and never run two gate-waiting campaigns on one
+  box.
+- **`cannot lock ref 'refs/heads/gh-pages'`.** Cause: one push per collected run,
+  each publishing `gh-pages`. Fix: a concurrency group on the pages workflow.
+  Already fixed; the wording was checked rather than re-added.
+- **Every collection from one box reported zero runs, with no error.** Cause: the
+  host's `find` has no `-printf`, and the pipeline reported zero instead of
+  failing. Fix: list runs with `ls -1`. Already fixed, with the cause in the
+  comment.
+
+#### Profiling and images on a host without a PMU
+
+- **`perf record -p <router pid>` fails with `Couldn't create thread/CPU maps: No
+  such process`, and a `/proc` scan finds a `unitd` from somebody else's
+  container.** Cause: a sibling container cannot see the target's thread map, and
+  the process name is not unique across containers. Fix: record with
+  `-a -C $SERVER_CPUS`, take per-container CPU from `cpu.stat` `usage_usec`, and
+  read router CPU per pid through
+  `/sys/fs/cgroup/<path>/cgroup.procs` rather than by walking `/proc`. The last
+  one is already what the cell runner does.
+- **The Alpine FreeUnit image needs three things that are not obvious.** Without
+  `-Wl,-E` on the unitd link the container's unitd exports zero dynamic symbols
+  (the native build of the same source exports 617) and the PHP module cannot
+  relocate `nxt_conf_*`/`nxt_lvlhsh_*`, so every request answers nothing;
+  `./configure php` needs `--lib-path=/usr/lib/php85`, which Alpine's
+  `php-config85` omits; and without the entrypoint the config is never installed,
+  no listener exists, and the log looks healthy. All three are already in the
+  image with the symptom recorded next to each one.
