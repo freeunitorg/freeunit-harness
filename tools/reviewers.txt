@@ -16,3 +16,4 @@ GLM 5.3	-	z-ai/glm-5.3
 MiniMax M3	-	minimax/minimax-m3
 Muse Spark 1.3	-	pi muse-spark-1.3,muse-spark-1.3
 Gemini 3.8 Flash	-	gemini-3.8-flash,google/gemini-3.8-flash,Gemini
+Space Bunny Free	-	space-bunny-free
