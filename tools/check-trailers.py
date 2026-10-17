@@ -6,6 +6,7 @@ Usage:
     check-trailers.py -f <file>         # a file: a commit message
     check-trailers.py -c <file>         # a file: a GitHub comment (no address)
     check-trailers.py -                 # the message on stdin
+    check-trailers.py -c -              # a comment on stdin
 
 Rules (AGENTS.md, "Attribution: the trailer pair"):
 - Co-Authored-By and Reviewed-by name a model from tools/reviewers.txt, spelled as its
@@ -14,8 +15,9 @@ Rules (AGENTS.md, "Attribution: the trailer pair"):
   "Reviewed-by: DeepSeek V4.1 Flash (DSH)".  A Claude address goes after it.
 - In a commit, Claude models carry " <noreply@anthropic.com>" or end with "(claude <version>)",
   for example "Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)"; other models carry no address.
-- In a comment (-c), no model carries an address.
-- Trailers sit in the last paragraph, one per line, with no blank line between them.
+- In a comment (-c), no model carries an address: no "@" and no "<...>" in the value.
+- Trailers sit in the last paragraph, one per line, with no blank line between them
+  and no text after them.
 - Claude-Session trailers are not allowed.
 Exit 0 when clean, 1 on a violation, 2 on usage or a missing list.
 """
@@ -54,7 +56,7 @@ def load(path=LIST):
 def check(text, canon, alias, comment=False):
     """Return a list of problems in a commit message or comment body."""
     problems = []
-    lines = text.rstrip("\n").split("\n")
+    lines = text.rstrip().split("\n")
     found = []
     for i, line in enumerate(lines, 1):
         m = re.match(r"^([A-Za-z-]+):\s*(.*)$", line)
@@ -67,6 +69,10 @@ def check(text, canon, alias, comment=False):
         if key.lower() not in KEYS:
             continue
         found.append(i)
+        # Before the harness suffix is dropped, so "(<noreply@anthropic.com>)" is caught too.
+        if comment and ("@" in value or re.search(r"<[^>]*>", value)):
+            problems.append("line %d: a comment takes no address" % i)
+            continue
         if key not in ("Co-Authored-By", "Reviewed-by"):
             problems.append("line %d: spell the key %s" % (i, "Co-Authored-By" if key.lower() == KEYS[0] else "Reviewed-by"))
         has_addr = value.endswith(ADDR)
@@ -84,9 +90,7 @@ def check(text, canon, alias, comment=False):
             cname, want_addr = canon[name.lower()]
             if cname != name:
                 problems.append("line %d: %r should be spelled %r" % (i, name, cname))
-            if comment and has_addr:
-                problems.append("line %d: a comment takes no address" % i)
-            elif want_addr and not has_addr and not comment and not CLAUDE_VER.search(value):
+            if want_addr and not has_addr and not comment and not CLAUDE_VER.search(value):
                 problems.append("line %d: %r needs ' %s' or a '(claude <version>)' suffix" % (i, cname, ADDR))
             elif not want_addr and has_addr:
                 problems.append("line %d: %r takes no address" % (i, cname))
@@ -99,25 +103,38 @@ def check(text, canon, alias, comment=False):
         tail = lines[found[0] - 1:]
         for j, line in enumerate(tail, found[0]):
             if not line.strip():
-                problems.append("line %d: blank line inside the trailer block" % j)
+                if any(k > j for k in found):
+                    problems.append("line %d: blank line inside the trailer block" % j)
+                else:
+                    k = next(k for k in range(j + 1, len(lines) + 1) if lines[k - 1].strip())
+                    problems.append("line %d: text after the trailer block; trailers go last" % k)
                 break
     return problems
 
 
 def main(argv):
-    if len(argv) != 2 and not (len(argv) == 3 and argv[1] in ("-f", "-c")):
+    if len(argv) == 3 and argv[1] in ("-f", "-c"):
+        src = argv[2]
+    elif len(argv) == 2 and argv[1] not in ("-f", "-c"):
+        src = argv[1]
+    else:
         sys.stderr.write(__doc__)
         return 2
-    if argv[1] in ("-f", "-c"):
-        text = open(argv[2], encoding="utf-8").read()
-    elif argv[1] == "-":
-        text = sys.stdin.read()
-    else:
-        try:
-            text = subprocess.check_output(["git", "log", "-1", "--format=%B", argv[1]], text=True)
-        except subprocess.CalledProcessError:
-            return 2
-    canon, alias = load()
+    try:
+        if src == "-":
+            text = sys.stdin.read()
+        elif len(argv) == 3:
+            with open(src, encoding="utf-8") as f:
+                text = f.read()
+        else:
+            try:
+                text = subprocess.check_output(["git", "log", "-1", "--format=%B", src], text=True)
+            except subprocess.CalledProcessError:
+                return 2
+        canon, alias = load()
+    except OSError as e:
+        sys.stderr.write("check-trailers.py: %s\n" % e)
+        return 2
     problems = check(text, canon, alias, argv[1] == "-c")
     for p in problems:
         print(p)
