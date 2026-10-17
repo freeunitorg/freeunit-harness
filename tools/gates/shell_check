@@ -1,0 +1,114 @@
+#!/bin/sh
+#
+# shell_check <checkout>: G8 of run-gates.  Report-only.
+#
+# For each tracked file whose first line is "#!/bin/sh":
+#   - dash -n and busybox ash -n (a local busybox, else alpine in docker);
+#   - greps for the traps in docs/shell.md that shellcheck -s sh misses.
+# Each finding is one "WARN: file:line: text" line.  The exit status is 0
+# unless the checkout cannot be read (2).  A shell that is missing gives a
+# SKIP line, not a pass.
+
+set -u
+
+DOC=https://github.com/freeunitorg/freeunit-harness/blob/main/docs/shell.md
+
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+repo=${1:?usage: shell_check <checkout>}
+cd "$repo" || exit 2
+
+list=$(mktemp "${TMPDIR:-/tmp}/g8-list.XXXXXX") || exit 2
+trap 'rm -f "$list"' EXIT
+
+# shellcheck disable=SC2016 # awk code, not shell
+git ls-files -z | xargs -0 awk 'FNR == 1 { if ($0 ~ /^#![[:space:]]*\/bin\/sh([[:space:]]|$)/) print FILENAME; nextfile }' \
+    > "$list" 2>/dev/null
+
+n=$(wc -l < "$list" | tr -d ' ')
+printf 'G8: %s #!/bin/sh scripts\n' "$n"
+warns=0
+
+warn() {
+    printf 'WARN: %s\n' "$1"
+    warns=$((warns + 1))
+}
+
+# Syntax under dash.
+if command -v dash >/dev/null; then
+    while IFS= read -r f; do
+        out=$(dash -n "$f" 2>&1) || warn "$f: dash -n: $out"
+    done < "$list"
+else
+    printf 'G8 (dash): SKIP: dash not found\n'
+fi
+
+# Syntax under busybox ash.
+if command -v busybox >/dev/null; then
+    while IFS= read -r f; do
+        out=$(busybox ash -n "$f" 2>&1) || warn "$f: ash -n: $out"
+    done < "$list"
+elif command -v docker >/dev/null; then
+    # One container for all files.
+    if ! out=$(docker run --rm -i -v "$PWD:/src:ro" -w /src alpine:3.22 sh -c '
+        while IFS= read -r f; do
+            e=$(ash -n "$f" 2>&1) || printf "%s: ash -n: %s\n" "$f" "$e"
+        done' < "$list" 2>&1)
+    then
+        printf 'G8 (ash): SKIP: docker run failed: %s\n' "$out"
+    elif [ -n "$out" ]; then
+        printf '%s\n' "$out" | while IFS= read -r l; do
+            printf 'WARN: %s\n' "$l"
+        done
+        warns=$((warns + $(printf '%s\n' "$out" | wc -l)))
+    fi
+else
+    printf 'G8 (ash): SKIP: neither busybox nor docker found\n'
+fi
+
+while IFS= read -r f; do
+    # dash and ash expand backslashes in echo.  JSON or base64 piped on
+    # breaks; printf '%s\n' does not.
+    # Comment lines are dropped; a heredoc body is not, so read the hit.
+    hits=$(grep -nE '(^|[;&|[:space:]])echo[[:space:]]+"?\$[^|]*\|' "$f" \
+        | grep -vE '^[0-9]+:[[:space:]]*#')
+    if [ -n "$hits" ]; then
+        printf '%s\n' "$hits" | while IFS= read -r l; do
+            case "$l" in
+                *'|'*jq*|*'|'*python*|*'|'*base64*)
+                    printf 'WARN: %s:%s [strong: echo of a variable into a parser]\n' "$f" "$l" ;;
+                *)
+                    printf 'WARN: %s:%s [echo of a variable into a pipe]\n' "$f" "$l" ;;
+            esac
+        done
+        warns=$((warns + $(printf '%s\n' "$hits" | wc -l)))
+    fi
+
+    # grep -q exits early; under pipefail the writer's SIGPIPE fails the
+    # pipeline.
+    if grep -qE '^[[:space:]]*set[[:space:]].*pipefail' "$f"; then
+        hits=$(grep -nE '(^|[^|])\|[[:space:]]*grep[[:space:]]+(-[[:alnum:]]*q|--quiet)' "$f" \
+            | grep -vE '^[0-9]+:[[:space:]]*#')
+        if [ -n "$hits" ]; then
+            printf '%s\n' "$hits" | while IFS= read -r l; do
+                printf 'WARN: %s:%s [grep -q in a pipe under pipefail]\n' "$f" "$l"
+            done
+            warns=$((warns + $(printf '%s\n' "$hits" | wc -l)))
+        fi
+    fi
+
+    # dash and ash skip the EXIT trap when a signal kills the shell.
+    hits=$(grep -nE '^[[:space:]]*trap[[:space:]].*[[:space:]](EXIT|0)([[:space:]]|$)' "$f")
+    if [ -n "$hits" ] \
+        && ! grep -qE '^[[:space:]]*trap[[:space:]].*[[:space:]](HUP|INT|TERM|1|2|15)([[:space:]]|$)' "$f"
+    then
+        l=$(printf '%s\n' "$hits" | head -n 1)
+        printf 'WARN: %s:%s [EXIT trap without HUP/INT/TERM traps]\n' "$f" "$l"
+        warns=$((warns + 1))
+    fi
+done < "$list"
+
+printf 'G8: %s warning(s); the rules are in %s\n' "$warns" "$DOC"
+exit 0
