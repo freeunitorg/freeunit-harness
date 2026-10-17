@@ -12,7 +12,8 @@ else's.
 **Trailers:** `Co-Authored-By` for the model that wrote the code; `Reviewed-by`
 only for a model whose finding changed the commit. Canonical spellings live in
 `tools/reviewers.txt`; run `tools/check-trailers.py <commit>` before you push and
-`tools/check-trailers.py -f comment.md` before you post a review.
+`tools/check-trailers.py -c comment.md` before you post a review. A comment
+ends with `Reviewed-by: <model> (<harness>)` lines and no address.
 
 ```bash
 make lint          # whitespace + convention gates

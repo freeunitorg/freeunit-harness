@@ -3,7 +3,8 @@
 
 Usage:
     check-trailers.py <commit>          # git commit message (any revision git understands)
-    check-trailers.py -f <file>         # a file: a commit message or a review comment
+    check-trailers.py -f <file>         # a file: a commit message
+    check-trailers.py -c <file>         # a file: a GitHub comment (no address)
     check-trailers.py -                 # the message on stdin
 
 Rules (AGENTS.md, "Attribution: the trailer pair"):
@@ -11,7 +12,8 @@ Rules (AGENTS.md, "Attribution: the trailer pair"):
   canonical name. An alias is an error; the message names the canonical spelling.
 - The model may be followed by the harness that ran it, in parentheses:
   "Reviewed-by: DeepSeek V4.1 Flash (DSH)".  A Claude address goes after it.
-- Claude models carry " <noreply@anthropic.com>"; other models carry no address.
+- In a commit, Claude models carry " <noreply@anthropic.com>"; other models carry no address.
+- In a comment (-c), no model carries an address.
 - Trailers sit in the last paragraph, one per line, with no blank line between them.
 - Claude-Session trailers are not allowed.
 Exit 0 when clean, 1 on a violation, 2 on usage or a missing list.
@@ -46,7 +48,7 @@ def load(path=LIST):
     return canon, alias
 
 
-def check(text, canon, alias):
+def check(text, canon, alias, comment=False):
     """Return a list of problems in a commit message or comment body."""
     problems = []
     lines = text.rstrip("\n").split("\n")
@@ -79,9 +81,11 @@ def check(text, canon, alias):
             cname, want_addr = canon[name.lower()]
             if cname != name:
                 problems.append("line %d: %r should be spelled %r" % (i, name, cname))
-            if want_addr and not has_addr:
+            if comment and has_addr:
+                problems.append("line %d: a comment takes no address" % i)
+            elif want_addr and not has_addr and not comment:
                 problems.append("line %d: %r needs ' %s'" % (i, cname, ADDR))
-            if not want_addr and has_addr:
+            elif not want_addr and has_addr:
                 problems.append("line %d: %r takes no address" % (i, cname))
         elif name.lower() in alias:
             problems.append("line %d: %r is an alias; use %r" % (i, name, alias[name.lower()]))
@@ -98,10 +102,10 @@ def check(text, canon, alias):
 
 
 def main(argv):
-    if len(argv) != 2 and not (len(argv) == 3 and argv[1] == "-f"):
+    if len(argv) != 2 and not (len(argv) == 3 and argv[1] in ("-f", "-c")):
         sys.stderr.write(__doc__)
         return 2
-    if argv[1] == "-f":
+    if argv[1] in ("-f", "-c"):
         text = open(argv[2], encoding="utf-8").read()
     elif argv[1] == "-":
         text = sys.stdin.read()
@@ -111,7 +115,7 @@ def main(argv):
         except subprocess.CalledProcessError:
             return 2
     canon, alias = load()
-    problems = check(text, canon, alias)
+    problems = check(text, canon, alias, argv[1] == "-c")
     for p in problems:
         print(p)
     return 1 if problems else 0
