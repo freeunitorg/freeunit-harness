@@ -16,40 +16,6 @@ src/nxt_app_nncq.h	q->tail = NXT_APP_NNCQ_SIZE;
 src/nxt_app_queue.h	q->notified = 0;
 src/nxt_app_queue.h	q->notified = 0;
 src/nxt_app_queue.h	q->notified = 0;
-src/nxt_conn.c	nxt_conn_untrack(engine, c);
-src/nxt_conn.c	nxt_conn_untrack(engine, c);
-src/nxt_conn.c	nxt_conn_untrack(engine, c);
-src/nxt_conn_accept.c	engine->accepted_conns_cnt++;
-src/nxt_conn_accept.c	nxt_conn_idle(engine, c);
-src/nxt_conn_accept.c	nxt_conn_idle(engine, c);
-src/nxt_conn_close.c	nxt_conn_untrack(engine, c);
-src/nxt_conn_close.c	nxt_conn_untrack(engine, c);
-src/nxt_conn_close.c	nxt_conn_untrack(engine, c);
-src/nxt_conn_close.c	nxt_conn_untrack(engine, c);
-src/nxt_conn_close.c	nxt_conn_untrack(engine, c);
-src/nxt_conn_close.c	nxt_conn_untrack(engine, c);
-src/nxt_controller.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_untrack(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_untrack(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_untrack(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_untrack(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_untrack(task->thread->engine, c);
-src/nxt_controller.c	nxt_conn_untrack(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_active(task->thread->engine, c);
-src/nxt_h1proto.c	nxt_conn_idle(engine, c);
-src/nxt_h1proto.c	nxt_conn_idle(engine, c);
-src/nxt_http_request.c	task->thread->engine->requests_cnt++;
-src/nxt_lib.c	thread->time.signal = -1;
 src/nxt_nncq.h	*pos = t;
 src/nxt_nncq.h	*pos = t;
 src/nxt_nncq.h	*pos = t;
@@ -82,25 +48,6 @@ src/nxt_port_queue.h	q->nitems = 0;
 src/nxt_port_queue.h	q->nitems = 0;
 src/nxt_port_queue.h	q->nitems = 0;
 src/nxt_port_queue.h	q->nitems = 0;
-src/nxt_router.c	report->accepted_conns += engine->accepted_conns_cnt;
-src/nxt_router.c	report->closed_conns += engine->closed_conns_cnt;
-src/nxt_router.c	report->idle_conns += engine->idle_conns_cnt;
-src/nxt_router.c	report->requests += engine->requests_cnt;
-src/nxt_runtime.c	nxt_conn_untrack(engine, c);
-src/nxt_runtime.c	nxt_conn_untrack(engine, c);
-src/nxt_runtime.c	nxt_conn_untrack(engine, c);
-src/nxt_signal.c	thr->time.signal++;
-src/nxt_signal.c	thr->time.signal--;
-src/nxt_thread.c	thr->time.signal = -1;
-src/nxt_thread_time.c	for (i = 0; i < thr->time.nstrings; i++) {
-src/nxt_thread_time.c	for (i = thr->time.nstrings; i < nstrings; i++) {
-src/nxt_thread_time.c	if (nxt_fast_path(slot < thr->time.nstrings)) {
-src/nxt_thread_time.c	if (thr == NULL || thr->time.signal <= 0) {
-src/nxt_thread_time.c	if (thr->time.signal < 0) {
-src/nxt_thread_time.c	if (thr->time.signal < 0) {
-src/nxt_thread_time.c	nxt_gmtime(now.sec + nxt_gmtoff, &tm);
-src/nxt_thread_time.c	thr->time.nstrings = nstrings;
-src/nxt_thread_time.c	thr->time.signal = -1;
 src/nxt_unit.c	*pos = qpos;
 src/nxt_unit.c	ctx_impl->parked = 0;
 src/nxt_unit.c	ctx_impl->unparking = 0;
