@@ -12,14 +12,15 @@
 #   G5  ast-grep rule tests and baseline          lint-astgrep.yml ast-grep
 #   G6  @contract comments for the names in tools/gates/contract_functions.txt
 #   G7  mixed atomic/plain accesses, clang-query  #730 #736 #741 #742
+#   G8  #!/bin/sh scripts: dash/ash -n and trap greps, report-only
 #
-#   tools/gates/run-gates [-s <checkout>] [-g 5,6,7] [-t "test_a.py test_b.py"]
+#   tools/gates/run-gates [-s <checkout>] [-g 5,6,7,8] [-t "test_a.py test_b.py"]
 #                         [--fuzz-seconds 20] [--allow-local-build]
 #
 #   -s is the FreeUnit checkout to check.  Without it: $UNIT_SRC, else the
 #   harness ./src (`make src` clones it).  The tree must hold ./configure; a
 #   tree without one is refused before any gate runs.  The default gate set is
-#   5,6,7: the gates that leave the checkout untouched.  G7 configures a copy
+#   5,6,7,8: the gates that leave the checkout untouched.  G7 configures a copy
 #   of it, so the default run needs clang and clang-query.
 #
 #   G1 to G4 build.  A build belongs on the build host, not on this machine:
@@ -49,6 +50,13 @@
 #   sites they fix, which is correct: they are the same class until they
 #   merge.  It is in the default set now; -g 5,6 leaves it out for a run on a
 #   machine without clang-query.
+#
+#   G8 runs tools/gates/shell_check on each tracked "#!/bin/sh" file: dash -n,
+#   busybox ash -n (a local busybox, else alpine:3.22 in docker), and greps
+#   for the traps in docs/shell.md that shellcheck -s sh misses.  It is
+#   report-only: WARN lines, then "G8: PASS".  It fails only when the check
+#   cannot read the checkout.  A missing shell prints a SKIP line.  It takes
+#   under one second with local dash and busybox, so it is in the default set.
 
 set -u
 
@@ -56,7 +64,7 @@ HARNESS_GATES=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit
 CONTRACTS=$HARNESS_GATES/contract_functions.txt
 
 REPO=
-GATES=5,6,7
+GATES=5,6,7,8
 # G1 builds no language module.  Thus the slice has only tests that need
 # no language module.
 SLICE="test_static.py test_variables.py test_return.py"
@@ -397,7 +405,18 @@ gate_7() {
     run 7 atomic python3 "$HARNESS_GATES/atomic_check.py" "$REPO"
 }
 
-for g in 1 2 3 4 5 6 7; do
+# Report-only: the WARN lines go to the terminal and to the log.
+gate_8() {
+    local log="$LOGDIR/g8-shell.log"
+
+    sh "$HARNESS_GATES/shell_check" "$REPO" >"$log" 2>&1
+    local rc=$?
+
+    cat "$log"
+    [ "$rc" = 0 ] || fail 8 "shell_check exited $rc, see $log"
+}
+
+for g in 1 2 3 4 5 6 7 8; do
     case ",$GATES," in
         *",$g,"*) ;;
         *) continue ;;

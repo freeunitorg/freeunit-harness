@@ -73,7 +73,7 @@ one job on the lab machine, `tools/perf-compare.py` writes the verdict,
 
 ### Local gates before a push
 
-`tools/gates/run-gates` runs seven gates against a FreeUnit checkout. Each gate prints
+`tools/gates/run-gates` runs eight gates against a FreeUnit checkout. Each gate prints
 `G<n>: PASS` or `G<n>: FAIL`. The exit status is not zero when a gate failed. Each gate
 copies a CI job. When that CI job changes, the gate must follow.
 
@@ -86,13 +86,14 @@ copies a CI job. When that CI job changes, the gate must follow.
 | G5 | the ast-grep rule tests and the baseline check | `ast-grep` in `.github/workflows/lint-astgrep.yml` |
 | G6 | the `@contract` comment check | none; this gate is local only |
 | G7 | mixed atomic/plain accesses: `clang-query` over `src/*.c`, compared with a baseline | none; this gate is local only |
+| G8 | report-only: `dash -n` and busybox `ash -n` on each `#!/bin/sh` script, and greps for the traps in [docs/shell.md](docs/shell.md) | `shellcheck and parse` in `.github/workflows/lint-shell.yml` runs shellcheck and `dash -n` and fails; the `ash -n` half and the greps are local only |
 
 Pass the checkout with `-s`, the same option `tools/unit-build` takes. Without `-s` the
 script uses `$UNIT_SRC`, else the harness `./src`. A tree that holds no `./configure` is
 refused with exit code 2 before any gate runs.
 
 ```bash
-tools/gates/run-gates -s src                  # the default set: G5, G6 and G7
+tools/gates/run-gates -s src                  # the default set: G5, G6, G7 and G8
 tools/gates/run-gates -s /path/to/worktree -g 5
 tools/gates/run-gates -g 6
 ```
