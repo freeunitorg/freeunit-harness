@@ -176,9 +176,9 @@ carries a private detail (a host name, an address, a private path).
   symbol; if you cannot verify it, label it inline as unverified.
 - `tools/check-style`, `tools/ci-local` and `tools/gates/run-gates` mirror the server
   repo's workflows. They are not a second opinion about what "clean" means. When CI
-  changes, they follow. `run-gates -s <checkout>` is the pre-push set: G5 and G6 by
-  default, and G1 to G4 only with `--allow-local-build`, because a build belongs on the
-  build host. The gate table is in [README.md](README.md), section "Local gates before a
+  changes, they follow. `run-gates -s <checkout>` is the pre-push set: G5, G6 and G7 by
+  default (G7 needs `clang-query` and `clang`; `-g 5,6` leaves it out), and G1 to G4 only
+  with `--allow-local-build`, because a build belongs on the build host. The gate table is in [README.md](README.md), section "Local gates before a
   push".
 - If the source disagrees with a doc, the source wins and the doc gets fixed.
 - Trailers: `Co-Authored-By: <model>` for the model that wrote the code, and

@@ -19,7 +19,8 @@
 #   -s is the FreeUnit checkout to check.  Without it: $UNIT_SRC, else the
 #   harness ./src (`make src` clones it).  The tree must hold ./configure; a
 #   tree without one is refused before any gate runs.  The default gate set is
-#   5,6: the gates that read the tree and build nothing.
+#   5,6,7: the gates that leave the checkout untouched.  G7 configures a copy
+#   of it, so the default run needs clang and clang-query.
 #
 #   G1 to G4 build.  A build belongs on the build host, not on this machine:
 #   `tools/unit-build -t remote -H build --hardening tests` (AGENTS.md, "Which
@@ -46,7 +47,8 @@
 #   tools/gates/atomic_baseline.txt.  The baseline was generated on the tree
 #   with #736, #741 and #742, so a checkout without those PRs reports the
 #   sites they fix, which is correct: they are the same class until they
-#   merge.  -g 5,6,7 adds it to the pre-push set.
+#   merge.  It is in the default set now; -g 5,6 leaves it out for a run on a
+#   machine without clang-query.
 
 set -u
 
@@ -54,7 +56,7 @@ HARNESS_GATES=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit
 CONTRACTS=$HARNESS_GATES/contract_functions.txt
 
 REPO=
-GATES=5,6
+GATES=5,6,7
 # G1 builds no language module.  Thus the slice has only tests that need
 # no language module.
 SLICE="test_static.py test_variables.py test_return.py"

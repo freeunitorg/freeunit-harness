@@ -73,7 +73,7 @@ one job on the lab machine, `tools/perf-compare.py` writes the verdict,
 
 ### Local gates before a push
 
-`tools/gates/run-gates` runs six gates against a FreeUnit checkout. Each gate prints
+`tools/gates/run-gates` runs seven gates against a FreeUnit checkout. Each gate prints
 `G<n>: PASS` or `G<n>: FAIL`. The exit status is not zero when a gate failed. Each gate
 copies a CI job. When that CI job changes, the gate must follow.
 
@@ -85,13 +85,14 @@ copies a CI job. When that CI job changes, the gate must follow.
 | G4 | a short libFuzzer run on `fuzz_basic` | `.github/workflows/fuzzing.yml` |
 | G5 | the ast-grep rule tests and the baseline check | `ast-grep` in `.github/workflows/lint-astgrep.yml` |
 | G6 | the `@contract` comment check | none; this gate is local only |
+| G7 | mixed atomic/plain accesses: `clang-query` over `src/*.c`, compared with a baseline | none; this gate is local only |
 
 Pass the checkout with `-s`, the same option `tools/unit-build` takes. Without `-s` the
 script uses `$UNIT_SRC`, else the harness `./src`. A tree that holds no `./configure` is
 refused with exit code 2 before any gate runs.
 
 ```bash
-tools/gates/run-gates -s src                  # the default set: G5 and G6
+tools/gates/run-gates -s src                  # the default set: G5, G6 and G7
 tools/gates/run-gates -s /path/to/worktree -g 5
 tools/gates/run-gates -g 6
 ```
@@ -110,9 +111,24 @@ prints `no names in ...: nothing to check` and passes. Add a name when the
 pre-conditions and post-conditions of a function matter enough that a reviewer must read
 them in one place.
 
+G7 needs `clang-query` and `clang`. The distro package is `clang-tools-21` on Debian and
+Ubuntu, and it does not put the binary on the PATH, so G7 also looks in
+`/usr/lib/llvm-*/bin` and fails rather than skips when it finds nothing. G7 copies the
+checkout, configures the copy, and runs the matcher `tools/gates/atomic_query.txt` over
+every `src/*.c`. It fails on a reference to a value declared with one of the atomic
+typedefs in `src/nxt_atomic.h` that is not made through the `nxt_atomic_*` macros or a
+`__sync_*` builtin, unless the reference is in `tools/gates/atomic_baseline.txt`. New
+matches and stale entries both fail. The baseline holds the by-design sites
+(initialization stores before the object is shared, per-thread fields, value-type uses)
+and the engine connection counters, whose fix is a separate design decision; it was
+generated on the tree with #736, #741 and #742, so a checkout without those PRs reports
+the sites they fix, which is correct until they merge. A run takes about 30 seconds,
+most of it the configure. `-g 5,6` leaves G7 out on a machine without `clang-query`.
+
 G1 to G4 build. They refuse to run unless you pass `--allow-local-build`, and the
-default gate set is `5,6` for the same reason. Two harness rules say that build does not
-belong here. A build belongs on the build host, not on this machine:
+default gate set, `5,6,7`, contains no building gate for the same reason. Two harness
+rules say that build does not belong here. A build belongs on the build host, not on
+this machine:
 `tools/unit-build -t remote -H build --hardening tests`. And `./configure` rewrites the
 root `Makefile` and `build/` of the tree it runs in, so a gate that builds would clobber
 the configured state of a worktree you are editing. Use `--allow-local-build` only on a
