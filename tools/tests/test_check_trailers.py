@@ -75,6 +75,59 @@ class TrailerTest(unittest.TestCase):
         r = subprocess.run([sys.executable, SCRIPT, "-"], input="x\n\nReviewed-by: Codex\n", capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    def test_claude_version_stands_in_for_the_address(self):
+        self.assertEqual(self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (claude 2.1.302)\n"), [])
+        self.assertEqual(self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (claude 2.1.302) %s\n" % ADDR), [])
+
+    def test_claude_version_must_be_full(self):
+        self.assertIn("needs", self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (claude 2.1)\n")[0])
+        self.assertIn("needs", self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (agy)\n")[0])
+
+    def test_text_after_the_block(self):
+        p = self.problems("x\n\nReviewed-by: Codex\n\nThanks.\n")
+        self.assertEqual(p, ["line 5: text after the trailer block; trailers go last"])
+
+    def comment(self, text):
+        return ct.check(text, CANON, ALIAS, comment=True)
+
+    def test_comment_rejects_an_address(self):
+        self.assertIn("a comment takes no address", self.comment("x\n\nReviewed-by: Claude Fable 5.1 %s\n" % ADDR)[0])
+        self.assertIn("a comment takes no address", self.comment("x\n\nReviewed-by: Claude Fable 5.1 noreply@anthropic.com\n")[0])
+
+    def test_comment_rejects_an_address_in_parentheses(self):
+        p = self.comment("x\n\nReviewed-by: Claude Fable 5.1 (%s)\n" % ADDR)
+        self.assertEqual(p, ["line 3: a comment takes no address"])
+
+    def test_comment_takes_no_address_for_others(self):
+        self.assertIn("no address", self.comment("x\n\nReviewed-by: DeepSeek V4.1 Flash %s\n" % ADDR)[0])
+
+    def test_comment_without_address(self):
+        self.assertEqual(self.comment("x\n\nReviewed-by: Claude Fable 5.1\n"), [])
+        self.assertEqual(self.comment("x\n\nReviewed-by: Claude Fable 5.1 (claude 2.1.302)\n"), [])
+        self.assertEqual(self.comment("x\n\nReviewed-by: DeepSeek V4.1 Flash (DSH)\n"), [])
+
+    def test_cli_comment_usage_and_missing_file(self):
+        for args in (["-c"], ["-f"], ["-c", "/nonexistent/comment.md"], ["-f", "/nonexistent/msg.txt"]):
+            r = subprocess.run([sys.executable, SCRIPT] + args, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_cli_missing_list(self):
+        import shutil, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(SCRIPT, d)
+            r = subprocess.run([sys.executable, os.path.join(d, "check-trailers.py"), "-"], input="x\n\nReviewed-by: Codex\n", capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("reviewers.txt", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_cli_comment_on_stdin(self):
+        r = subprocess.run([sys.executable, SCRIPT, "-c", "-"], input="x\n\nReviewed-by: Claude Fable 5.1 %s\n" % ADDR, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("a comment takes no address", r.stdout)
+        r = subprocess.run([sys.executable, SCRIPT, "-c", "-"], input="x\n\nReviewed-by: Claude Fable 5.1\n", capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_every_list_entry_is_self_consistent(self):
         for key, (name, addr) in CANON.items():
             line = "Reviewed-by: %s%s\n" % (name, " " + ADDR if addr else "")

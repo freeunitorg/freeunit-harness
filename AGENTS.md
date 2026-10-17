@@ -186,9 +186,10 @@ carries a private detail (a host name, an address, a private path).
   Spell the model as `tools/reviewers.txt` does, optionally followed by the
   harness in parentheses (`Reviewed-by: DeepSeek V4.1 Flash (DSH)`); Claude
   models add `<noreply@anthropic.com>` or end with `(claude <version>)` in a
-  commit (`Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)`), others take no address. A
-  GitHub comment ends with `Reviewed-by: <model> (<harness>)` lines only, with no
-  address. Whatever tool you use (Claude Code, Codex, OpenCode, dsh, aider, Pi), run
+  commit (`Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)`), others take no address. In a
+  GitHub comment no model line takes an address. In both, the trailers go last, in one
+  block with no blank line inside and no text after it. Whatever tool you use
+  (Claude Code, Codex, OpenCode, dsh, aider, Pi), run
   `tools/check-trailers.py <commit>` before a push and
   `tools/check-trailers.py -c <file>` before posting a review comment. It names
   the canonical spelling on a miss. A model not in the list goes into the list first.
