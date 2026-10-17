@@ -11,8 +11,9 @@
 #   G4  short fuzz run                            fuzzing.yml
 #   G5  ast-grep rule tests and baseline          lint-astgrep.yml ast-grep
 #   G6  @contract comments for the names in tools/gates/contract_functions.txt
+#   G7  mixed atomic/plain accesses, clang-query  #730 #736 #741 #742
 #
-#   tools/gates/run-gates [-s <checkout>] [-g 5,6] [-t "test_a.py test_b.py"]
+#   tools/gates/run-gates [-s <checkout>] [-g 5,6,7] [-t "test_a.py test_b.py"]
 #                         [--fuzz-seconds 20] [--allow-local-build]
 #
 #   -s is the FreeUnit checkout to check.  Without it: $UNIT_SRC, else the
@@ -35,6 +36,17 @@
 #
 #   G6 reads tools/gates/contract_functions.txt next to this script.  That
 #   list is empty, so G6 checks nothing today.
+#
+#   G7 configures a throwaway copy of the checkout: clang-query needs the
+#   build/include headers a configure writes, and a configure in the checkout
+#   itself is exactly what G1 to G4 refuse.  It therefore needs no
+#   --allow-local-build, but it needs clang-query (Debian/Ubuntu package
+#   clang-tools-21; the binary sits in /usr/lib/llvm-*/bin, not on PATH) and
+#   clang.  Its matcher is tools/gates/atomic_query.txt and its baseline is
+#   tools/gates/atomic_baseline.txt.  The baseline was generated on the tree
+#   with #736, #741 and #742, so a checkout without those PRs reports the
+#   sites they fix, which is correct: they are the same class until they
+#   merge.  -g 5,6,7 adds it to the pre-push set.
 
 set -u
 
@@ -354,7 +366,36 @@ gate_6() {
 
 ran=0
 
-for g in 1 2 3 4 5 6; do
+# The mixed atomic/plain access check.  The matcher, the baseline and the
+# checker live next to this script.  A missing clang-query fails the gate:
+# a check that cannot run must not look clean.
+gate_7() {
+    local cq=
+
+    if [ -n "${CLANG_QUERY:-}" ]; then
+        cq=$CLANG_QUERY
+    else
+        cq=$(command -v clang-query || true)
+    fi
+
+    if [ -z "$cq" ]; then
+        # The distro package does not put the binary on PATH.
+        cq=$(ls -d /usr/lib/llvm-*/bin/clang-query 2>/dev/null \
+             | sort -r | head -1)
+    fi
+
+    if [ -z "$cq" ] || [ ! -x "$cq" ]; then
+        fail 7 "clang-query not installed (package clang-tools-21); the
+  binary is in /usr/lib/llvm-*/bin.  Set CLANG_QUERY to override."
+        return
+    fi
+
+    export CLANG_QUERY=$cq
+
+    run 7 atomic python3 "$HARNESS_GATES/atomic_check.py" "$REPO"
+}
+
+for g in 1 2 3 4 5 6 7; do
     case ",$GATES," in
         *",$g,"*) ;;
         *) continue ;;
