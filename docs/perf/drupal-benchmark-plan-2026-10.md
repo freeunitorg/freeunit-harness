@@ -473,6 +473,13 @@ default future wave-0/4 jobs to 8s cells and treat 2s c6 as smoke only.
 
 ### 2026-10-17 — the traps a matrix runs into before it produces a number
 
+**A beta bump can be a security release.** Drupal 12.0.0-beta2 fixes SA-CORE-2026-014,
+-015 and -016, and its notes remove the Navigation Top Bar module and stop serializing
+database queries. So a beta1 row and a beta2 row are not a like-for-like version
+comparison: the delta carries the hardening. Measure the new release under its own site
+key (as `12.0-beta2` does), keep the old rows as the historical baseline, and do not
+read the old rows as a recommendation when the new release is the secure one.
+
 Measured across Drupal 11.4, 12.0.0-beta1 and 12.0.0-beta2, a Symfony 7.4 app, a
 WordPress 7.1.3 site and the musl image, on Apache+mod_php, nginx+FPM, Angie,
 FreeNginx and FreeUnit. Each item is the symptom first, because that is what the
