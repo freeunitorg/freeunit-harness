@@ -185,10 +185,11 @@ carries a private detail (a host name, an address, a private path).
   `Reviewed-by: <model>` only for a model whose finding changed the commit.
   Spell the model as `tools/reviewers.txt` does, optionally followed by the
   harness in parentheses (`Reviewed-by: DeepSeek V4.1 Flash (DSH)`); Claude
-  models add `<noreply@anthropic.com>`, others take no address. Whatever tool you use
-  (Claude Code, Codex, OpenCode, dsh, aider, Pi), run
+  models add `<noreply@anthropic.com>` in a commit, others take no address. A
+  GitHub comment ends with `Reviewed-by: <model> (<harness>)` lines only, with no
+  address. Whatever tool you use (Claude Code, Codex, OpenCode, dsh, aider, Pi), run
   `tools/check-trailers.py <commit>` before a push and
-  `tools/check-trailers.py -f <file>` before posting a review comment. It names
+  `tools/check-trailers.py -c <file>` before posting a review comment. It names
   the canonical spelling on a miss. A model not in the list goes into the list first.
 - `/src/`, `/build/`, `/run/`, `/scratch/` are local working state and are
   gitignored. Nothing under them belongs in a commit.
