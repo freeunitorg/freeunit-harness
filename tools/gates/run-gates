@@ -11,7 +11,7 @@
 #   G4  short fuzz run                            fuzzing.yml
 #   G5  ast-grep rule tests and baseline          lint-astgrep.yml ast-grep
 #   G6  @contract comments for the names in tools/gates/contract_functions.txt
-#   G7  mixed atomic/plain accesses, clang-query  #730 #736 #741 #742
+#   G7  mixed atomic/plain accesses, clang-query  #730 #736 #742 #749 #752
 #
 #   tools/gates/run-gates [-s <checkout>] [-g 5,6,7] [-t "test_a.py test_b.py"]
 #                         [--fuzz-seconds 20] [--allow-local-build]
@@ -44,11 +44,12 @@
 #   --allow-local-build, but it needs clang-query (Debian/Ubuntu package
 #   clang-tools-21; the binary sits in /usr/lib/llvm-*/bin, not on PATH) and
 #   clang.  Its matcher is tools/gates/atomic_query.txt and its baseline is
-#   tools/gates/atomic_baseline.txt.  The baseline was generated on the tree
-#   with #736, #741 and #742, so a checkout without those PRs reports the
-#   sites they fix, which is correct: they are the same class until they
-#   merge.  It is in the default set now; -g 5,6 leaves it out for a run on a
-#   machine without clang-query.
+#   tools/gates/atomic_baseline.txt.  The baseline was generated on freeunit
+#   master 4a0271cc5 with 661c0d5ea (#730, #736, #742, #749 and #752 merged,
+#   plus the src/nxt_unit.c parked and quit_pending fix), so a checkout
+#   without them reports the sites they fix, which is correct: they are the
+#   same class until they merge.  It is in the default set now; -g 5,6 leaves
+#   it out for a run on a machine without clang-query.
 
 set -u
 
