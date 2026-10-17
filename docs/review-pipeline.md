@@ -96,6 +96,13 @@ Then:
    `Harness: DeepSeek Harness`; `Reviewed-by: Codex`; for Claude,
    `Reviewed-by: <full model name> <noreply@anthropic.com>`. PR 588 commit `547a854a`
    carries two. A review with no applied finding gets none.
+6. `git add` named paths, never `git add -A`. A checkout that holds another session's
+   uncommitted work turns `-A` into a commit carrying a file the author never touched;
+   `git show --name-only <sha>` is the check, and it runs before the push, not after.
+7. A branch in a same-owner fork cannot be the head of a PR against this repository: the head
+   must live in the repository that owns the PR, so such a branch is handed to the maintainer
+   to push instead of being pushed by the agent. HYPOTHESIS: the GitHub behaviour behind this
+   was not verified in the session that observed it.
 
 ## How the DeepSeek reviewer is driven
 
