@@ -118,12 +118,14 @@ checkout, configures the copy, and runs the matcher `tools/gates/atomic_query.tx
 every `src/*.c`. It fails on a reference to a value declared with one of the atomic
 typedefs in `src/nxt_atomic.h` that is not made through the `nxt_atomic_*` macros or a
 `__sync_*` builtin, unless the reference is in `tools/gates/atomic_baseline.txt`. New
-matches and stale entries both fail. The baseline holds the by-design sites
-(initialization stores before the object is shared, per-thread fields, value-type uses)
-and the engine connection counters, whose fix is a separate design decision; it was
-generated on the tree with #736, #741 and #742, so a checkout without those PRs reports
-the sites they fix, which is correct until they merge. A run takes about 30 seconds,
-most of it the configure. `-g 5,6` leaves G7 out on a machine without `clang-query`.
+matches and stale entries both fail. The baseline holds only the by-design sites
+(initialization stores before the object is shared, value-type uses through a private
+local, a global initializer and the next-port-id reset in the child); it was generated
+on freeunit master `4a0271cc5` with `661c0d5ea` (#730, #736, #742, #749 and #752 merged,
+plus the `src/nxt_unit.c` `parked` and `quit_pending` fix), so a checkout without them
+reports the sites they fix, which is correct until they merge. A run takes about 30
+seconds, most of it the configure. `-g 5,6` leaves G7 out on a machine without
+`clang-query`.
 
 G1 to G4 build. They refuse to run unless you pass `--allow-local-build`, and the
 default gate set, `5,6,7`, contains no building gate for the same reason. Two harness
