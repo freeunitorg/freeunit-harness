@@ -181,6 +181,9 @@ carries a private detail (a host name, an address, a private path).
   with `--allow-local-build`, because a build belongs on the build host. The gate table is in [README.md](README.md), section "Local gates before a
   push".
 - If the source disagrees with a doc, the source wins and the doc gets fixed.
+- Shell scripts follow [docs/shell.md](docs/shell.md). The server gate is
+  `sh .github/scripts/lint-shell.sh` (shellcheck 0.11.0 and `dash -n`); a
+  script that builds a command line needs a stub argv test for every path.
 - Trailers: `Co-Authored-By: <model>` for the model that wrote the code, and
   `Reviewed-by: <model>` only for a model whose finding changed the commit.
   Spell the model as `tools/reviewers.txt` does, optionally followed by the
