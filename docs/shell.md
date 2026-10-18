@@ -82,6 +82,17 @@ shellcheck -s sh "$f"
 checkbashisms "$f"          # Debian devscripts
 ```
 
+`tools/gates/run-gates -s <checkout> -g 8` (G8) runs `dash -n` and busybox
+`ash -n` on each tracked `#!/bin/sh` file of a FreeUnit checkout. It also
+greps for traps that `shellcheck -s sh` misses: `echo "$x" |` (stronger
+when piped to `jq`, `python` or `base64`), `| grep -q` in a file that sets
+`pipefail`, and an `EXIT` trap without `HUP`/`INT`/`TERM` traps. It prints
+`WARN: file:line` lines and does not fail. Comment lines are skipped; a
+heredoc body is not, so read each hit. The failing checks are in the server
+repo's CI: `.github/workflows/lint-shell.yml` runs `shellcheck -s sh`,
+`dash -n` and a bare `set -o pipefail` check on the same files. G8 adds what
+that job does not run: `ash -n` and the three greps.
+
 For a sed expression, compare outputs on the same input:
 
 ```sh
