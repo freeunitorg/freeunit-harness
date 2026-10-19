@@ -53,7 +53,9 @@ appears, and exits 3.
 - **Lock counts.** `LOCKS=1` preloads `mutexshim.so`. For each run the kit copies the shim files after the warm-up
   and after the measured window, each after 2.5 s idle, each copy twice 0.3 s apart. Calls per request are
   (second snapshot minus first) / oha requests of the window. The shim slows every lock call, so a locks run
-  writes no throughput.
+  writes no throughput. A site in `sites-*.txt` is the function that called `pthread_mutex_lock()`, or the caller
+  of `nxt_thread_mutex_lock()` when the call went through that wrapper. libunit calls `pthread_mutex_lock()`
+  directly, so an application site is the libunit function itself.
 - **Own processes.** Every kill is limited to processes whose exe is under the kit's tree directory.
 
 ## Traps

@@ -331,6 +331,60 @@ class LocksTest(Base):
         self.assertEqual(r.stdout.split("\n")[1:3], ["capp 1 v 1 router NO LOAD", "capp 1 v 2 router NO LOAD"])
 
 
+class ShimSiteTest(Base):
+    """mutexshim.so and locks.py sites name the function that locks.
+
+    A direct pthread_mutex_lock() call (libunit does this) is its own site. A call
+    through nxt_thread_mutex_lock() is attributed to the caller of that wrapper.
+    """
+
+    PROG = r"""
+#include <pthread.h>
+#include <unistd.h>
+static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+__attribute__((noinline)) int nxt_thread_mutex_lock(pthread_mutex_t *mx)
+{ int rc = pthread_mutex_lock(mx); __asm__ volatile("" ::: "memory"); return rc; }
+__attribute__((noinline)) void wrapper_caller(void)
+{ for (int i = 0; i < 1000; i++) { nxt_thread_mutex_lock(&m); pthread_mutex_unlock(&m); } __asm__ volatile(""); }
+__attribute__((noinline)) void direct_lock(void)
+{ for (int i = 0; i < 1000; i++) { pthread_mutex_lock(&m); pthread_mutex_unlock(&m); } __asm__ volatile(""); }
+__attribute__((noinline)) void outer(void) { direct_lock(); __asm__ volatile(""); }
+int main(void) { wrapper_caller(); outer(); sleep(2); return 0; }
+"""
+
+    def test_sites_name_the_locking_function(self):
+        cc = shutil.which("cc")
+        if cc is None or shutil.which("addr2line") is None:
+            self.skipTest("no cc or no addr2line")
+        shim = os.path.join(self.tmp, "mutexshim.so")
+        subprocess.run([cc, "-O2", "-fno-omit-frame-pointer", "-shared", "-fPIC", "-o", shim,
+                        os.path.join(KIT, "mutexshim.c"), "-ldl", "-lpthread"], check=True)
+        src = os.path.join(self.tmp, "prog.c")
+        with open(src, "w") as f:
+            f.write(self.PROG)
+        prog = os.path.join(self.tmp, "lab_capp")
+        subprocess.run([cc, "-O0", "-fno-omit-frame-pointer", "-o", prog, src, "-lpthread"], check=True)
+        d = os.path.join(self.tmp, "run")
+        for sub in ("a", "b"):
+            os.makedirs(os.path.join(d, sub))
+        p = subprocess.run([prog], env=dict(self.env, LD_PRELOAD=shim, MUTEXSHIM_OUT=os.path.join(d, "b")),
+                           timeout=30)
+        self.assertEqual(p.returncode, 0)
+        files = os.listdir(os.path.join(d, "b"))
+        self.assertTrue(files, "the shim wrote no file")
+        pid = files[0].split("-")[1]
+        with open(os.path.join(d, "b", "roles.txt"), "w") as f:
+            f.write(pid + " " + prog + "\n")
+        with open(os.path.join(d, "oha.json"), "w") as f:
+            f.write('{"statusCodeDistribution": {"200": 1000}}')
+        lines = module("locks").sites(d)
+        text = "\n".join(lines)
+        named = {ln.split()[3] for ln in lines[2:]}
+        self.assertIn("direct_lock", named, text)
+        self.assertIn("wrapper_caller", named, text)
+        self.assertNotIn("outer", named, text)
+
+
 class RunStageTest(Base):
     """run.sh claim and release against a stub ssh that runs the command here."""
 

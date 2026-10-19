@@ -1,14 +1,17 @@
 /*
  * LD_PRELOAD shim for the measurement only: counts pthread_mutex_lock() calls and the time spent
- * waiting for a contended mutex, per call site.  The site is the caller of nxt_thread_mutex_lock()
- * (found by walking one frame pointer; unitd is built with -fno-omit-frame-pointer).
+ * waiting for a contended mutex, per call site.  The shim records two return addresses: its own
+ * (the function that called pthread_mutex_lock()) and the one a frame above it (found by walking
+ * one frame pointer; unitd is built with -fno-omit-frame-pointer).  locks.py sites names the first
+ * one, unless it is in nxt_thread_mutex_lock(); then it names the caller of that wrapper.  libunit
+ * calls pthread_mutex_lock() directly, so the first address is the site there.
  *
  * A call first tries pthread_mutex_trylock().  It counts as contended only when the trylock fails,
  * and the wait is the time of the following blocking pthread_mutex_lock().
  *
  * Every process that loads the shim rewrites $MUTEXSHIM_OUT/mutex-<pid>-<uid>.tsv once a second
  * (default directory /out):
- *   site  object_base  object_name  calls  contended  wait_ns
+ *   site  object_base  object_name  calls  contended  wait_ns  caller  caller_base  caller_object
  * The uid is in the name because a process that drops to nobody cannot reopen its old file.
  * Read the counts as the difference of two snapshots (sweep.sh LOCKS=1, locks.py), never once
  * at exit.
@@ -28,7 +31,9 @@
 #define SLOTS  1024
 
 typedef struct {
+    _Atomic uintptr_t       key;        /* a hash of (site, caller); 0: a free slot */
     _Atomic uintptr_t       site;
+    _Atomic uintptr_t       caller;
     _Atomic unsigned long   calls;
     _Atomic unsigned long   contended;
     _Atomic unsigned long   wait_ns;
@@ -41,27 +46,36 @@ static char    outdir[256] = "/out";
 static char    exe[512] = "?";
 
 static slot_t *
-find(uintptr_t site)
+find(uintptr_t site, uintptr_t caller)
 {
     unsigned   i, n;
-    uintptr_t  cur, zero;
+    uintptr_t  key, cur, zero;
     slot_t     *s;
 
-    i = (unsigned) ((site >> 3) * 2654435761u) % SLOTS;
+    key = (site * (uintptr_t) 0x9e3779b97f4a7c15ull) ^ caller;
+    if (key == 0) {
+        key = 1;
+    }
+
+    i = (unsigned) ((key >> 3) * 2654435761u) % SLOTS;
 
     for (n = 0; n < SLOTS; n++) {
         s = &tab[(i + n) % SLOTS];
-        cur = atomic_load(&s->site);
+        cur = atomic_load(&s->key);
 
-        if (cur == site) {
+        if (cur == key) {
             return s;
         }
 
         if (cur == 0) {
             zero = 0;
-            if (atomic_compare_exchange_strong(&s->site, &zero, site)
-                || zero == site)
-            {
+            if (atomic_compare_exchange_strong(&s->key, &zero, key)) {
+                atomic_store(&s->caller, caller);
+                atomic_store(&s->site, site);   /* last: the dumper skips a slot without a site */
+                return s;
+            }
+
+            if (zero == key) {
                 return s;
             }
         }
@@ -83,10 +97,11 @@ static void *
 dumper(void *arg)
 {
     FILE      *f;
-    char      path[300];
-    unsigned  i;
-    Dl_info   info;
-    slot_t    *s;
+    char       path[300];
+    unsigned   i;
+    Dl_info    info, cinfo;
+    slot_t     *s;
+    uintptr_t  site, caller;
 
     (void) arg;
 
@@ -102,22 +117,36 @@ dumper(void *arg)
 
         for (i = 0; i < SLOTS; i++) {
             s = &tab[i];
-            if (atomic_load(&s->site) == 0) {
+            site = atomic_load(&s->site);
+            if (site == 0) {
                 continue;
             }
 
+            caller = atomic_load(&s->caller);
+
             info.dli_fname = "?";
             info.dli_fbase = NULL;
-            dladdr((void *) s->site, &info);
+            dladdr((void *) site, &info);
 
             if (info.dli_fname == NULL || info.dli_fname[0] != '/') {
                 info.dli_fname = exe;
             }
 
-            fprintf(f, "%#lx\t%#lx\t%s\t%lu\t%lu\t%lu\n", (unsigned long) s->site,
+            cinfo.dli_fname = "?";
+            cinfo.dli_fbase = NULL;
+            if (caller != 0) {
+                dladdr((void *) caller, &cinfo);
+            }
+
+            if (cinfo.dli_fname == NULL || cinfo.dli_fname[0] != '/') {
+                cinfo.dli_fname = exe;
+            }
+
+            fprintf(f, "%#lx\t%#lx\t%s\t%lu\t%lu\t%lu\t%#lx\t%#lx\t%s\n", (unsigned long) site,
                     (unsigned long) info.dli_fbase, info.dli_fname,
                     atomic_load(&s->calls), atomic_load(&s->contended),
-                    atomic_load(&s->wait_ns));
+                    atomic_load(&s->wait_ns), (unsigned long) caller,
+                    (unsigned long) cinfo.dli_fbase, cinfo.dli_fname);
         }
 
         fclose(f);
@@ -144,7 +173,9 @@ child_after_fork(void)
     unsigned  i;
 
     for (i = 0; i < SLOTS; i++) {
+        atomic_store(&tab[i].key, 0);
         atomic_store(&tab[i].site, 0);
+        atomic_store(&tab[i].caller, 0);
         atomic_store(&tab[i].calls, 0);
         atomic_store(&tab[i].contended, 0);
         atomic_store(&tab[i].wait_ns, 0);
@@ -179,18 +210,20 @@ pthread_mutex_lock(pthread_mutex_t *m)
 {
     int              rc;
     void             **fp, **fp1;
-    uintptr_t        site;
+    uintptr_t        site, caller;
     slot_t           *s;
     struct timespec  a, b;
 
     resolve();
 
-    /* Our frame pointer; the frame of nxt_thread_mutex_lock() is above it. */
+    /* site: the function that called us.  caller: one frame above it, which locks.py uses
+       when site is in nxt_thread_mutex_lock(). */
+    site = (uintptr_t) __builtin_return_address(0);
     fp = (void **) __builtin_frame_address(0);
     fp1 = (fp != NULL) ? (void **) fp[0] : NULL;
-    site = (fp1 != NULL) ? (uintptr_t) fp1[1] : (uintptr_t) fp[1];
+    caller = (fp1 != NULL) ? (uintptr_t) fp1[1] : 0;
 
-    s = find(site);
+    s = find(site, caller);
     if (s != NULL) {
         atomic_fetch_add(&s->calls, 1);
     }

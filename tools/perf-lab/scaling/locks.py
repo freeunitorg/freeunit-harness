@@ -31,6 +31,8 @@ import subprocess
 import sys
 
 ROLES = ("router", "controller", "prototype", "application", "main")
+# A site in one of these functions is a lock wrapper: the site is its caller.
+WRAPPERS = ("nxt_thread_mutex_lock",)
 
 
 def load_counts(d):
@@ -53,7 +55,8 @@ def load_counts(d):
 
 
 def load_sites(d):
-    """{(pid, site, base, object): (calls, contended)}, the largest copy of each key."""
+    """{(pid, site, base, object, caller, caller_base, caller_object): (calls, contended)},
+    the largest copy of each key. A file of an older shim has no caller columns: caller 0."""
     t = {}
     for f in glob.glob(d + "/mutex-*.tsv") + glob.glob(d + "/x/mutex-*.tsv"):
         pid = re.match(r".*/mutex-(\d+)-", f).group(1)
@@ -61,7 +64,8 @@ def load_sites(d):
             for line in fh:
                 p = line.rstrip("\n").split("\t")
                 try:
-                    k = (pid, int(p[0], 16), int(p[1], 16), p[2])
+                    c = (int(p[6], 16), int(p[7], 16), p[8]) if len(p) >= 9 else (0, 0, "")
+                    k = (pid, int(p[0], 16), int(p[1], 16), p[2]) + c
                     v = (int(p[3]), int(p[4]))
                 except (IndexError, ValueError):
                     continue
@@ -120,7 +124,17 @@ def summary(path):
     return lines
 
 
+_SYM = {}
+
+
 def sym(site, base, name):
+    k = (site, base, name)
+    if k not in _SYM:
+        _SYM[k] = _sym(site, base, name)
+    return _SYM[k]
+
+
+def _sym(site, base, name):
     for addr in (site - base, site):
         try:
             o = subprocess.run(["addr2line", "-f", "-e", name, hex(addr)], capture_output=True,
@@ -137,19 +151,27 @@ def sites(d, trees=None):
     roles = load_roles(d + "/b")
     with open(os.path.join(d, "oha.json")) as f:
         ok = int(json.load(f)["statusCodeDistribution"]["200"])
+    def path(obj):
+        return os.path.join(trees, obj[3:]) if trees and obj.startswith("/t/") else obj
+
+    def name(site, base, obj):
+        s = sym(site, base, path(obj))
+        return s if s != "?" else "? %#x" % site
+
     agg = collections.defaultdict(lambda: [0, 0])
     for k, (c, ct) in b.items():
         c0, ct0 = a.get(k, (0, 0))
-        key = (role(roles.get(k[0], "")), k[1], k[2], k[3])
+        pid, site, base, obj, caller, cbase, cobj = k
+        where = name(site, base, obj)
+        if where.split(" ")[0] in WRAPPERS and caller:
+            where, obj = name(caller, cbase, cobj), cobj
+        key = (role(roles.get(pid, "")), where, os.path.basename(obj))
         agg[key][0] += c - c0; agg[key][1] += ct - ct0
     lines = ["ok %d" % ok, "role    calls/req contended/req  site"]
     for k, (c, ct) in sorted(agg.items(), key=lambda kv: -kv[1][0]):
         if not ok or c / ok < 0.01:
             continue
-        obj = k[3]
-        if trees and obj.startswith("/t/"):
-            obj = os.path.join(trees, obj[3:])
-        lines.append(f"{k[0]:7} {c / ok:9.3f} {ct / ok:13.4f}  {sym(k[1], k[2], obj)}  [{os.path.basename(k[3])}]")
+        lines.append(f"{k[0]:7} {c / ok:9.3f} {ct / ok:13.4f}  {k[1]}  [{k[2]}]")
     return lines
 
 
