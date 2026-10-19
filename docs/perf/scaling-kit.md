@@ -97,6 +97,7 @@ appears, and exits 3.
 | `analyze.py`, `freq.py` | medians, ratios and verdicts; clock per run |
 
 Results on the box: `$REMOTE_WORKDIR/scaling/results/TAG/`: `sweep.tsv` (one row per run, with an epoch `ts`),
-`meta.txt` (topology, governor, parameters, the sha of each tree), `freq.log`, `summary.txt`, `DONE` or `FAILED`,
+`meta.txt` (topology, governor, the parameters that this kind of run used, the sha of each tree; a profile run
+writes one too), `freq.log`, `summary.txt`, `DONE` or `FAILED`,
 and for a locks run
 `locks.tsv`, `locks-summary.txt` and `sites-*.txt`. Tests: `tools/tests/test_perf_lab_scaling.py`.

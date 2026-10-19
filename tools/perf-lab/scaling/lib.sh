@@ -227,3 +227,37 @@ finish_summary() {
     rm -f "$OUT/DONE"
     return 1
 }
+
+# --- meta.txt -------------------------------------------------------------------------
+# params_line sweep|locks|profile: the knobs that this kind of run uses, and only
+# those. A locks run uses LRUNS and LDUR, not RUNS and DUR.
+params_line() {
+    case $1 in
+    sweep) echo "params VARIANTS='$VARIANTS' WORKLOADS='$WORKLOADS' NS='$NS' RUNS=$RUNS DUR=$DUR WARM=$WARM" \
+                "CONNS=$CONNS APP_PROCS=$APP_PROCS PAIRS='${PAIRS:-}'" ;;
+    locks) echo "params LOCKS=1 VARIANTS='$VARIANTS' WORKLOADS='$WORKLOADS' NS='$NS' LRUNS=$LRUNS LDUR=$LDUR" \
+                "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS SHIM='${SHIM:-}'" ;;
+    profile) echo "params N=$N V=$V WORKLOADS='$WORKLOADS' PERF_SEC=$PERF_SEC C2C_G=$C2C_G LOAD_SEC=$LOAD_SEC" \
+                  "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS" ;;
+    *) die "params_line: unknown mode $1" ;;
+    esac
+}
+
+# write_meta MODE VARIANT...: the box, the parameters and the sha of each tree, to $OUT/meta.txt.
+write_meta() {
+    local mode=$1 v i
+    shift
+    {
+        echo "date $(date -u +%FT%TZ)"
+        echo "kernel $(uname -r)"
+        echo "cpu $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+        echo "governor $(cat "$SYSCPU/cpu0/cpufreq/scaling_governor" 2>/dev/null)" \
+             "epp $(cat "$SYSCPU/cpu0/cpufreq/energy_performance_preference" 2>/dev/null)" \
+             "no_turbo $(cat "$SYSCPU/intel_pstate/no_turbo" 2>/dev/null)"
+        echo "smt $(cat "$SYSCPU/smt/active" 2>/dev/null)  cores $NCORES"
+        for ((i = 0; i < NCORES; i++)); do echo "core$i ${CORE_T0[i]},${CORE_T1[i]}"; done
+        echo "oha $("$OHA" --version 2>&1 | head -1)"
+        params_line "$mode"
+        for v in "$@"; do echo "variant $v $(cat "$TREES/$v/.sha" 2>/dev/null)"; done
+    } > "$OUT/meta.txt"
+}

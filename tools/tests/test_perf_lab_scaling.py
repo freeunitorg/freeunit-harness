@@ -79,6 +79,37 @@ class TopologyTest(Base):
         self.assertEqual(out, ["2", "0,1", "0,1", "1"])
 
 
+class ParamsTest(Base):
+    """meta.txt records the parameters that the run used."""
+
+    KNOBS = dict(VARIANTS="a b", WORKLOADS="capp", NS="1 2", RUNS="5", DUR="30", WARM="3", LRUNS="2",
+                 LDUR="10", SHIM="/lab/mutexshim.so", PAIRS="b:a", N="2", V="b", PERF_SEC="20", C2C_G="0",
+                 LOAD_SEC="75")
+
+    def line(self, mode):
+        r = self.lib("params_line " + mode, **self.KNOBS)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_locks_line_has_the_lock_knobs(self):
+        import re
+        t = self.line("locks")
+        for k in ("LOCKS=1", "LRUNS=2", "LDUR=10", "SHIM='/lab/mutexshim.so'", "NS='1 2'"):
+            self.assertIn(k, t)
+        self.assertIsNone(re.search(r"\b(RUNS|DUR)=", t), "a locks line names the unused RUNS or DUR: " + t)
+
+    def test_sweep_line_has_pairs(self):
+        t = self.line("sweep")
+        for k in ("RUNS=5", "DUR=30", "PAIRS='b:a'"):
+            self.assertIn(k, t)
+        self.assertNotIn("LRUNS", t)
+
+    def test_profile_line_has_the_profile_knobs(self):
+        t = self.line("profile")
+        for k in ("N=2", "V=b", "PERF_SEC=20", "C2C_G=0", "LOAD_SEC=75", "CONNS=", "APP_PROCS="):
+            self.assertIn(k, t)
+
+
 class ScopedKillTest(Base):
     def setUp(self):
         super().setUp()

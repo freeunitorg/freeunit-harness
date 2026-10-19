@@ -32,6 +32,7 @@ command -v perf >/dev/null || die "no perf"
 read_topology
 [ "$N" -le "$NCORES" ] || die "N=$N is more than the $NCORES cores"
 mkdir -p "$OUT"; chmod 1777 "$OUT"
+write_meta profile "$V"
 FAIL=$OUT/failures.txt; : > "$FAIL"
 trap 'stop_unit; own_out' EXIT
 setup_www
