@@ -260,6 +260,10 @@ class RunStageTest(Base):
             text = f.read()
         self.assertIn("format=perflab-1\n", text)
         self.assertIn("expires=", text)
+        # The holder process must not keep the claim lock: tools/perf-lab/remote.sh takes it too.
+        lock = subprocess.run(["flock", "-w", "1", os.path.join(self.claims, ".perflab.lock"), "true"],
+                              capture_output=True)
+        self.assertEqual(lock.returncode, 0, "the claim lock is still held after run.sh claim")
         r = self.run_sh("claim")
         self.assertNotEqual(r.returncode, 0, "a second claim passed")
         r = self.run_sh("release")

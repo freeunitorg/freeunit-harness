@@ -94,7 +94,9 @@ exec 9> "\$CLAIM_DIR/.perflab.lock"
 flock -w 60 9 || { echo "BUSY: the claim lock is held"; exit 75; }
 o=\$(other_claims "")
 [ -z "\$o" ] || { echo "BUSY: claimed by:\$o"; exit 75; }
-nohup sleep $((min * 60)) >/dev/null 2>&1 &
+# 9>&-: the holder must not inherit the lock. It lives for the whole claim, and
+# tools/perf-lab/remote.sh takes the same lock before it reads the claims.
+nohup sleep $((min * 60)) >/dev/null 2>&1 9>&- &
 pid=\$!
 now=\$(date +%s)
 printf 'format=perflab-1\nwho=%s\npurpose=scaling kit\nhost=%s\npid=%s\nstarted=%s\nexpires=%s\n' \
