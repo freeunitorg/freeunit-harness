@@ -13,6 +13,12 @@ of one or two runs per side gives a narrow interval that means nothing. Else
 percent difference was noise on every box measured so far
 (docs/perf/scaling-kit.md).
 
+A run without load is a failure, not a sample: its rps is "NA" (sweep.sh
+could not read the oha result) or 0. Such a run is left out of the
+medians, its cell is marked "NO LOAD k/n", and a ratio with such a run on
+either side has the verdict "NO LOAD". analyze.py then prints the tables
+and exits 1.
+
 Notes per cell: LOADGEN-BOUND when oha used over 90 percent of its cpus (the
 cell measures oha, not the server), UNSTABLE when the rps spread is over 6
 percent, ERRORS when any request failed.
@@ -35,14 +41,22 @@ def load(path):
     return cells
 
 
+def loaded(x):
+    """True when the run had load: a positive rps."""
+    try:
+        return float(x["rps"]) > 0
+    except ValueError:
+        return False
+
+
 def med(g, f):
     return st.median(float(x[f]) for x in g)
 
 
-def notes(g):
+def notes(g, failed=0):
     rps = [float(x["rps"]) for x in g]
     m = st.median(rps)
-    out = []
+    out = ["NO LOAD %d/%d" % (failed, failed + len(g))] if failed else []
     if med(g, "load_cpu_pct") > LOADGEN_PCT:
         out.append("LOADGEN-BOUND")
     if m and 100 * (max(rps) - min(rps)) / m > UNSTABLE_PCT:
@@ -54,6 +68,8 @@ def notes(g):
 
 def ratio(a_rows, b_rows, boots=4000, seed=1):
     """-> (ratio of medians, sorted per-round ratios, ci low, ci high, verdict)."""
+    if not all(map(loaded, a_rows)) or not all(map(loaded, b_rows)):
+        return None, [], None, None, "NO LOAD"
     rnd = random.Random(seed)
     ra = {x["run"]: float(x["rps"]) for x in a_rows}
     rb = {x["run"]: float(x["rps"]) for x in b_rows}
@@ -87,16 +103,29 @@ def main(argv):
     print("| workload | n | layout | variant | runs | rps median | rps min..max | spread % | p50 ms | p99 ms "
           "| srv cpu % | load cpu % | bad | note |")
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    failed = 0
     for (w, n) in sorted(cells):
-        for v, g in sorted(cells[(w, n)].items()):
+        for v, g_all in sorted(cells[(w, n)].items()):
+            g = [x for x in g_all if loaded(x)]
+            bad = len(g_all) - len(g)
+            failed += bad
+            if not g:
+                print(f"| {w} | {n} | {g_all[0]['layout']} | {v} | {len(g_all)} | - | - | - | - | - | - | - | - "
+                      f"| NO LOAD {bad}/{bad} |")
+                continue
             rps = [float(x["rps"]) for x in g]
             m = st.median(rps)
             print(f"| {w} | {n} | {g[0]['layout']} | {v} | {len(g)} | {m:.0f} | {min(rps):.0f}..{max(rps):.0f} | "
                   f"{100 * (max(rps) - min(rps)) / m if m else 0:.1f} | {med(g, 'p50_ms'):.3f} | "
                   f"{med(g, 'p99_ms'):.3f} | {med(g, 'srv_cpu_pct'):.1f} | {med(g, 'load_cpu_pct'):.1f} | "
-                  f"{sum(int(x['bad']) for x in g)} | {notes(g)} |")
-    if not pairs:
-        return
+                  f"{sum(int(x['bad']) for x in g)} | {notes(g, bad)} |")
+    if pairs:
+        ratios(cells, pairs)
+    if failed:
+        sys.exit(f"analyze.py: {failed} runs had no load (rps NA or 0); no verdict uses them")
+
+
+def ratios(cells, pairs):
     print()
     print("## A/B ratios (b/a, rps and p99)")
     print("| workload | n | b vs a | rps ratio (medians) | paired per-round ratios | ci95 | p99 ratio | verdict |")
@@ -107,6 +136,9 @@ def main(argv):
             if a not in c or b not in c:
                 continue
             r, paired, lo, hi, verdict = ratio(c[a], c[b])
+            if r is None:
+                print(f"| {w} | {n} | {b} vs {a} | - | - | - | - | {verdict} |")
+                continue
             p99 = med(c[b], "p99_ms") / med(c[a], "p99_ms") if med(c[a], "p99_ms") else 0
             print(f"| {w} | {n} | {b} vs {a} | {r:.4f} ({100 * (r - 1):+.1f}%) | "
                   f"{' '.join(f'{p:.3f}' for p in paired)} | {lo:.3f}..{hi:.3f} | {p99:.3f} | {verdict} |")

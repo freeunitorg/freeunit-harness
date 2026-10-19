@@ -44,6 +44,11 @@ appears, and exits 3.
   variants. analyze.py pairs the runs of one round.
 - **Verdict.** analyze.py prints medians, the spread, a bootstrap ci95 of median(b)/median(a) and the per-round
   ratios. `noise` when the ci95 holds 1.0 or the ratios change sign; `few runs` below 5 runs per side.
+- **A run without load is a failure.** When the oha result of a run cannot be read, sweep.sh writes `NA` in its row,
+  never zeros. analyze.py leaves a run with `NA` or 0 rps out of the medians, marks the cell `NO LOAD k/n`, gives
+  its ratios the verdict `NO LOAD`, and exits 1. sweep.sh then keeps the tables as `summary.txt.failed` and writes
+  `FAILED`; it writes `summary.txt` and `DONE` only on success. `run.sh watch` waits for `DONE` and exits 5 on
+  `FAILED`. A locks run does the same with `locks-summary.txt`.
 - **Lock counts.** `LOCKS=1` preloads `mutexshim.so`. For each run the kit copies the shim files after the warm-up
   and after the measured window, each after 2.5 s idle, each copy twice 0.3 s apart. Calls per request are
   (second snapshot minus first) / oha requests of the window. The shim slows every lock call, so a locks run
@@ -92,5 +97,6 @@ appears, and exits 3.
 | `analyze.py`, `freq.py` | medians, ratios and verdicts; clock per run |
 
 Results on the box: `$REMOTE_WORKDIR/scaling/results/TAG/`: `sweep.tsv` (one row per run, with an epoch `ts`),
-`meta.txt` (topology, governor, parameters, the sha of each tree), `freq.log`, `summary.txt`, and for a locks run
+`meta.txt` (topology, governor, parameters, the sha of each tree), `freq.log`, `summary.txt`, `DONE` or `FAILED`,
+and for a locks run
 `locks.tsv`, `locks-summary.txt` and `sites-*.txt`. Tests: `tools/tests/test_perf_lab_scaling.py`.

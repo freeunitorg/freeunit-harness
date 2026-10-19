@@ -98,9 +98,11 @@ chmod -R a+r "$OUT" 2>/dev/null
 {
     echo "profile V=$V N=$N WORKLOADS='$WORKLOADS' server cpus $(cpus_server "$N") load cpus $(cpus_load "$N")"
     for w in $WORKLOADS; do
-        echo "$w: $(cat "$OUT/lockshare-$w.txt" 2>/dev/null); load $(read_oha "$OUT/load-$w.json")"
+        echo "$w: $(cat "$OUT/lockshare-$w.txt" 2>/dev/null); load $(read_oha "$OUT/load-$w.json" 2>/dev/null \
+            || echo "FAILED: no oha result")"
     done
     echo "failures: $(wc -l < "$FAIL")"
     cat "$FAIL"
 } > "$OUT/summary.txt"
 cat "$OUT/summary.txt"
+: > "$OUT/DONE"

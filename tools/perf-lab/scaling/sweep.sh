@@ -5,7 +5,9 @@
 #
 #   $TREES/<variant>/build/sbin/unitd and build/lab_capp are built before (run.sh build).
 #   Writes $OUT/sweep.tsv (one row per run), $OUT/meta.txt, $OUT/freq.log and
-#   $OUT/summary.txt.
+#   $OUT/summary.txt, then $OUT/DONE. A run whose oha result cannot be read
+#   gets "NA" for ok, bad, rps, p50 and p99, never zeros. Then analyze.py
+#   fails, summary.txt is not written, and $OUT/FAILED says why (exit 1).
 #
 # Layout: the server (router threads, and the application processes, which
 # inherit the cpuset) runs on the first thread of the first n physical cores.
@@ -102,17 +104,21 @@ if [ "${LOCKS:-0}" = 1 ]; then
             sleep 2.5; snap "$SD/a"
             oha_run "${LDUR:-10}" "$load" "$(url_for "$w")" "$SD/oha.json"
             sleep 2.5; snap "$SD/b"
-            read -r ok bad rps p50 p99 < <(read_oha "$SD/oha.json")
             stop_unit
+            if res=$(read_oha "$SD/oha.json"); then
+                read -r ok bad rps p50 p99 <<< "$res"
+                python3 "$HERE/locks.py" sites "$SD" > "$OUT/sites-$v-$w-$n-$r.txt" 2>&1
+                echo "  locks $v $w n=$n run $r: ok=$ok bad=$bad rps(shim)=$rps"
+            else
+                ok=NA
+                echo "  locks $v $w n=$n run $r: LOAD FAILED (no oha result)"
+            fi
             python3 "$HERE/locks.py" diff "$SD" "$v" "$w" "$n" "$r" "$ok" >> "$LT"
-            python3 "$HERE/locks.py" sites "$SD" > "$OUT/sites-$v-$w-$n-$r.txt" 2>&1
-            echo "  locks $v $w n=$n run $r: ok=$ok bad=$bad rps(shim)=$rps"
           done
         done
       done
     done
-    python3 "$HERE/locks.py" summary "$LT" > "$OUT/locks-summary.txt"
-    cat "$OUT/locks-summary.txt"
+    finish_summary "$OUT/locks-summary.txt" python3 "$HERE/locks.py" summary "$LT" || exit 1
     echo "locks done"
     exit 0
 fi
@@ -135,7 +141,11 @@ for w in $WORKLOADS; do
         read -r sb st < <(cpu_ticks "$srv"); read -r lb lt < <(cpu_ticks "$load")
         oha_run "$DUR" "$load" "$(url_for "$w")" "$R/oha.json"
         read -r sb2 st2 < <(cpu_ticks "$srv"); read -r lb2 lt2 < <(cpu_ticks "$load")
-        read -r ok bad rps p50 p99 < <(read_oha "$R/oha.json")
+        if res=$(read_oha "$R/oha.json"); then
+            read -r ok bad rps p50 p99 <<< "$res"
+        else
+            ok=NA bad=NA rps=NA p50=NA p99=NA   # analyze.py: NO LOAD, and no verdict
+        fi
         sc=$(awk -v b=$((sb2 - sb)) -v t=$((st2 - st)) 'BEGIN{printf "%.1f", (t > 0 ? 100 * b / t : 0)}')
         lc=$(awk -v b=$((lb2 - lb)) -v t=$((lt2 - lt)) 'BEGIN{printf "%.1f", (t > 0 ? 100 * b / t : 0)}')
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$v" "$w" "$n" "$layout" "$r" \
@@ -147,6 +157,5 @@ for w in $WORKLOADS; do
   done
 done
 
-python3 "$HERE/analyze.py" "$TSV" "${PAIRS:-}" > "$OUT/summary.txt"
-cat "$OUT/summary.txt"
+finish_summary "$OUT/summary.txt" python3 "$HERE/analyze.py" "$TSV" "${PAIRS:-}" || exit 1
 echo "sweep done"

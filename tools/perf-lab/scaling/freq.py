@@ -73,6 +73,12 @@ def main(argv):
     allf = []
     with open(os.path.join(d, "sweep.tsv")) as f:
         for r in csv.DictReader(f, delimiter="\t"):
+            try:
+                rps = float(r["rps"])
+            except ValueError:
+                rps = 0
+            if rps <= 0:   # a run without load: nothing to compare with the clock
+                continue
             ts, n = int(r["ts"]), int(r["n"])
             cpus = t0[:n]
             win = [s for t, s in samples if ts - dur <= t <= ts and len(s) > max(cpus)]
@@ -80,7 +86,7 @@ def main(argv):
                 continue
             fq = st.mean(st.mean(s[c] for c in cpus) for s in win)
             cell[(r["workload"], n, r["variant"])].append(fq)
-            pairs[(r["workload"], n)].append((fq, float(r["rps"])))
+            pairs[(r["workload"], n)].append((fq, rps))
             allf.append(fq)
     if not allf:
         sys.exit("freq.py: no run window has samples")

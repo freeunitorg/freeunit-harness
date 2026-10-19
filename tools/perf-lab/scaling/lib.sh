@@ -191,17 +191,38 @@ oha_run() {  # seconds cpus url [json-file]
     fi
 }
 
+# A missing or unreadable result is a failed load: read_oha prints nothing and
+# exits 1. It never turns it into a zero-throughput row.
 read_oha() {  # json -> "ok bad rps p50_ms p99_ms"
     python3 - "$1" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-except Exception:
-    print("0 0 0 0 0"); sys.exit()
+    rps = float(d["summary"]["requestsPerSec"])
+except Exception as e:
+    sys.exit("read_oha: no oha result in %s: %s" % (sys.argv[1], e))
 codes = d.get("statusCodeDistribution", {})
 ok = int(codes.get("200", 0))
 bad = sum(int(v) for k, v in codes.items() if k != "200") + sum(int(v) for v in d.get("errorDistribution", {}).values())
 lp = d.get("latencyPercentiles", {})
-print(ok, bad, round(d["summary"]["requestsPerSec"], 1), round((lp.get("p50") or 0) * 1000, 4), round((lp.get("p99") or 0) * 1000, 4))
+print(ok, bad, round(rps, 1), round((lp.get("p50") or 0) * 1000, 4), round((lp.get("p99") or 0) * 1000, 4))
 PY
+}
+
+# finish_summary FILE CMD...: run CMD into FILE.tmp. On success move it to FILE
+# and write $OUT/DONE. On failure keep the output as FILE.failed, write the exit
+# status to $OUT/FAILED and return 1: a partial table is never FILE, and
+# run.sh watch keys off DONE and FAILED, not off a non-empty FILE.
+finish_summary() {
+    local f=$1 rc=0
+    shift
+    "$@" > "$f.tmp" || rc=$?
+    if [ "$rc" = 0 ]; then
+        mv "$f.tmp" "$f"; cat "$f"; : > "$OUT/DONE"; rm -f "$OUT/FAILED"
+        return 0
+    fi
+    mv "$f.tmp" "$f.failed"; cat "$f.failed"
+    echo "${1##*/} ${2##*/} exited $rc; the output is ${f##*/}.failed" | tee "$OUT/FAILED" >&2
+    rm -f "$OUT/DONE"
+    return 1
 }

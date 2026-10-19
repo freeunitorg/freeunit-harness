@@ -155,6 +155,63 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(verdict, "noise")
 
 
+class NoLoadTest(Base):
+    """A run whose load failed is a failure, never a zero-throughput sample."""
+
+    HEAD = "variant\tworkload\tn\tlayout\trun\tok\tbad\trps\tp50_ms\tp99_ms\tsrv_cpu_pct\tload_cpu_pct\tts\n"
+
+    def tsv(self, a_rps, b_rps):
+        p = os.path.join(self.tmp, "sweep.tsv")
+        with open(p, "w") as f:
+            f.write(self.HEAD)
+            for v, rps in (("a", a_rps), ("b", b_rps)):
+                for i, x in enumerate(rps):
+                    ok = int(x * 30) if x not in ("NA", 0) else x
+                    f.write(f"{v}\tcapp\t1\tclean\t{i + 1}\t{ok}\t0\t{x}\t1\t2\t50\t50\t{1000 + i}\n")
+        return p
+
+    def analyze(self, path, pairs):
+        return subprocess.run([sys.executable, os.path.join(KIT, "analyze.py"), path, pairs],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_read_oha_fails_on_a_missing_result(self):
+        r = self.lib('read_oha "$TMPD/none.json"', TMPD=self.tmp)
+        self.assertNotEqual(r.returncode, 0, "read_oha gave %r for a missing file" % r.stdout)
+        self.assertEqual(r.stdout, "")
+
+    def test_zero_side_gets_no_verdict(self):
+        a = module("analyze")
+        rows = lambda v, rps: [{"variant": v, "run": str(i + 1), "rps": str(x)} for i, x in enumerate(rps)]
+        verdict = a.ratio(rows("a", [100] * 5), rows("b", [0] * 5))[4]
+        self.assertEqual(verdict, "NO LOAD")
+        r = self.analyze(self.tsv([100] * 5, [0, 0, 0, 0, "NA"]), "b:a")
+        self.assertNotIn("slower", r.stdout)
+        self.assertIn("NO LOAD", r.stdout)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_all_zero_exits_with_a_message(self):
+        r = self.analyze(self.tsv([0] * 5, [0] * 5), "a:b")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("no load", r.stderr)
+
+    def test_failed_analysis_leaves_no_summary(self):
+        out = os.path.join(self.tmp, "out")
+        os.mkdir(out)
+        r = self.lib('finish_summary "$OUT/summary.txt" python3 "$KIT/analyze.py" "$TSV" a:b',
+                     OUT=out, KIT=KIT, TSV=self.tsv([0] * 5, [0] * 5))
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(out, "summary.txt")), "a failed analysis left summary.txt")
+        self.assertFalse(os.path.exists(os.path.join(out, "DONE")))
+        self.assertTrue(os.path.exists(os.path.join(out, "FAILED")))
+        r = self.lib('finish_summary "$OUT/summary.txt" python3 "$KIT/analyze.py" "$TSV" b:a',
+                     OUT=out, KIT=KIT, TSV=self.tsv([100] * 5, [101] * 5))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(out, "DONE")))
+        self.assertFalse(os.path.exists(os.path.join(out, "FAILED")))
+
+
 class FreqTest(Base):
     def test_server_cpus_come_from_meta(self):
         d = self.tmp
@@ -213,6 +270,18 @@ class LocksTest(Base):
         self.assertEqual(L.summary(tsv), ["workload n variant run role calls/req contended/req",
                                           "capp 1 v 1 app 0.3000 0.00000",
                                           "capp 1 v 1 router 3.0000 0.03000"])
+
+    def test_summary_of_a_run_without_load(self):
+        tsv = os.path.join(self.tmp, "locks.tsv")
+        with open(tsv, "w") as f:
+            f.write("variant\tworkload\tn\trun\tok\trole\tpid\tcalls\tcontended\twait_ns\n")
+            f.write("v\tcapp\t1\t1\tNA\trouter\t10\t300\t3\t3000\n")
+            f.write("v\tcapp\t1\t2\t0\trouter\t12\t300\t3\t3000\n")
+        r = subprocess.run([sys.executable, os.path.join(KIT, "locks.py"), "summary", tsv],
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.stdout.split("\n")[1:3], ["capp 1 v 1 router NO LOAD", "capp 1 v 2 router NO LOAD"])
 
 
 class RunStageTest(Base):
@@ -324,6 +393,17 @@ class RunStageTest(Base):
         r = self.run_sh("claim", "5")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.run_sh("release")
+
+    def test_watch_does_not_accept_a_failed_run(self):
+        out = os.path.join(self.tmp, "rw", "scaling", "results", "t1")
+        os.makedirs(out)
+        with open(os.path.join(out, "summary.txt"), "w") as f:
+            f.write("## medians per cell\n| capp | 1 |\n")   # the partial table of a failed analyzer
+        with open(os.path.join(out, "FAILED"), "w") as f:
+            f.write("analyze.py exited 1\n")
+        r = self.run_sh("watch", "t1")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("done:", r.stdout)
 
     def unit_repo(self):
         repo = os.path.join(self.tmp, "unit-src")

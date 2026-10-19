@@ -8,7 +8,8 @@
 #   run.sh sweep TAG             start sweep.sh detached; results in REMOTE_WORKDIR/scaling/results/TAG
 #   run.sh locks TAG             the same sweep with LOCKS=1: mutex calls per request, no throughput
 #   run.sh profile TAG           profile.sh: perf record, futex count, perf c2c at one point (N, V)
-#   run.sh watch TAG [FILE]      wait for FILE (summary.txt; locks-summary.txt after locks); STOP and exit 3 on a foreign claim
+#   run.sh watch TAG [FILE]      wait for DONE and FILE (summary.txt; locks-summary.txt after locks);
+#                                exit 5 on FAILED; STOP and exit 3 on a foreign claim
 #   run.sh stop TAG              touch the STOP file: the sweep ends before its next run
 #   run.sh fetch TAG             copy the results to LAB_RESULTS/scaling/TAG (default run/perf-lab)
 #   run.sh release               remove the claim and its holder process
@@ -244,8 +245,9 @@ stage_stop() {
 }
 
 # Poll every 60 s. FILE is summary.txt for a sweep or a profile, and
-# locks-summary.txt for a locks run. Exit 0 when FILE is there, 3 after touching STOP because a
-# foreign claim showed up, 4 when the run is gone without FILE.
+# locks-summary.txt for a locks run. Exit 0 when the run wrote DONE and FILE, 3 after touching
+# STOP because a foreign claim showed up, 4 when the run is gone without FILE, 5 when the run
+# wrote FAILED (the analysis failed, for example a run without load).
 stage_watch() {
     tag=${1:?usage: run.sh watch TAG [FILE]}; file=${2:-summary.txt}
     check_name tag "$tag"; check_name file "$file"
@@ -253,13 +255,17 @@ stage_watch() {
     while :; do
         st=$(rsh "CLAIM_DIR=$(q "$CLAIM_DIR") LEGACY_CLAIM_MAX_H=$(q "${LEGACY_CLAIM_MAX_H:-72}") sh -s" <<EOF
 $OTHER_CLAIMS
-if [ -s $(q "$out/$file") ]; then echo DONE; exit 0; fi
+if [ -f $(q "$out/FAILED") ]; then echo "FAILED \$(cat $(q "$out/FAILED"))"; exit 0; fi
+if [ -f $(q "$out/DONE") ] && [ -s $(q "$out/$file") ]; then echo DONE; exit 0; fi
 if [ -f $(q "$out/pid") ]; then kill -0 "\$(cat $(q "$out/pid"))" 2>/dev/null && echo RUNNING || echo GONE
 else docker ps -q --filter name=$(q "^scaling-$tag\$") | grep -q . && echo RUNNING || echo GONE; fi
 echo "claims:\$(other_claims $(q "$(claim_file)"))"
 EOF
         ) || { echo "watch: ssh failed, retrying"; sleep 60; continue; }
-        case $st in DONE*) echo "done: $out/$file"; return 0 ;; esac
+        case $st in
+            DONE*) echo "done: $out/$file"; return 0 ;;
+            FAILED*) echo "failed: ${st#FAILED }; see $out/run.log"; return 5 ;;
+        esac
         foreign=$(printf '%s\n' "$st" | sed -n 's/^claims://p')
         if [ -n "$foreign" ]; then
             rsh "touch $(q "$out/STOP")"
