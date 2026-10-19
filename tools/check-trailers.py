@@ -16,6 +16,9 @@ Rules (AGENTS.md, "Attribution: the trailer pair"):
 - In a commit, Claude models carry " <noreply@anthropic.com>" or end with "(claude <version>)",
   for example "Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)"; other models carry no address.
 - In a comment (-c), no model carries an address: no "@" and no "<...>" in the value.
+- Harness is "DeepSeek Harness <version>" for dsh, where <version> is `dsh --version`;
+  the unit review appends "/<harness short sha>/<checkout short sha>".
+- Tools is a non-empty comma-separated list from the AGENTS.md inventory.
 - Trailers sit in the last paragraph, one per line, with no blank line between them
   and no text after them.
 - Claude-Session trailers are not allowed.
@@ -32,6 +35,13 @@ ADDR = "<noreply@anthropic.com>"
 # "(claude 2.1.302)": the Claude Code version that ran the model; stands in for the address.
 CLAUDE_VER = re.compile(r"\(claude \d+\.\d+\.\d+\)$")
 KEYS = ("co-authored-by", "reviewed-by")
+# The trailer block also carries Harness and Tools.
+BLOCK_KEYS = KEYS + ("harness", "tools")
+# "DeepSeek Harness 0.2.0-rc.2" and the unit review's
+# "DeepSeek Harness 0.2.0-rc.2/<harness sha>/<checkout sha>".
+HARNESS_DSH = re.compile(
+    r"^DeepSeek Harness \d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?:/\S+)*$"
+)
 
 
 def load(path=LIST):
@@ -53,10 +63,22 @@ def load(path=LIST):
     return canon, alias
 
 
+def last_paragraph_start(lines):
+    """The 1-based line number where the last paragraph begins."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = end
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    return start + 1
+
+
 def check(text, canon, alias, comment=False):
     """Return a list of problems in a commit message or comment body."""
     problems = []
     lines = text.rstrip().split("\n")
+    last_start = last_paragraph_start(lines)
     found = []
     for i, line in enumerate(lines, 1):
         m = re.match(r"^([A-Za-z-]+):\s*(.*)$", line)
@@ -66,9 +88,27 @@ def check(text, canon, alias, comment=False):
         if key.lower() == "claude-session":
             problems.append("line %d: Claude-Session trailers are not allowed" % i)
             continue
-        if key.lower() not in KEYS:
+        if key.lower() not in BLOCK_KEYS:
+            continue
+        # "tools:" and "harness:" also open ordinary prose lines (a commit
+        # subject, for one).  Only a key in the last paragraph is a trailer.
+        if key.lower() in ("harness", "tools") and i < last_start:
             continue
         found.append(i)
+        if key.lower() in ("harness", "tools"):
+            want = "Harness" if key.lower() == "harness" else "Tools"
+            if key != want:
+                problems.append("line %d: spell the key %s" % (i, want))
+            if not value:
+                problems.append("line %d: %s value is empty" % (i, want))
+            elif (key.lower() == "harness"
+                  and value.startswith("DeepSeek Harness")
+                  and not HARNESS_DSH.match(value)):
+                problems.append(
+                    "line %d: a DeepSeek Harness value needs the dsh version, "
+                    "for example 'DeepSeek Harness 0.2.0-rc.2'" % i
+                )
+            continue
         # Before the harness suffix is dropped, so "(<noreply@anthropic.com>)" is caught too.
         if comment and ("@" in value or re.search(r"<[^>]*>", value)):
             problems.append("line %d: a comment takes no address" % i)
