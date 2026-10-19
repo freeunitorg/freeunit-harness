@@ -225,6 +225,10 @@ class RunStageTest(Base):
         with open(os.path.join(stubs, "ssh"), "w") as f:
             f.write('#!/bin/sh\nwhile [ "$1" = -o ]; do shift 2; done\nshift\nexec sh -c "$*"\n')
         os.chmod(os.path.join(stubs, "ssh"), 0o755)
+        # The stub ssh runs the remote command here: no test may reach a real docker.
+        with open(os.path.join(stubs, "docker"), "w") as f:
+            f.write('#!/bin/sh\necho "docker stub: $*" >&2\nexit 1\n')
+        os.chmod(os.path.join(stubs, "docker"), 0o755)
         self.claims = os.path.join(self.tmp, "claims")
         os.mkdir(self.claims)
         lab = os.path.join(self.tmp, "lab.env")
@@ -278,6 +282,41 @@ class RunStageTest(Base):
         r = self.run_sh("claim", "5")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.run_sh("release")
+
+    def unit_repo(self):
+        repo = os.path.join(self.tmp, "unit-src")
+        os.mkdir(repo)
+        with open(os.path.join(repo, "README"), "w") as f:
+            f.write("stub\n")
+        g = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(g + ["add", "README"], check=True)
+        subprocess.run(g + ["commit", "-q", "-m", "stub"], check=True)
+        return repo
+
+    def test_build_refuses_a_tree_name_outside_trees(self):
+        # "../trees" made the tree path $RD/trees/../trees, and build ran rm -rf on it.
+        trees = os.path.join(self.tmp, "rw", "scaling", "trees")
+        os.makedirs(trees)
+        marker = os.path.join(trees, "keep")
+        open(marker, "w").close()
+        self.env["UNIT_REPO"] = self.unit_repo()
+        for name in ("../trees", "..", ".", "a/b"):
+            r = self.run_sh("build", name + "=HEAD")
+            self.assertNotEqual(r.returncode, 0, name + ": " + r.stdout + r.stderr)
+            self.assertIn("letters, digits", r.stderr, name)
+            self.assertTrue(os.path.exists(marker), "build %s=HEAD removed %s" % (name, marker))
+
+    def test_tag_stages_refuse_a_path(self):
+        rw = os.path.join(self.tmp, "rw", "scaling")
+        for d in ("trees", "results"):
+            os.makedirs(os.path.join(rw, d))
+        for stage in ("stop", "watch", "fetch"):
+            r = self.run_sh(stage, "../trees")
+            self.assertNotEqual(r.returncode, 0, stage)
+            self.assertIn("letters, digits", r.stderr, stage + ": " + r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(rw, "trees", "STOP")), "stop wrote trees/STOP")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "results", "trees")), "fetch made results/trees")
 
     def test_usage(self):
         r = self.run_sh()

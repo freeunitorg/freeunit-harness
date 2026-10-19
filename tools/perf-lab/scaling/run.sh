@@ -72,6 +72,14 @@ OTHER_CLAIMS='other_claims() {
     done
 }'
 
+# A tree name or a tag is one path component of a remote path that build and
+# start remove with rm -rf: "../trees" would name the trees directory itself.
+check_name() {  # what value
+    case $2 in
+        ''|.|..|*[!A-Za-z0-9._-]*) die "$1 '$2': use letters, digits, '.', '_' and '-'; not '.' or '..'" ;;
+    esac
+}
+
 claim_file() { sed -n 's/^claim=//p' "$CLAIM_REC" 2>/dev/null; }
 
 stage_claim() {
@@ -116,10 +124,14 @@ push_scripts() {
 stage_build() {
     [ $# -gt 0 ] || die "usage: run.sh build NAME=REF ..."
     repo=${UNIT_REPO:-${UNIT_SRC:-$HARNESS/src}}
+    for nr in "$@"; do   # every name before the first remote command
+        v=${nr%%=*}; ref=${nr#*=}
+        if [ "$v" = "$nr" ] || [ -z "$v" ] || [ -z "$ref" ]; then die "not NAME=REF: $nr"; fi
+        check_name "tree name" "$v"
+    done
     push_scripts
     for nr in "$@"; do
         v=${nr%%=*}; ref=${nr#*=}
-        if [ "$v" = "$nr" ] || [ -z "$v" ] || [ -z "$ref" ]; then die "not NAME=REF: $nr"; fi
         sha=$(git -C "$repo" rev-parse --verify "$ref^{commit}") || die "no commit $ref in $repo"
         t=$RD/trees/$v
         if [ "$(rsh "cat $(q "$t/.sha") 2>/dev/null || true")" = "$sha" ] && rsh "test -x $(q "$t/build/lab_capp")"; then
@@ -157,7 +169,7 @@ stage_shim() {
 # signal it. The output goes to results/TAG/run.log.
 start() {
     tag=$1 script=$2; shift 2
-    case $tag in ''|*[!A-Za-z0-9._-]*) die "a tag is letters, digits, '.', '_' and '-'" ;; esac
+    check_name tag "$tag"
     push_scripts
     out=$RD/results/$tag
     envs=""
@@ -203,7 +215,8 @@ stage_profile() {
 }
 
 stage_stop() {
-    rsh "touch $(q "$RD/results/${1:?usage: run.sh stop TAG}/STOP")"
+    check_name tag "${1:?usage: run.sh stop TAG}"
+    rsh "touch $(q "$RD/results/$1/STOP")"
     echo "STOP written; the run ends before its next cell"
 }
 
@@ -212,6 +225,7 @@ stage_stop() {
 # foreign claim showed up, 4 when the run is gone without FILE.
 stage_watch() {
     tag=${1:?usage: run.sh watch TAG [FILE]}; file=${2:-summary.txt}
+    check_name tag "$tag"; check_name file "$file"
     out=$RD/results/$tag
     while :; do
         st=$(rsh "CLAIM_DIR=$(q "$CLAIM_DIR") LEGACY_CLAIM_MAX_H=$(q "${LEGACY_CLAIM_MAX_H:-72}") sh -s" <<EOF
@@ -235,6 +249,7 @@ EOF
 
 stage_fetch() {
     tag=${1:?usage: run.sh fetch TAG}
+    check_name tag "$tag"
     mkdir -p "$LOCAL/$tag"
     rsync -a "$TARGET:$RD/results/$tag/" "$LOCAL/$tag/"
     echo "fetched to $LOCAL/$tag"
