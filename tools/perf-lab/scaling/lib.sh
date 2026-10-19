@@ -379,7 +379,8 @@ perf_preflight() {
     if [ "$PERF_LEVEL" = full ] || { [ -n "$PARANOID" ] && [ "$PARANOID" -le 0 ]; }; then
         _pf ok cpus "perf -a -C on the server cpus"
     else
-        _pf unavailable cpus "system-wide mode needs perf_event_paranoid <= 0 or CAP_PERFMON in the initial user namespace"
+        _pf unavailable cpus "system-wide mode needs perf_event_paranoid <= 0 or CAP_PERFMON in the initial" \
+            "user namespace"
     fi
 
     # C and D. perf c2c

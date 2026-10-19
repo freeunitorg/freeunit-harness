@@ -239,7 +239,8 @@ class ProfilePreflightTest(FakeBox):
         os.chmod(os.path.join(stubs, "perf"), 0o755)
         out = os.path.join(self.tmp, "out")
         env = dict(self.env, **box)
-        env.update(OUT=out, OHA="true", TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
+        env.update(OUT=out, OHA="true", R=os.path.join(self.tmp, "r"), WWW=os.path.join(self.tmp, "www"),
+                   TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
                    PATH=stubs + os.pathsep + os.environ["PATH"], **extra)
         r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
                            timeout=60, stdin=subprocess.DEVNULL)
@@ -298,7 +299,8 @@ class PerProcessTest(FakeBox):
             f.write('#!/bin/sh\necho "1.00,msec,task-clock" >&2\n')
         os.chmod(os.path.join(stubs, "perf"), 0o755)
         env = dict(self.env, **self.box(1, scope=0))
-        env.update(OHA="true", TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
+        env.update(OHA="true", R=os.path.join(self.tmp, "r"), WWW=os.path.join(self.tmp, "www"),
+                   TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
                    PATH=stubs + os.pathsep + os.environ["PATH"], PREFLIGHT_ONLY="1", STRACE="sh")
         for scope, rc in (("", 0), ("cpus", 1)):
             env["OUT"] = os.path.join(self.tmp, "out-" + (scope or "default"))

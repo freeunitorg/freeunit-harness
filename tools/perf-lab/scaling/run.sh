@@ -18,9 +18,10 @@
 # ("capp static"), NS ("1 2 3", router threads), RUNS (5), DUR (30 s), WARM (3 s),
 # CONNS (128), APP_PROCS (4), PAIRS ("b:a,..." for the ratios in summary.txt).
 # Lock knobs: LRUNS (2 runs per variant), LDUR (10 s measured window).
-# Profile knobs: N (3 router threads, or the core count when it is smaller), V (master), WORKLOADS, PERF_SEC (20), C2C_G (0),
-# PROFILE ("record futex c2c"), PERF_EVENT (cycles), PREFLIGHT_ONLY (1: only say what perf can measure),
-# PERF_SCOPE (pids: perf -p on the kit's processes; cpus: the old system-wide -a -C, opt-in).
+# Profile knobs: N (3 router threads, or the core count when it is smaller), V (master),
+# WORKLOADS, PERF_SEC (20), C2C_G (0), PROFILE ("record futex c2c"), PERF_EVENT (cycles),
+# PREFLIGHT_ONLY (1: only say what perf can measure), PERF_SCOPE (pids: perf -p on the
+# kit's processes; cpus: the old system-wide -a -C, opt-in).
 #
 # The box, its paths, the image and oha come from run/lab.env (tools/lib/env.sh):
 # PERF_HOST, SSH_USER, REMOTE_WORKDIR, CLAIM_DIR, LAB_IMAGE, OHA, UNIT_REPO.

@@ -73,7 +73,8 @@ cat "$OUT/preflight.txt"
 u=""; [ "$PERF_USER_ONLY" = 1 ] && u=:u
 if ! perf stat -x, -e "task-clock$u,$PERF_EVENT$u" -- true > "$OUT/probe.txt" 2>&1 \
     || grep -q -e '<not supported>' -e '<not counted>' "$OUT/probe.txt"; then
-    echo "probe: perf stat -e task-clock$u,$PERF_EVENT$u failed; see probe.txt" | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
+    echo "probe: perf stat -e task-clock$u,$PERF_EVENT$u failed; see probe.txt" \
+        | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
     own_out; die "perf does not count here; see probe.txt"
 fi
 if [ "$PREFLIGHT_ONLY" = 1 ]; then
@@ -97,8 +98,8 @@ for w in $WORKLOADS; do
     perf_args "$PERF_SCOPE" "$pids" "$srv"
 
     # A. samples of the kit's processes, or of the server cpus
-    has record && try "perf record $w" perf record -e "$PERF_EVENT" "${PERF_T[@]}" ${PERF_U[@]+"${PERF_U[@]}"} -g -F 499 \
-        -o "$OUT/perf-$w.data" -- sleep "$PERF_SEC" 2> "$OUT/perf-$w.err" >/dev/null
+    has record && try "perf record $w" perf record -e "$PERF_EVENT" "${PERF_T[@]}" ${PERF_U[@]+"${PERF_U[@]}"} \
+        -g -F 499 -o "$OUT/perf-$w.data" -- sleep "$PERF_SEC" 2> "$OUT/perf-$w.err" >/dev/null
 
     # B. futex calls: the kernel side of a contended pthread mutex
     if has futex && [ "$FUTEX_FORM" = tracepoint ]; then
