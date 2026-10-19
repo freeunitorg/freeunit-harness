@@ -7,7 +7,8 @@
 #   run.sh shim                  build mutexshim.so, the lock counter (in LAB_IMAGE, or natively)
 #   run.sh sweep TAG             start sweep.sh detached; results in REMOTE_WORKDIR/scaling/results/TAG
 #   run.sh locks TAG             the same sweep with LOCKS=1: mutex calls per request, no throughput
-#   run.sh watch TAG [FILE]      wait for FILE (summary.txt; locks-summary.txt for locks); STOP and exit 3 on a foreign claim
+#   run.sh profile TAG           profile.sh: perf record, futex count, perf c2c at one point (N, V)
+#   run.sh watch TAG [FILE]      wait for FILE (summary.txt; locks-summary.txt after locks); STOP and exit 3 on a foreign claim
 #   run.sh stop TAG              touch the STOP file: the sweep ends before its next run
 #   run.sh fetch TAG             copy the results to LAB_RESULTS/scaling/TAG (default run/perf-lab)
 #   run.sh release               remove the claim and its holder process
@@ -16,6 +17,7 @@
 # ("capp static"), NS ("1 2 3", router threads), RUNS (5), DUR (30 s), WARM (3 s),
 # CONNS (128), APP_PROCS (4), PAIRS ("b:a,..." for the ratios in summary.txt).
 # Lock knobs: LRUNS (2 runs per variant), LDUR (10 s measured window).
+# Profile knobs: N (3 router threads), V (master), WORKLOADS, PERF_SEC (20), C2C_G (0).
 #
 # The box, its paths, the image and oha come from run/lab.env (tools/lib/env.sh):
 # PERF_HOST, SSH_USER, REMOTE_WORKDIR, CLAIM_DIR, LAB_IMAGE, OHA, UNIT_REPO.
@@ -26,7 +28,7 @@
 # Method, traps and the reading of the results: docs/perf/scaling-kit.md.
 set -eu
 case ${1:-} in
-    claim|release|build|shim|sweep|locks|stop|watch|fetch) ;;
+    claim|release|build|shim|sweep|locks|profile|stop|watch|fetch) ;;
     *) awk 'NR > 1 { if ($0 == "set -eu") exit; print }' "$0"; exit 2 ;;
 esac
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -108,7 +110,7 @@ stage_release() {
 push_scripts() {
     rsh "mkdir -p $(q "$RD/scripts") $(q "$RD/trees") $(q "$RD/results")"
     rsync -a "$HERE/lib.sh" "$HERE/sweep.sh" "$HERE/build-tree.sh" "$HERE/capp.c" "$HERE/analyze.py" \
-        "$HERE/mutexshim.c" "$HERE/locks.py" "$TARGET:$RD/scripts/"
+        "$HERE/mutexshim.c" "$HERE/locks.py" "$HERE/profile.sh" "$TARGET:$RD/scripts/"
 }
 
 stage_build() {
@@ -193,13 +195,20 @@ stage_locks() {
         "APP_PROCS=${APP_PROCS:-4}"
 }
 
+stage_profile() {
+    start "${1:?usage: run.sh profile TAG}" profile.sh \
+        "N=${N:-3}" "V=${V:-master}" "WORKLOADS=${WORKLOADS:-capp static}" "PERF_SEC=${PERF_SEC:-20}" \
+        "C2C_G=${C2C_G:-0}" "LOAD_SEC=${LOAD_SEC:-}" "WARM=${WARM:-3}" "CONNS=${CONNS:-128}" \
+        "APP_PROCS=${APP_PROCS:-4}"
+}
+
 stage_stop() {
     rsh "touch $(q "$RD/results/${1:?usage: run.sh stop TAG}/STOP")"
     echo "STOP written; the run ends before its next cell"
 }
 
-# Poll every 60 s. FILE is summary.txt for a sweep, locks-summary.txt for a
-# locks run. Exit 0 when FILE is there, 3 after touching STOP because a
+# Poll every 60 s. FILE is summary.txt for a sweep or a profile, and
+# locks-summary.txt for a locks run. Exit 0 when FILE is there, 3 after touching STOP because a
 # foreign claim showed up, 4 when the run is gone without FILE.
 stage_watch() {
     tag=${1:?usage: run.sh watch TAG [FILE]}; file=${2:-summary.txt}
@@ -240,6 +249,7 @@ case $stage in
     shim) stage_shim ;;
     sweep) stage_sweep "$@" ;;
     locks) stage_locks "$@" ;;
+    profile) stage_profile "$@" ;;
     stop) stage_stop "$@" ;;
     watch) stage_watch "$@" ;;
     fetch) stage_fetch "$@" ;;
