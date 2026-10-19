@@ -106,7 +106,8 @@ class ParamsTest(Base):
 
     def test_profile_line_has_the_profile_knobs(self):
         t = self.line("profile")
-        for k in ("N=2", "V=b", "PERF_SEC=20", "C2C_G=0", "LOAD_SEC=75", "CONNS=", "APP_PROCS="):
+        for k in ("N=2", "V=b", "PERF_SEC=20", "C2C_G=0", "LOAD_SEC=75", "CONNS=", "APP_PROCS=", "PROFILE=",
+                  "PERF_EVENT="):
             self.assertIn(k, t)
 
 
@@ -124,6 +125,142 @@ class CoreCountTest(Base):
                      SYSCPU=self.topology(["0,4", "1,5", "2,6", "3,7"] * 2))
         self.assertEqual(r.stdout.split("\n")[:-1], ["3", "1 2 3"])
         self.assertEqual(r.stderr, "")
+
+
+class FakeBox(Base):
+    """A fake /proc/sys, /proc/self, event_source and tracefs tree for perf_preflight."""
+
+    INIT = "0 0 4294967295"
+    ROOTLESS = "0 1000 1"
+    PERFMON = 1 << 38
+    SYS_ADMIN = 1 << 21
+
+    def box(self, paranoid, pmu=("cpu", "cpu/events/mem-loads"), kptr=1, scope=1, cap=0, uid_map=INIT,
+            tracefs=False):
+        root = os.path.join(self.tmp, "box%d" % len(os.listdir(self.tmp)))
+        files = {"sys/kernel/perf_event_paranoid": str(paranoid), "sys/kernel/kptr_restrict": str(kptr),
+                 "sys/kernel/yama/ptrace_scope": str(scope),
+                 "self/status": "Name:\tbash\nCapEff:\t%016x\n" % cap, "self/uid_map": uid_map,
+                 "ev/software/type": "1", "ev/tracepoint/type": "2"}
+        for d in pmu:
+            files["ev/" + d + "/type"] = "4"
+        if tracefs:
+            files["tracing/events/syscalls/sys_enter_futex/id"] = "300"
+        for rel, text in files.items():
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text + "\n")
+        return dict(PROCSYS=root + "/sys", PROCSELF=root + "/self", EVSRC=root + "/ev",
+                    TRACEFS=root + "/tracing", STRACE="/nonexistent/strace")
+
+
+
+class PreflightTest(FakeBox):
+    """perf_preflight on a fake tree."""
+
+    def run_pf(self, env, metrics, **extra):
+        r = self.lib('perf_preflight %s; echo "rc=$? level=$PERF_LEVEL user=$PERF_USER_ONLY c2c=$C2C_FORM '
+                     'futex=$FUTEX_FORM"' % metrics, **dict(env, **extra))
+        self.assertEqual(r.stderr, "")
+        return r.stdout
+
+    def test_paranoid_1_per_process_works(self):
+        out = self.run_pf(self.box(1), "record c2c")
+        self.assertIn("rc=0 level=task user=0 c2c=full", out)
+        self.assertIn("record: ok (cycles)", out)
+        self.assertIn("kernel-samples: ok", out)
+        self.assertIn("kernel-symbols: unavailable (kptr_restrict=1", out)
+        self.assertIn("futex: unavailable", out)
+        out = self.run_pf(self.box(1), "record cpus")
+        self.assertIn("rc=1", out)
+        self.assertIn("perf_event_paranoid <= 0", out)
+
+    def test_paranoid_2_is_user_space_only(self):
+        out = self.run_pf(self.box(2), "record c2c")
+        self.assertIn("rc=0 level=user user=1 c2c=user", out)
+        self.assertIn("record: ok (cycles, user space only)", out)
+        self.assertIn("kernel-samples: unavailable", out)
+        out = self.run_pf(self.box(2, pmu=("cpu", "ibs_op")), "record c2c")
+        self.assertIn("c2c=amd-user", out)
+
+    def test_paranoid_3_is_software_only(self):
+        out = self.run_pf(self.box(3), "record")
+        self.assertIn("rc=1", out)
+        self.assertIn("software events only", out)
+        out = self.run_pf(self.box(3), "record", PERF_EVENT="cpu-clock")
+        self.assertIn("rc=0 level=software user=1", out)
+
+    def test_paranoid_4_needs_a_capability(self):
+        out = self.run_pf(self.box(4), "record")
+        self.assertIn("rc=1 level=none", out)
+        self.assertIn("CAP_PERFMON or CAP_SYS_ADMIN", out)
+        self.assertIn("unverified", out)
+        out = self.run_pf(self.box(4), "record", PERF_EVENT="cpu-clock")
+        self.assertIn("rc=1", out, "software events need a capability at level 4 too")
+        # a rootless container: the capability is in a user namespace, and perf ignores it
+        out = self.run_pf(self.box(4, cap=self.PERFMON, uid_map=self.ROOTLESS), "record")
+        self.assertIn("rc=1 level=none", out)
+        # rootful with CAP_PERFMON: allowed, with the unverified note
+        out = self.run_pf(self.box(4, cap=self.PERFMON), "record c2c cpus")
+        self.assertIn("rc=0 level=full user=0", out)
+        self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Unverified", out)
+        out = self.run_pf(self.box(4, cap=self.SYS_ADMIN), "record")
+        self.assertIn("rc=0 level=full", out)
+        self.assertNotIn("note:", out)
+
+    def test_no_pmu(self):
+        out = self.run_pf(self.box(1, pmu=()), "record c2c")
+        self.assertIn("rc=1", out)
+        self.assertIn("record: unavailable (cycles: no hardware PMU", out)
+        self.assertIn("c2c: unavailable (no hardware PMU", out)
+        out = self.run_pf(self.box(1, pmu=()), "record", PERF_EVENT="cpu-clock")
+        self.assertIn("rc=0", out)
+
+    def test_futex_forms(self):
+        out = self.run_pf(self.box(-1, tracefs=True), "futex")
+        self.assertIn("rc=0", out)
+        self.assertIn("futex=tracepoint", out)
+        out = self.run_pf(self.box(1, scope=1, cap=1 << 19), "futex", STRACE="sh")
+        self.assertIn("futex=strace", out)
+        out = self.run_pf(self.box(1, scope=1), "futex", STRACE="sh")
+        self.assertIn("rc=1", out)
+
+
+class ProfilePreflightTest(FakeBox):
+    """profile.sh stops before unitd when the preflight fails, and writes no result."""
+
+    def profile(self, box, **extra):
+        stubs = os.path.join(self.tmp, "stubs")
+        os.makedirs(stubs, exist_ok=True)
+        calls = os.path.join(self.tmp, "perf.calls")
+        with open(os.path.join(stubs, "perf"), "w") as f:
+            f.write('#!/bin/sh\necho "$*" >> "%s"\necho "1.00,msec,task-clock" >&2\n' % calls)
+        os.chmod(os.path.join(stubs, "perf"), 0o755)
+        out = os.path.join(self.tmp, "out")
+        env = dict(self.env, **box)
+        env.update(OUT=out, OHA="true", TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
+                   PATH=stubs + os.pathsep + os.environ["PATH"], **extra)
+        r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
+                           timeout=60, stdin=subprocess.DEVNULL)
+        perf = open(calls).read() if os.path.exists(calls) else ""
+        return r, out, perf
+
+    def test_paranoid_4_stops_before_any_measurement(self):
+        r, out, perf = self.profile(self.box(4))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("preflight failed", r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(out, "FAILED")))
+        self.assertFalse(os.path.exists(os.path.join(out, "summary.txt")))
+        self.assertEqual(perf, "", "perf ran after a failed preflight")
+
+    def test_preflight_only(self):
+        r, out, perf = self.profile(self.box(0, scope=0), PREFLIGHT_ONLY="1", STRACE="sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(out, "DONE")))
+        with open(os.path.join(out, "summary.txt")) as f:
+            self.assertIn("preflight: ok", f.read())
+        self.assertIn("stat -x, -e task-clock,cycles -- true", perf)
 
 
 class ScopedKillTest(Base):

@@ -56,6 +56,13 @@ appears, and exits 3.
   writes no throughput. A site in `sites-*.txt` is the function that called `pthread_mutex_lock()`, or the caller
   of `nxt_thread_mutex_lock()` when the call went through that wrapper. libunit calls `pthread_mutex_lock()`
   directly, so an application site is the libunit function itself.
+- **Preflight.** profile.sh first reads `perf_event_paranoid`, `kptr_restrict`, `ptrace_scope`, the PMU devices in
+  `/sys/bus/event_source/devices` and its own capabilities, and writes `preflight.txt`: one line per step, `ok` or
+  `unavailable` with the sysctl or capability that is missing. When a requested step (`PROFILE`, default
+  `record futex c2c`) cannot work, it writes `FAILED` and exits 1 before unitd starts. Then
+  `perf stat -e task-clock,PERF_EVENT -- true` must count. `PREFLIGHT_ONLY=1 run.sh profile TAG` stops there.
+  Without a hardware PMU, `PROFILE="record futex" PERF_EVENT=cpu-clock` samples the clock; the kit never falls back
+  to it on its own.
 - **Own processes.** Every kill is limited to processes whose exe is under the kit's tree directory.
 
 ## Traps

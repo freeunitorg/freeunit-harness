@@ -251,7 +251,7 @@ params_line() {
     locks) echo "params LOCKS=1 VARIANTS='$VARIANTS' WORKLOADS='$WORKLOADS' NS='$NS' LRUNS=$LRUNS LDUR=$LDUR" \
                 "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS SHIM='${SHIM:-}'" ;;
     profile) echo "params N=$N V=$V WORKLOADS='$WORKLOADS' PERF_SEC=$PERF_SEC C2C_G=$C2C_G LOAD_SEC=$LOAD_SEC" \
-                  "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS" ;;
+                  "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS PROFILE='${PROFILE:-}' PERF_EVENT=${PERF_EVENT:-}" ;;
     *) die "params_line: unknown mode $1" ;;
     esac
 }
@@ -273,4 +273,155 @@ write_meta() {
         params_line "$mode"
         for v in "$@"; do echo "variant $v $(cat "$TREES/$v/.sha" 2>/dev/null)"; done
     } > "$OUT/meta.txt"
+}
+
+# --- perf preflight -----------------------------------------------------------------------
+# What perf can measure here: the sysctls, the PMU devices and the capabilities of
+# this process. Tests point these paths at a fake tree. docs/perf/scaling-kit.md,
+# "Perf privileges", says where each rule comes from and which ones are unverified.
+: "${PROCSYS:=/proc/sys}" "${PROCSELF:=/proc/self}" "${EVSRC:=/sys/bus/event_source/devices}"
+: "${TRACEFS:=/sys/kernel/tracing}" "${STRACE:=strace}"
+
+cap_bit() {  # bit -> 1 when CapEff of $PROCSELF/status has it, else 0
+    local hex
+    hex=$(awk '/^CapEff:/ { print $2 }' "$PROCSELF/status" 2>/dev/null)
+    [ -n "$hex" ] || { echo 0; return; }
+    echo $(( (16#$hex >> $1) & 1 ))
+}
+
+init_userns() {  # true in the initial user namespace: there a capability counts for perf
+    local a b c
+    read -r a b c < "$PROCSELF/uid_map" 2>/dev/null || return 1
+    [ "$a $b $c" = "0 0 4294967295" ]
+}
+
+# Sets PARANOID KPTR PTRACE_SCOPE HW_PMU MEM_PMU CAP_PERF CAP_SYSLOG CAP_PTRACE.
+perf_facts() {
+    local d
+    PARANOID=$(cat "$PROCSYS/kernel/perf_event_paranoid" 2>/dev/null)
+    KPTR=$(cat "$PROCSYS/kernel/kptr_restrict" 2>/dev/null) || KPTR=2
+    PTRACE_SCOPE=$(cat "$PROCSYS/kernel/yama/ptrace_scope" 2>/dev/null) || PTRACE_SCOPE=0   # no Yama
+    HW_PMU=0
+    for d in "$EVSRC"/cpu "$EVSRC"/cpu_core "$EVSRC"/cpu_atom "$EVSRC"/armv[78]_*; do
+        [ -e "$d" ] && HW_PMU=1
+    done
+    MEM_PMU=""
+    if [ -e "$EVSRC/ibs_op" ]; then MEM_PMU=amd
+    elif [ -e "$EVSRC/cpu/events/mem-loads" ] || [ -e "$EVSRC/cpu_core/events/mem-loads" ]; then MEM_PMU=intel
+    else for d in "$EVSRC"/arm_spe*; do [ -e "$d" ] && MEM_PMU=arm; done
+    fi
+    # perf checks CAP_PERFMON and CAP_SYS_ADMIN in the initial user namespace only.
+    # In a rootless container they are namespace capabilities, and perf ignores them.
+    CAP_PERF=none CAP_SYSLOG=0
+    if init_userns; then
+        [ "$(cap_bit 38)" = 1 ] && CAP_PERF=perfmon
+        [ "$(cap_bit 21)" = 1 ] && CAP_PERF=sys_admin
+        CAP_SYSLOG=$(cap_bit 34)
+    fi
+    CAP_PTRACE=$(cap_bit 19)   # Yama accepts it in the user namespace of the target
+}
+
+_pf() {  # ok|unavailable metric text: one report line; a requested metric that is unavailable fails
+    echo "$2: $1${3:+ ($3)}"
+    if [ "$1" = unavailable ] && [[ $PF_WANT == *" $2 "* ]]; then PF_BAD=$((PF_BAD + 1)); fi
+}
+
+# perf_preflight METRIC...: METRIC is record, futex, c2c, c2cg or cpus (system-wide
+# mode). Prints what works and what does not, with the sysctl or capability that
+# is missing. Returns 1 when a requested metric cannot work. Sets PERF_LEVEL
+# (full, task, user, software, none), PERF_USER_ONLY (0 or 1), C2C_FORM (full,
+# user, amd-user or empty) and FUTEX_FORM (tracepoint, strace or empty).
+# PERF_EVENT is the record event (cycles; cpu-clock is the clock, no PMU needed).
+perf_preflight() {
+    local why="" hwwhy="" c2cwhy="" ev=${PERF_EVENT:-cycles}
+    PF_WANT=" $* " PF_BAD=0 PERF_USER_ONLY=0 C2C_FORM="" FUTEX_FORM=""
+    perf_facts
+    echo "facts: perf_event_paranoid=${PARANOID:-missing} kptr_restrict=$KPTR ptrace_scope=$PTRACE_SCOPE" \
+         "hardware_pmu=$HW_PMU memory_sampling=${MEM_PMU:-none} perf_capability=$CAP_PERF" \
+         "syslog_capability=$CAP_SYSLOG ptrace_capability=$CAP_PTRACE"
+    if [ -z "$PARANOID" ]; then
+        PERF_LEVEL=none why="no $PROCSYS/kernel/perf_event_paranoid: this kernel has no perf events"
+    elif [ "$CAP_PERF" != none ]; then
+        PERF_LEVEL=full
+        if [ "$PARANOID" -ge 4 ] && [ "$CAP_PERF" = perfmon ]; then
+            echo "note: perf_event_paranoid=$PARANOID and CAP_PERFMON only. Unverified: the Ubuntu patch for" \
+                 "level 4 may need CAP_SYS_ADMIN. profile.sh probes perf before it measures."
+        fi
+    elif [ "$PARANOID" -le 1 ]; then PERF_LEVEL=task
+    elif [ "$PARANOID" -eq 2 ]; then PERF_LEVEL=user
+    elif [ "$PARANOID" -eq 3 ]; then
+        PERF_LEVEL=software
+        why="perf_event_paranoid=3 allows software events only (reported for Debian and Ubuntu kernels, unverified)"
+    else
+        PERF_LEVEL=none
+        why="perf_event_paranoid=$PARANOID: every perf call needs CAP_PERFMON or CAP_SYS_ADMIN in the initial user"
+        why="$why namespace (which one is unverified), or the box admin sets kernel.perf_event_paranoid=2"
+    fi
+    echo "level: $PERF_LEVEL"
+    case $PERF_LEVEL in user|software) PERF_USER_ONLY=1 ;; esac
+    case $PERF_LEVEL in full|task|user) ;; *) hwwhy=$why ;; esac
+    if [ "$HW_PMU" != 1 ] && [ -z "$hwwhy" ]; then
+        hwwhy="no hardware PMU: no cpu, cpu_core, cpu_atom or armv*_ device in $EVSRC; no sysctl or capability adds one"
+    fi
+
+    # A. perf record
+    case $ev in
+        cpu-clock|task-clock)
+            if [ "$PERF_LEVEL" = none ]; then _pf unavailable record "$why"
+            else _pf ok record "$ev$([ "$PERF_USER_ONLY" = 1 ] && echo ', user space only')"; fi ;;
+        *)
+            if [ -z "$hwwhy" ]; then _pf ok record "$ev$([ "$PERF_USER_ONLY" = 1 ] && echo ', user space only')"
+            else _pf unavailable record "$ev: $hwwhy. PERF_EVENT=cpu-clock samples the clock instead"; fi ;;
+    esac
+
+    # system-wide mode (PERF_SCOPE=cpus)
+    if [ "$PERF_LEVEL" = full ] || { [ -n "$PARANOID" ] && [ "$PARANOID" -le 0 ]; }; then
+        _pf ok cpus "perf -a -C on the server cpus"
+    else
+        _pf unavailable cpus "system-wide mode needs perf_event_paranoid <= 0 or CAP_PERFMON in the initial user namespace"
+    fi
+
+    # C and D. perf c2c
+    c2cwhy=$hwwhy
+    if [ -z "$c2cwhy" ] && [ -z "$MEM_PMU" ]; then
+        c2cwhy="no memory sampling PMU (Intel mem-loads, AMD ibs_op or arm_spe) in $EVSRC"
+    fi
+    if [ -z "$c2cwhy" ]; then
+        if [ "$PERF_USER_ONLY" = 0 ]; then C2C_FORM=full
+        elif [ "$MEM_PMU" = amd ]; then C2C_FORM=amd-user   # ibs_op/swfilt=1/u needs kernel 6.14 or later
+        else C2C_FORM=user; fi                               # perf c2c record --all-user, unverified
+        _pf ok c2c "$C2C_FORM, $MEM_PMU"; _pf ok c2cg "$C2C_FORM, $MEM_PMU"
+    else
+        _pf unavailable c2c "$c2cwhy"; _pf unavailable c2cg "$c2cwhy"
+    fi
+
+    # B. futex calls: the tracepoint, or strace -p on the router
+    if { [ "$PERF_LEVEL" = full ] || { [ -n "$PARANOID" ] && [ "$PARANOID" -le -1 ]; }; } \
+        && [ -r "$TRACEFS/events/syscalls/sys_enter_futex/id" ]; then
+        FUTEX_FORM=tracepoint
+    elif command -v "$STRACE" >/dev/null 2>&1 \
+        && { [ "$PTRACE_SCOPE" = 0 ] || { [ "$PTRACE_SCOPE" -le 2 ] && [ "$CAP_PTRACE" = 1 ]; }; }; then
+        FUTEX_FORM=strace
+    fi
+    if [ -n "$FUTEX_FORM" ]; then _pf ok futex "$FUTEX_FORM"
+    else
+        _pf unavailable futex "the tracepoint needs perf_event_paranoid=-1 or CAP_PERFMON and a readable $TRACEFS;" \
+            "strace -p needs $STRACE and ptrace_scope 0, or CAP_SYS_PTRACE at ptrace_scope 1 or 2"
+    fi
+
+    # not requested, only reported
+    if [ "$PERF_LEVEL" = full ] || [ "$PERF_LEVEL" = task ]; then echo "kernel-samples: ok"
+    else echo "kernel-samples: unavailable (perf_event_paranoid=${PARANOID:-missing}: user space only)"; fi
+    if { [ "$KPTR" = 0 ] && [ -n "$PARANOID" ] && [ "$PARANOID" -le 1 ]; } \
+        || { [ "$KPTR" -le 1 ] 2>/dev/null && [ "$CAP_SYSLOG" = 1 ]; }; then
+        echo "kernel-symbols: ok"
+    else
+        echo "kernel-symbols: unavailable (kptr_restrict=$KPTR: needs kptr_restrict=0 with perf_event_paranoid <= 1," \
+             "or CAP_SYSLOG in the initial user namespace at kptr_restrict 1)"
+    fi
+    if [ "$PF_BAD" != 0 ]; then
+        echo "preflight: $PF_BAD requested metric(s) cannot work here; nothing was measured"
+        return 1
+    fi
+    echo "preflight: ok"
 }
