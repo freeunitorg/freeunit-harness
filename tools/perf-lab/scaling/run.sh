@@ -111,10 +111,31 @@ EOF
 
 stage_release() {
     [ -s "$CLAIM_REC" ] || die "no claim record at $CLAIM_REC"
-    claim=$(claim_file); pid=$(sed -n 's/^pid=//p' "$CLAIM_REC")
-    rsh "kill $(q "$pid") 2>/dev/null; rm -f $(q "$claim")"
+    claim=$(claim_file)
+    case $claim in
+        "$CLAIM_DIR"/CLAIMED-perflab-scaling-*) ;;
+        *) die "$CLAIM_REC names '$claim', not a claim of this kit in $CLAIM_DIR" ;;
+    esac
+    # The pid and the start come from the claim file on the box, not from the
+    # local record. Kill the pid only while it is still the holder: the sleep
+    # whose start time is the "started" of the claim. After the claim expires,
+    # the pid can belong to any process of the box user.
+    held=$(rsh "sh -s" <<EOF
+f=$(q "$claim")
+pid=\$(sed -n 's/^pid=//p' "\$f" 2>/dev/null); started=\$(sed -n 's/^started=//p' "\$f" 2>/dev/null)
+case "\$pid\$started" in ''|*[!0-9]*) pid="" ;; esac
+if [ -n "\$pid" ] && [ "\$(cat /proc/\$pid/comm 2>/dev/null)" = sleep ]; then
+    st=\$(sed 's/.*) //' /proc/\$pid/stat | awk '{ print \$20 }')
+    t=\$(( \$(awk '/^btime/ { print \$2 }' /proc/stat) + st / \$(getconf CLK_TCK) ))
+    d=\$((t - started))
+    if [ "\$d" -ge -5 ] && [ "\$d" -le 5 ] && kill "\$pid" 2>/dev/null; then echo "holder \$pid stopped"; pid=""; fi
+fi
+[ -z "\$pid" ] || echo "pid \$pid is not the holder; not killed"
+rm -f "\$f"
+EOF
+    )
     rm -f "$CLAIM_REC"
-    echo "released: ${claim##*/}"
+    echo "released: ${claim##*/}${held:+ ($held)}"
 }
 
 push_scripts() {

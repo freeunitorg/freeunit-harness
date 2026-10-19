@@ -244,6 +244,11 @@ class RunStageTest(Base):
             with open(rec) as f:
                 pids = [line[4:].strip() for line in f if line.startswith("pid=")]
             for pid in pids:
+                try:
+                    if not self.alive(pid) or "sleep" not in open("/proc/%s/cmdline" % pid).read():
+                        continue
+                except OSError:
+                    continue
                 subprocess.run(["kill", pid], capture_output=True)
 
     def run_sh(self, *args):
@@ -266,9 +271,42 @@ class RunStageTest(Base):
         self.assertEqual(lock.returncode, 0, "the claim lock is still held after run.sh claim")
         r = self.run_sh("claim")
         self.assertNotEqual(r.returncode, 0, "a second claim passed")
+        holder = [x[4:] for x in text.split("\n") if x.startswith("pid=")][0]
         r = self.run_sh("release")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([f for f in os.listdir(self.claims) if f.startswith("CLAIMED-")], [])
+        for _ in range(20):
+            if not self.alive(holder):
+                break
+            time.sleep(0.1)
+        self.assertFalse(self.alive(holder), "release left the holder %s running" % holder)
+
+    @staticmethod
+    def alive(pid):
+        try:
+            with open("/proc/%s/stat" % pid) as f:
+                return f.read().rsplit(") ", 1)[1][0] != "Z"
+        except OSError:
+            return False
+
+    def test_release_kills_only_the_holder(self):
+        # The claim expired an hour ago and its pid now belongs to another process.
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        claim = os.path.join(self.claims, "CLAIMED-perflab-scaling-20261019T000000")
+        now = int(time.time())
+        with open(claim, "w") as f:
+            f.write("format=perflab-1\nwho=t\npurpose=scaling kit\nhost=t\npid=%d\nstarted=%d\nexpires=%d\n"
+                    % (other.pid, now - 3600, now - 3300))
+        rec = os.path.join(self.tmp, "results", "scaling")
+        os.makedirs(rec)
+        with open(os.path.join(rec, ".claim"), "w") as f:
+            f.write("claim=%s\npid=%d\n" % (claim, other.pid))
+        r = self.run_sh("release")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(claim), "release kept the claim file")
+        time.sleep(0.2)
+        self.assertIsNone(other.poll(), "release killed pid %d, which is not the holder" % other.pid)
 
     def test_claim_refuses_a_live_foreign_claim(self):
         open(os.path.join(self.claims, "CLAIMED-other-bench"), "w").close()   # fresh legacy claim
