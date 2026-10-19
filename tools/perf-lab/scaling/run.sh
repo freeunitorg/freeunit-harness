@@ -4,8 +4,10 @@
 #
 #   run.sh claim [minutes]       claim the box (perflab-1 claim file, default 240 minutes)
 #   run.sh build NAME=REF ...    export each REF of UNIT_REPO and build it as tree NAME
+#   run.sh shim                  build mutexshim.so, the lock counter (in LAB_IMAGE, or natively)
 #   run.sh sweep TAG             start sweep.sh detached; results in REMOTE_WORKDIR/scaling/results/TAG
-#   run.sh watch TAG [FILE]      wait for FILE (default summary.txt); exit 3 and STOP on a foreign claim
+#   run.sh locks TAG             the same sweep with LOCKS=1: mutex calls per request, no throughput
+#   run.sh watch TAG [FILE]      wait for FILE (summary.txt; locks-summary.txt for locks); STOP and exit 3 on a foreign claim
 #   run.sh stop TAG              touch the STOP file: the sweep ends before its next run
 #   run.sh fetch TAG             copy the results to LAB_RESULTS/scaling/TAG (default run/perf-lab)
 #   run.sh release               remove the claim and its holder process
@@ -13,6 +15,7 @@
 # Sweep knobs (environment): VARIANTS (tree names, default master), WORKLOADS
 # ("capp static"), NS ("1 2 3", router threads), RUNS (5), DUR (30 s), WARM (3 s),
 # CONNS (128), APP_PROCS (4), PAIRS ("b:a,..." for the ratios in summary.txt).
+# Lock knobs: LRUNS (2 runs per variant), LDUR (10 s measured window).
 #
 # The box, its paths, the image and oha come from run/lab.env (tools/lib/env.sh):
 # PERF_HOST, SSH_USER, REMOTE_WORKDIR, CLAIM_DIR, LAB_IMAGE, OHA, UNIT_REPO.
@@ -23,7 +26,7 @@
 # Method, traps and the reading of the results: docs/perf/scaling-kit.md.
 set -eu
 case ${1:-} in
-    claim|release|build|sweep|stop|watch|fetch) ;;
+    claim|release|build|shim|sweep|locks|stop|watch|fetch) ;;
     *) awk 'NR > 1 { if ($0 == "set -eu") exit; print }' "$0"; exit 2 ;;
 esac
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -105,7 +108,7 @@ stage_release() {
 push_scripts() {
     rsh "mkdir -p $(q "$RD/scripts") $(q "$RD/trees") $(q "$RD/results")"
     rsync -a "$HERE/lib.sh" "$HERE/sweep.sh" "$HERE/build-tree.sh" "$HERE/capp.c" "$HERE/analyze.py" \
-        "$TARGET:$RD/scripts/"
+        "$HERE/mutexshim.c" "$HERE/locks.py" "$TARGET:$RD/scripts/"
 }
 
 stage_build() {
@@ -134,6 +137,18 @@ stage_build() {
                 || die "build of $v failed; logs: $t/conf.log, $t/make.log"
         fi
     done
+}
+
+stage_shim() {
+    push_scripts
+    cc='cc -O2 -fno-omit-frame-pointer -shared -fPIC -o mutexshim.so mutexshim.c -ldl -lpthread'
+    if [ "${NATIVE:-0}" = 1 ]; then
+        rsh "cd $(q "$RD/scripts") && $cc" || die "shim build failed"
+    else
+        rsh "docker run --rm --user \$(id -u):\$(id -g) -v $(q "$RD/scripts"):/s -w /s $(q "$LAB_IMAGE") $cc" \
+            || die "shim build failed"
+    fi
+    echo "shim built: $RD/scripts/mutexshim.so"
 }
 
 # start TAG SCRIPT KEY=VALUE...: run SCRIPT detached, so an ssh drop cannot
@@ -169,12 +184,22 @@ stage_sweep() {
         "APP_PROCS=${APP_PROCS:-4}" "PAIRS=${PAIRS:-}"
 }
 
+stage_locks() {
+    shim=/lab/mutexshim.so
+    [ "${NATIVE:-0}" = 1 ] && shim=$RD/scripts/mutexshim.so
+    start "${1:?usage: run.sh locks TAG}" sweep.sh LOCKS=1 "SHIM=$shim" \
+        "VARIANTS=${VARIANTS:-master}" "WORKLOADS=${WORKLOADS:-capp}" "NS=${NS:-1 2 3}" \
+        "LRUNS=${LRUNS:-2}" "LDUR=${LDUR:-10}" "WARM=${WARM:-3}" "CONNS=${CONNS:-128}" \
+        "APP_PROCS=${APP_PROCS:-4}"
+}
+
 stage_stop() {
     rsh "touch $(q "$RD/results/${1:?usage: run.sh stop TAG}/STOP")"
     echo "STOP written; the run ends before its next cell"
 }
 
-# Poll every 60 s. Exit 0 when FILE is there, 3 after touching STOP because a
+# Poll every 60 s. FILE is summary.txt for a sweep, locks-summary.txt for a
+# locks run. Exit 0 when FILE is there, 3 after touching STOP because a
 # foreign claim showed up, 4 when the run is gone without FILE.
 stage_watch() {
     tag=${1:?usage: run.sh watch TAG [FILE]}; file=${2:-summary.txt}
@@ -212,7 +237,9 @@ case $stage in
     claim) stage_claim "$@" ;;
     release) stage_release ;;
     build) stage_build "$@" ;;
+    shim) stage_shim ;;
     sweep) stage_sweep "$@" ;;
+    locks) stage_locks "$@" ;;
     stop) stage_stop "$@" ;;
     watch) stage_watch "$@" ;;
     fetch) stage_fetch "$@" ;;

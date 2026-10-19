@@ -173,6 +173,48 @@ class FreqTest(Base):
         self.assertIn("median 2500 MHz", buf.getvalue())
 
 
+class LocksTest(Base):
+    """locks.py on shim snapshots written by hand."""
+
+    def shim(self, d, pid, uid, rows):
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "mutex-%d-%d.tsv" % (pid, uid)), "w") as f:
+            for site, calls, cont in rows:
+                f.write("%#x\t0x400000\t/t/v/build/sbin/unitd\t%d\t%d\t%d\n" % (site, calls, cont, cont * 1000))
+
+    def run_dir(self):
+        d = os.path.join(self.tmp, "v-capp-1-1")
+        for snap in ("a", "b"):
+            os.makedirs(os.path.join(d, snap, "x"))
+            with open(os.path.join(d, snap, "roles.txt"), "w") as f:
+                f.write("10 unit: router\n11 /t/v/build/lab_capp\n")
+        # router: 100 calls after the warm-up, 400 after the window
+        self.shim(os.path.join(d, "a"), 10, 65534, [(0x401000, 60, 1), (0x402000, 40, 0)])
+        self.shim(os.path.join(d, "a", "x"), 10, 65534, [(0x401000, 60, 1), (0x402000, 40, 0)])
+        self.shim(os.path.join(d, "b"), 10, 65534, [(0x401000, 250, 4), (0x402000, 150, 0)])
+        # the second copy of b was taken during a rewrite: one line is missing
+        self.shim(os.path.join(d, "b", "x"), 10, 65534, [(0x401000, 250, 4)])
+        # an app process whose first file appears only in b
+        self.shim(os.path.join(d, "b"), 11, 65534, [(0x403000, 30, 0)])
+        return d
+
+    def test_counts_are_the_window_only(self):
+        rows = module("locks").diff(self.run_dir(), "v", "capp", "1", "1", "100")
+        got = {r[5]: (int(r[7]), int(r[8])) for r in rows}
+        self.assertEqual(got, {"router": (300, 3), "app": (30, 0)})
+
+    def test_summary_is_per_request(self):
+        L = module("locks")
+        tsv = os.path.join(self.tmp, "locks.tsv")
+        with open(tsv, "w") as f:
+            f.write("variant\tworkload\tn\trun\tok\trole\tpid\tcalls\tcontended\twait_ns\n")
+            for row in L.diff(self.run_dir(), "v", "capp", "1", "1", "100"):
+                f.write("\t".join(row) + "\n")
+        self.assertEqual(L.summary(tsv), ["workload n variant run role calls/req contended/req",
+                                          "capp 1 v 1 app 0.3000 0.00000",
+                                          "capp 1 v 1 router 3.0000 0.03000"])
+
+
 class RunStageTest(Base):
     """run.sh claim and release against a stub ssh that runs the command here."""
 
