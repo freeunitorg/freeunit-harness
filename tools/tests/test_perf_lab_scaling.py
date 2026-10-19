@@ -580,7 +580,8 @@ class RunStageTest(Base):
         os.chmod(os.path.join(stubs, "ssh"), 0o755)
         # The stub ssh runs the remote command here: no test may reach a real docker.
         with open(os.path.join(stubs, "docker"), "w") as f:
-            f.write('#!/bin/sh\necho "docker stub: $*" >&2\nexit 1\n')
+            f.write('#!/bin/sh\necho "docker stub: $*" >&2\n[ -z "${DOCKER_LOG:-}" ] || echo "$*" >> "$DOCKER_LOG"\n'
+                    'exit "${DOCKER_RC:-1}"\n')
         os.chmod(os.path.join(stubs, "docker"), 0o755)
         self.claims = os.path.join(self.tmp, "claims")
         os.mkdir(self.claims)
@@ -688,6 +689,29 @@ class RunStageTest(Base):
         r = self.run_sh("watch", "t1")
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("done:", r.stdout)
+
+    def docker_run(self, *args, **env):
+        log = os.path.join(self.tmp, "docker.log")
+        if os.path.exists(log):
+            os.remove(log)
+        self.env.update(DOCKER_LOG=log, DOCKER_RC="0", **env)
+        r = self.run_sh(*args)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(log) as f:
+            return f.read()
+
+    def test_container_capabilities(self):
+        # profile.sh needs PERFMON (perf) and SYS_PTRACE (strace); a sweep needs neither.
+        sweep = self.docker_run("sweep", "s1")
+        self.assertNotIn("--cap-add", sweep)
+        prof = self.docker_run("profile", "p1")
+        self.assertIn("--cap-add PERFMON --cap-add SYS_PTRACE", prof)
+        self.assertNotIn("SYSLOG", prof)
+        self.assertNotIn("/sys/kernel/tracing", prof)
+        # kernel symbols and the futex tracepoint only on request
+        prof = self.docker_run("profile", "p2", PERF_KERNEL="1")
+        self.assertIn("--cap-add SYSLOG", prof)
+        self.assertIn("-v /sys/kernel/tracing:/sys/kernel/tracing", prof)
 
     def unit_repo(self):
         repo = os.path.join(self.tmp, "unit-src")

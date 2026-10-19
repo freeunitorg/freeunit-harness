@@ -91,9 +91,10 @@ appears, and exits 3.
   and the warm-up. A copy taken while the shim rewrites its file is short; the kit takes the larger of two copies.
 - **Never kill by name on a shared box.** `pkill -x unitd` in a native run would have killed 658 orphan unitd
   router and controller pairs of another session on one lab box.
-- **The lab container has no tracefs.** `perf stat -e syscalls:sys_enter_futex` fails with "unknown tracepoint".
-  profile.sh then counts futex calls with `strace -c -f` on the router. On x86 that worked for capp (11947 calls in
-  10 s) and recorded nothing for static. Kernel symbols in perf and c2c stay unresolved under `kptr_restrict`.
+- **The lab container has no tracefs.** `perf stat -e syscalls:sys_enter_futex` failed with "unknown tracepoint".
+  The preflight now picks `strace -c -f` on the router when the tracepoint cannot work. On x86 strace worked for
+  capp (11947 calls in 10 s) and recorded nothing for static. Kernel symbols in perf and c2c stay unresolved under
+  `kptr_restrict`. `PERF_KERNEL=1` changes both ("Perf privileges" below).
 - **`perf c2c report --stats` prints the summary only,** without the cache line tables. profile.sh writes both.
 - **Native runs keep the control socket short.** A unix socket path holds at most 107 bytes, so a native run puts
   unitd's state in `/tmp/scaling-TAG`.
@@ -101,6 +102,42 @@ appears, and exits 3.
   results directory, so a sweep and a profile give every file to the owner of that directory when they exit.
 - **An ssh drop must not end a run.** The container starts detached (`docker run -d`) and a native run starts under
   `setsid nohup`. The output goes to `results/TAG/run.log` on the box.
+
+## Perf privileges
+
+- **A container capability does not grant perf privilege by itself.** perf checks CAP_PERFMON and CAP_SYS_ADMIN
+  in the initial user namespace. In a rootless Docker or Podman container, `--cap-add PERFMON` is a capability of
+  the container's user namespace: the kernel ignores it for perf, and it only lets `perf_event_open` past the
+  default seccomp profile. The process then gets what the host user gets at the host's `perf_event_paranoid`. Only
+  in a rootful container is the capability a real one. The preflight counts a capability only in the initial user
+  namespace.
+- **perf_event_paranoid** is global; a container sees the host value and cannot change it.
+  - 0 or lower: system-wide mode (`PERF_SCOPE=cpus`) works for an ordinary user. -1 also allows tracepoints.
+  - 1: per-process mode, user and kernel.
+  - 2 (the upstream default): per-process mode, user space only.
+  - 3: software events only, as another session reports for Debian and Ubuntu kernels. Unverified here.
+  - 4 (Ubuntu): every perf call needs a capability, software events and `-p` included. Whether CAP_PERFMON is
+    enough or CAP_SYS_ADMIN is needed is unverified. With CAP_PERFMON only, the preflight prints a note, and the
+    probe (`perf stat -e task-clock,PERF_EVENT -- true`) decides.
+- **A VM may have no hardware PMU.** Then cycles, instructions and c2c fail in every mode with any capability or
+  sysctl. Software events (cpu-clock, task-clock) still work: `PROFILE="record futex" PERF_EVENT=cpu-clock`.
+- **Kernel symbols** need `kptr_restrict` 0 with `perf_event_paranoid` 1 or lower, or CAP_SYSLOG in the initial
+  user namespace at `kptr_restrict` 1. **The futex tracepoint** needs `perf_event_paranoid` -1 or a capability,
+  and a readable tracefs. **strace -p** needs `ptrace_scope` 0, or CAP_SYS_PTRACE at 1 or 2. Yama accepts
+  CAP_SYS_PTRACE in the target's user namespace, so in a container it works rootless too.
+- **The container of run.sh profile** gets `--cap-add PERFMON` (perf) and `--cap-add SYS_PTRACE` (the strace
+  fallback). A sweep and a locks run get no capability. `PERF_KERNEL=1` also adds `--cap-add SYSLOG` (kernel
+  symbols at `kptr_restrict` 1) and `-v /sys/kernel/tracing:/sys/kernel/tracing` (the futex tracepoint). Both work
+  only with a rootful docker daemon, and the bind mount gives the container the host's tracefs, so they are an
+  opt-in. `NATIVE=1` runs as the box user, with no capability.
+- **The lab boxes.** Another session probed two boxes read-only on 2026-10-19. These facts are reported, not
+  verified by the kit; run `PREFLIGHT_ONLY=1 run.sh profile TAG` on a box first.
+  - fu-build-arm (o-build): kernel 6.18.54-virt, `perf_event_paranoid` 1, no hardware PMU. cycles, instructions
+    and c2c fail in every mode; cpu-clock and task-clock work.
+  - pro4s-4: kernel 6.8.0, perf 6.8.12, `perf_event_paranoid` 4, CapEff 0. Every perf call fails for an ordinary
+    user, `-p` and software events included.
+  - pro4s-2: not probed.
+  - The first kit's profile ran in the lab container with `--cap-add PERFMON`. Why that was enough is unexplained.
 
 ## Files
 

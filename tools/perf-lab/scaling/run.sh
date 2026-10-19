@@ -24,6 +24,8 @@
 #
 # The box, its paths, the image and oha come from run/lab.env (tools/lib/env.sh):
 # PERF_HOST, SSH_USER, REMOTE_WORKDIR, CLAIM_DIR, LAB_IMAGE, OHA, UNIT_REPO.
+# PERF_KERNEL=1 adds --cap-add SYSLOG and -v /sys/kernel/tracing:/sys/kernel/tracing to
+# the profile container: kernel symbols and the futex tracepoint, from a rootful docker only.
 # NATIVE=1 builds and runs on the box without docker (a box without docker, or a
 # run as a normal user). The kit pins its own cpus from the box topology;
 # SERVER_CPUS and LOAD_CPUS are not used.
@@ -202,6 +204,7 @@ start() {
     for kv in "$@"; do envs="$envs $(q "$kv")"; done
     rsh "rm -rf $(q "$out") && mkdir -p $(q "$out") && chmod 1777 $(q "$out")"
     if [ "${NATIVE:-0}" = 1 ]; then
+        [ "${PERF_KERNEL:-0}" = 1 ] && echo "run.sh: PERF_KERNEL=1 has no effect with NATIVE=1" >&2
         # R holds the control socket: keep it short, a unix socket path has at most 107 bytes
         rsh "cd $(q "$RD") && env $envs OUT=$(q "$out") TREES=$(q "$RD/trees") R=$(q "/tmp/scaling-$tag") \
             WWW=$(q "$RD/www-$tag") OHA=$(q "$OHA") setsid nohup bash $(q "$RD/scripts/$script") \
@@ -209,7 +212,17 @@ start() {
     else
         e=""
         for kv in "$@"; do e="$e -e $(q "$kv")"; done
-        rsh "docker run -d --rm --name $(q "scaling-$tag") --cap-add PERFMON --cap-add SYS_PTRACE \
+        # Only profile.sh needs a capability: PERFMON for perf, SYS_PTRACE for the
+        # strace fallback. A capability does not grant perf privilege by itself:
+        # perf checks the initial user namespace, so it counts only in a rootful
+        # container (docs/perf/scaling-kit.md, "Perf privileges").
+        caps=""
+        if [ "$script" = profile.sh ]; then
+            caps="--cap-add PERFMON --cap-add SYS_PTRACE"
+            # PERF_KERNEL=1: kernel symbols at kptr_restrict 1, and the futex tracepoint
+            [ "${PERF_KERNEL:-0}" = 1 ] && caps="$caps --cap-add SYSLOG -v /sys/kernel/tracing:/sys/kernel/tracing"
+        fi
+        rsh "docker run -d --rm --name $(q "scaling-$tag") $caps \
             -v $(q "$RD/trees"):/t:ro -v $(q "$RD/scripts"):/lab:ro -v $(q "$out"):/out \
             -v $(q "$OHA"):/usr/local/bin/oha:ro $e -e OUT=/out $(q "$LAB_IMAGE") \
             bash -c $(q "bash /lab/$script > /out/run.log 2>&1")" >/dev/null
