@@ -93,7 +93,7 @@ Then:
    command. Push once with `--force-with-lease=<ref>:<reviewed 40-char SHA>`.
 4. Reply once: how many findings held, one line each, evidence for each decline. No bot handles.
 5. Trailer only if a finding changed the commit: `Reviewed-by: DeepSeek V4.1 Flash` plus
-   `Harness: DeepSeek Harness`; `Reviewed-by: Codex`; for Claude,
+   `Harness: DeepSeek Harness <version>`; `Reviewed-by: Codex`; for Claude,
    `Reviewed-by: <full model name> <noreply@anthropic.com>`. PR 588 commit `547a854a`
    carries two. A review with no applied finding gets none.
 6. `git add` named paths, never `git add -A`. A checkout that holds another session's

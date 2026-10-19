@@ -47,7 +47,7 @@ class TrailerTest(unittest.TestCase):
         self.assertIn("spell the key", self.problems("x\n\nCo-authored-by: Claude Opus 5.5 %s\n" % ADDR)[0])
 
     def test_comment_block_with_harness_line(self):
-        self.assertEqual(self.problems("Review.\n\nReviewed-by: DeepSeek V4.1 Flash\nHarness: DeepSeek Harness\nTools: bash, read\n"), [])
+        self.assertEqual(self.problems("Review.\n\nReviewed-by: DeepSeek V4.1 Flash\nHarness: DeepSeek Harness 0.2.0-rc.2\nTools: bash, read\n"), [])
 
     def test_harness_suffix_is_accepted(self):
         self.assertEqual(self.problems("x\n\nReviewed-by: DeepSeek V4.1 Flash (DSH)\n"), [])
@@ -127,6 +127,41 @@ class TrailerTest(unittest.TestCase):
         self.assertIn("a comment takes no address", r.stdout)
         r = subprocess.run([sys.executable, SCRIPT, "-c", "-"], input="x\n\nReviewed-by: Claude Fable 5.1\n", capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_dsh_harness_needs_the_version(self):
+        self.assertIn(
+            "dsh version",
+            self.problems("x\n\nHarness: DeepSeek Harness\n")[0],
+        )
+        self.assertEqual(
+            self.problems("x\n\nHarness: DeepSeek Harness 0.2.0-rc.2\n"), []
+        )
+        self.assertEqual(
+            self.problems(
+                "x\n\nHarness: DeepSeek Harness 0.2.0-rc.2/0398715/abc123\n"
+            ),
+            [],
+        )
+
+    def test_other_harness_has_no_version_rule(self):
+        self.assertEqual(self.problems("x\n\nHarness: Claude Code\n"), [])
+
+    def test_harness_and_tools_spelling_and_value(self):
+        self.assertIn(
+            "spell the key",
+            self.problems("x\n\nharness: DeepSeek Harness 0.2.0-rc.2\n")[0],
+        )
+        self.assertIn("spell the key", self.problems("x\n\ntools: bash\n")[0])
+        self.assertIn("empty", self.problems("x\n\nTools:\n")[0])
+
+    def test_tools_subject_is_not_a_trailer(self):
+        self.assertEqual(
+            self.problems(
+                "tools: fix the checker\n\nBody line.\n\n"
+                "Co-Authored-By: DeepSeek V4.1 Flash (DSH)\n"
+            ),
+            [],
+        )
 
     def test_every_list_entry_is_self_consistent(self):
         for key, (name, addr) in CANON.items():
