@@ -56,6 +56,14 @@ appears, and exits 3.
   writes no throughput. A site in `sites-*.txt` is the function that called `pthread_mutex_lock()`, or the caller
   of `nxt_thread_mutex_lock()` when the call went through that wrapper. libunit calls `pthread_mutex_lock()`
   directly, so an application site is the libunit function itself.
+- **Per-process perf.** profile.sh attaches every perf call to the kit's processes with `-p` (unitd, router,
+  controller, prototypes, applications; `pids.txt` lists them). The system-wide `-a -C <server cpus>` of the first
+  kit is an opt-in, `PERF_SCOPE=cpus`: it needs `perf_event_paranoid` 0 or lower, or CAP_PERFMON in the initial
+  user namespace. Per-process mode leaves out the time of other tasks on the server cpus, and kernel work done
+  for the kit outside its own threads. At `perf_event_paranoid` 2 the kit records user space only:
+  `perf record --all-user --user-callchains`, and `perf c2c record --all-user`, or on AMD
+  `perf record -W -d --sample-cpu -e ibs_op/swfilt=1/u` (kernel 6.14 or later). These user space forms come from
+  a laptop test and the kernel source; they are unverified on the lab boxes.
 - **Preflight.** profile.sh first reads `perf_event_paranoid`, `kptr_restrict`, `ptrace_scope`, the PMU devices in
   `/sys/bus/event_source/devices` and its own capabilities, and writes `preflight.txt`: one line per step, `ok` or
   `unavailable` with the sysctl or capability that is missing. When a requested step (`PROFILE`, default

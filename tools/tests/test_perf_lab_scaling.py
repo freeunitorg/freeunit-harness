@@ -263,6 +263,52 @@ class ProfilePreflightTest(FakeBox):
         self.assertIn("stat -x, -e task-clock,cycles -- true", perf)
 
 
+class PerProcessTest(FakeBox):
+    """The default scope is the kit's processes (-p); system-wide -a -C is an opt-in."""
+
+    STUB = 'perf() { echo "perf $*" >&2; }\n'
+
+    def test_perf_args(self):
+        r = self.lib(self.STUB + 'perf_args pids 10,11 0,1; echo "${PERF_T[*]}|${PERF_U[*]}"\n'
+                     'PERF_USER_ONLY=1 perf_args pids 10,11 0,1; echo "${PERF_T[*]}|${PERF_U[*]}"\n'
+                     'perf_args cpus 10,11 0,1; echo "${PERF_T[*]}"')
+        self.assertEqual(r.stdout.split("\n")[:-1], ["-p 10,11|", "-p 10,11|--all-user --user-callchains",
+                                                       "-a -C 0,1"])
+
+    def test_c2c_forms(self):
+        got = []
+        for form in ("full", "user", "amd-user"):
+            err = os.path.join(self.tmp, form + ".err")
+            r = self.lib(self.STUB + 'perf_args pids 10 0; C2C_FORM=%s c2c_record /d "$ERR" -- sleep 15' % form,
+                         ERR=err)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(err) as f:
+                got.append(f.read().strip())
+        self.assertEqual(got, ["perf c2c record -p 10 -o /d -- sleep 15",
+                               "perf c2c record --all-user -p 10 -o /d -- sleep 15",
+                               "perf record -W -d --sample-cpu -e ibs_op/swfilt=1/u -p 10 -o /d -- sleep 15"])
+        r = self.lib(self.STUB + 'C2C_FORM= c2c_record /d /dev/null -- sleep 15')
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_default_scope_needs_no_system_wide_access(self):
+        # perf_event_paranoid 1: an ordinary user cannot use -a, but -p works.
+        stubs = os.path.join(self.tmp, "stubs")
+        os.makedirs(stubs)
+        with open(os.path.join(stubs, "perf"), "w") as f:
+            f.write('#!/bin/sh\necho "1.00,msec,task-clock" >&2\n')
+        os.chmod(os.path.join(stubs, "perf"), 0o755)
+        env = dict(self.env, **self.box(1, scope=0))
+        env.update(OHA="true", TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
+                   PATH=stubs + os.pathsep + os.environ["PATH"], PREFLIGHT_ONLY="1", STRACE="sh")
+        for scope, rc in (("", 0), ("cpus", 1)):
+            env["OUT"] = os.path.join(self.tmp, "out-" + (scope or "default"))
+            env["PERF_SCOPE"] = scope
+            r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True,
+                               env=env, timeout=60, stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, rc, scope + ": " + r.stdout + r.stderr)
+        self.assertIn("cpus: unavailable (system-wide mode needs perf_event_paranoid <= 0", r.stdout)
+
+
 class ScopedKillTest(Base):
     def setUp(self):
         super().setUp()

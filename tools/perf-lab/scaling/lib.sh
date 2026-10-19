@@ -251,7 +251,8 @@ params_line() {
     locks) echo "params LOCKS=1 VARIANTS='$VARIANTS' WORKLOADS='$WORKLOADS' NS='$NS' LRUNS=$LRUNS LDUR=$LDUR" \
                 "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS SHIM='${SHIM:-}'" ;;
     profile) echo "params N=$N V=$V WORKLOADS='$WORKLOADS' PERF_SEC=$PERF_SEC C2C_G=$C2C_G LOAD_SEC=$LOAD_SEC" \
-                  "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS PROFILE='${PROFILE:-}' PERF_EVENT=${PERF_EVENT:-}" ;;
+                  "WARM=$WARM CONNS=$CONNS APP_PROCS=$APP_PROCS PROFILE='${PROFILE:-}' PERF_EVENT=${PERF_EVENT:-}" \
+                  "PERF_SCOPE=${PERF_SCOPE:-}" ;;
     *) die "params_line: unknown mode $1" ;;
     esac
 }
@@ -424,4 +425,28 @@ perf_preflight() {
         return 1
     fi
     echo "preflight: ok"
+}
+
+# perf_args SCOPE PIDS CPUS: the target of every perf call in PERF_T (an array):
+# "-p PIDS" (SCOPE pids, the default) or "-a -C CPUS" (SCOPE cpus, system-wide).
+# PERF_U holds the options of perf record for user space only (PERF_USER_ONLY=1).
+perf_args() {
+    if [ "$1" = cpus ]; then PERF_T=(-a -C "$3"); else PERF_T=(-p "$2"); fi
+    PERF_U=()
+    if [ "${PERF_USER_ONLY:-0}" = 1 ]; then PERF_U=(--all-user --user-callchains); fi
+}
+
+# c2c_record DATA ERR ARG...: perf c2c record in the form of the preflight
+# (C2C_FORM). ARG... ends with "-- sleep S". amd-user is the user-space-only form
+# for AMD IBS, which "perf c2c record --all-user" refuses in per-process mode;
+# perf c2c report reads its data the same way.
+c2c_record() {
+    local data=$1 err=$2
+    shift 2
+    case ${C2C_FORM:-} in
+        full) perf c2c record "${PERF_T[@]}" -o "$data" "$@" ;;
+        user) perf c2c record --all-user "${PERF_T[@]}" -o "$data" "$@" ;;
+        amd-user) perf record -W -d --sample-cpu -e ibs_op/swfilt=1/u "${PERF_T[@]}" -o "$data" "$@" ;;
+        *) echo "c2c_record: no c2c form (the preflight says c2c is unavailable)" >&2; false ;;
+    esac > /dev/null 2> "$err"
 }
