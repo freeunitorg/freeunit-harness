@@ -2,8 +2,9 @@
 # lib.sh -- the shared functions of the router-thread scaling kit. sweep.sh and
 # profile.sh source it; tools/tests/test_perf_lab_scaling.py sources it alone.
 #
-# Bash, not POSIX sh: it runs only inside the lab container or natively on the
-# perf box, never on a user or build path (docs/shell.md).
+# Bash, not POSIX sh: sweep.sh and profile.sh source it inside the lab container
+# or natively on the perf box. The tests source it under bash on the developer
+# host (docs/shell.md).
 #
 # Inputs (environment, defaults below): TREES OUT R WWW PORT CONNS APP_PROCS OHA
 # SYSCPU (the cpu directory of sysfs; a test points it at a fake tree).
