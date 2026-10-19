@@ -299,6 +299,9 @@ build, release), `cells.sh` (in-container cells), `Dockerfile`, `lab.env.example
 `test_perf_compare.py` with `testdata/fixture.tsv`. Results: `run/perf-lab/<run-id>/` locally and
 `$REMOTE_WORKDIR/runs/<run-id>/` on the box, each with its own copy of the lab scripts.
 
+`tools/perf-lab/scaling/` is a separate kit for scaling over router threads, lock counts per request and perf c2c.
+Its `run.sh claim` writes the same perflab-1 claim. Method and traps: [scaling-kit.md](scaling-kit.md).
+
 Host names in tracked harness files, to clear before a public copy: comments in `tools/bench-release.sh`,
 `bench-crossover.py`, `bench-startup.sh`, `unit-build`, `capget-fallback-smoke.sh`, and text in
 `docs/context-priming.md`, `docs/perf/*.md`, `skills/freeunit-benchmark/references/release-ab.md`,
