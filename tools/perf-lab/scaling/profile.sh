@@ -2,7 +2,7 @@
 # profile.sh -- where the time goes at one point of the sweep. Runs inside the lab
 # container (run.sh profile; it has --cap-add PERFMON and SYS_PTRACE), or natively.
 #
-#   N (router threads, 3), V (variant, master), WORKLOADS ("capp static"),
+#   N (router threads; 3, or the core count when it is smaller), V (variant, master), WORKLOADS ("capp static"),
 #   PERF_SEC (20), C2C_G (0; 1 adds a perf c2c record with call graphs),
 #   LOAD_SEC (75, or 90 with C2C_G=1).
 #
@@ -21,7 +21,7 @@
 #
 # Lock counts are a separate stage (run.sh locks): the shim slows every lock call.
 set -u
-: "${N:=3}" "${V:=master}" "${WORKLOADS:=capp static}" "${PERF_SEC:=20}" "${WARM:=3}" "${C2C_G:=0}"
+: "${N:=}" "${V:=master}" "${WORKLOADS:=capp static}" "${PERF_SEC:=20}" "${WARM:=3}" "${C2C_G:=0}"
 : "${LOAD_SEC:=$((75 + 15 * C2C_G))}"   # covers every record step below; the reports run after the load
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=tools/perf-lab/scaling/lib.sh
@@ -30,6 +30,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 command -v "$OHA" >/dev/null || die "no oha ($OHA)"
 command -v perf >/dev/null || die "no perf"
 read_topology
+[ -n "$N" ] || N=$(default_n)
 [ "$N" -le "$NCORES" ] || die "N=$N is more than the $NCORES cores"
 mkdir -p "$OUT"; chmod 1777 "$OUT"
 write_meta profile "$V"

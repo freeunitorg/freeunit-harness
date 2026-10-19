@@ -38,12 +38,15 @@ command -v taskset >/dev/null || die "no taskset"
 read_topology
 [ "$NCORES" -ge 2 ] || die "cannot read the topology from $SYSCPU"
 mkdir -p "$OUT"; chmod 1777 "$OUT"   # the router and the apps run as nobody in the container
+RUN_NS=$(usable_ns "$NS" 2> "$OUT/.skipped")
 TSV=$OUT/sweep.tsv
 
 # --- meta -------------------------------------------------------------------------
 mode=sweep; [ "${LOCKS:-0}" = 1 ] && mode=locks
 # shellcheck disable=SC2086  # one word per variant
 write_meta "$mode" $VARIANTS
+tee -a "$OUT/meta.txt" < "$OUT/.skipped" >&2; rm -f "$OUT/.skipped"   # a skipped n is in run.log and meta.txt
+[ -n "$RUN_NS" ] || die "no n of NS='$NS' fits the $NCORES cores"
 
 # --- frequency samples: "epoch kHz(cpu0) kHz(cpu1) ...", every 2 s (freq.py reads them)
 freq_sampler() {
@@ -82,8 +85,7 @@ if [ "${LOCKS:-0}" = 1 ]; then
         done > "$1/roles.txt"
     }
     for w in $WORKLOADS; do
-      for n in $NS; do
-        [ "$n" -le "$NCORES" ] || continue
+      for n in $RUN_NS; do
         load=$(cpus_load "$n")
         for ((r = 1; r <= LRUNS; r++)); do
           for v in $VARIANTS; do
@@ -119,8 +121,7 @@ printf 'variant\tworkload\tn\tlayout\trun\tok\tbad\trps\tp50_ms\tp99_ms\tsrv_cpu
 # --- throughput: interleaved rounds, a fresh server per run, the order rotates per round
 read -r -a VA <<< "$VARIANTS"; nv=${#VA[@]}
 for w in $WORKLOADS; do
-  for n in $NS; do
-    [ "$n" -le "$NCORES" ] || continue
+  for n in $RUN_NS; do
     srv=$(cpus_server "$n"); load=$(cpus_load "$n")
     layout=clean; [ "$n" -ge "$NCORES" ] && layout=shared
     for ((r = 1; r <= RUNS; r++)); do

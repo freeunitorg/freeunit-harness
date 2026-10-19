@@ -38,7 +38,8 @@ appears, and exits 3.
   on the first thread of cores 0..n-1, and the SMT siblings of those cores stay idle. oha runs on both threads of
   the other cores. With n equal to the core count, oha runs on the siblings of the server cores and the row says
   `shared`. Without SMT, a `shared` row puts oha on the server cpus. The kit ignores `SERVER_CPUS` and `LOAD_CPUS`
-  in `lab.env`.
+  in `lab.env`. A sweep skips an n above the core count and says so in `run.log` and `meta.txt`. The profile
+  default is N=3, or the core count when it is smaller (N=2 on the 2-core aarch64 box).
 - **Interleaved rounds.** Round r runs every variant once, each with a fresh unitd, a 3 s warm-up and a `DUR`
   window. The variant order rotates by one per round. A drift of the box over the hours then spreads over all
   variants. analyze.py pairs the runs of one round.

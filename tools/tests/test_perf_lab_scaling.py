@@ -110,6 +110,22 @@ class ParamsTest(Base):
             self.assertIn(k, t)
 
 
+class CoreCountTest(Base):
+    """The aarch64 lab box has two cores: the defaults must fit it, and a skipped n must say so."""
+
+    def test_two_cores(self):
+        r = self.lib('read_topology; default_n; usable_ns "1 2 3"', SYSCPU=self.topology(["0", "1"]))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split("\n")[:-1], ["2", "1 2"])
+        self.assertIn("n=3", r.stderr)
+
+    def test_four_cores_keep_the_default(self):
+        r = self.lib('read_topology; default_n; usable_ns "1 2 3"',
+                     SYSCPU=self.topology(["0,4", "1,5", "2,6", "3,7"] * 2))
+        self.assertEqual(r.stdout.split("\n")[:-1], ["3", "1 2 3"])
+        self.assertEqual(r.stderr, "")
+
+
 class ScopedKillTest(Base):
     def setUp(self):
         super().setUp()

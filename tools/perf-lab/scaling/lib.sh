@@ -64,6 +64,19 @@ read_topology() {  # fills CORE_T0, CORE_T1, NCORES from $SYSCPU
     NCORES=$i
 }
 
+default_n() {  # the profile default: 3 router threads, or the core count when it is smaller
+    if [ "$NCORES" -lt 3 ]; then echo "$NCORES"; else echo 3; fi
+}
+
+usable_ns() {  # "1 2 3" -> the n that fit the cores; a warning on stderr for each other n
+    local n out=""
+    for n in $1; do
+        if [ "$n" -le "$NCORES" ]; then out="$out $n"
+        else echo "skipped n=$n: more than the $NCORES cores" >&2; fi
+    done
+    echo "${out# }"
+}
+
 cpus_server() {  # n -> the first thread of cores 0..n-1
     local n=$1 j out=""
     for ((j = 0; j < n; j++)); do out="$out,${CORE_T0[j]}"; done
