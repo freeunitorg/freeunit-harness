@@ -50,7 +50,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 case $PERF_SCOPE in pids|cpus) ;; *) die "PERF_SCOPE is pids or cpus, not '$PERF_SCOPE'" ;; esac
 # A misspelt step must not pass: no step would run, and DONE would follow.
-read -r -a steps <<< "$PROFILE"
+# Split on any blank, newlines and tabs included, and keep the steps one space
+# apart: has() below looks for " step ".
+read -r -d '' -a steps <<< "$PROFILE" || true
+PROFILE="${steps[*]}"
 [ "${#steps[@]}" -gt 0 ] || die "PROFILE is empty; the steps are record, futex and c2c"
 for s in "${steps[@]}"; do
     case $s in record|futex|c2c) ;; *) die "PROFILE: unknown step '$s'; the steps are record, futex and c2c" ;; esac

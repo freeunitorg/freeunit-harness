@@ -286,13 +286,22 @@ class ProfilePreflightTest(FakeBox):
 
     def test_unknown_step_is_refused(self):
         # "recrod" passed the preflight, no step ran, and DONE followed.
-        for i, prof in enumerate(("recrod", "record futx", " ")):
+        for i, prof in enumerate(("recrod", "record futx", " ", "record\nrecrod")):
             r, out, perf = self.profile(self.box(1, scope=0), tag="out%d" % i, PROFILE=prof, PREFLIGHT_ONLY="1",
                                         STRACE="sh")
             self.assertEqual(r.returncode, 1, "PROFILE=%r: %s" % (prof, r.stdout + r.stderr))
             self.assertIn("the steps are record, futex and c2c", r.stderr)
             self.assertFalse(os.path.exists(os.path.join(out, "DONE")), "PROFILE=%r wrote DONE" % prof)
             self.assertEqual(perf, "", "perf ran with PROFILE=%r" % prof)
+
+    def test_steps_split_on_any_blank(self):
+        # "record<TAB>futex" passed the check, but has() looked for " futex ", so the futex step never ran.
+        r, out, perf = self.profile(self.box(1, scope=0), PROFILE="record\tfutex\n c2c ", PREFLIGHT_ONLY="1",
+                                    STRACE="sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(perf, "stat -x, -e task-clock,cycles -- true\n")
+        with open(os.path.join(out, "meta.txt")) as f:
+            self.assertIn("PROFILE='record futex c2c'", f.read())
 
     def test_paranoid_4_stops_before_any_measurement(self):
         r, out, perf = self.profile(self.box(4))
