@@ -181,8 +181,16 @@ class PreflightTest(FakeBox):
         self.assertIn("rc=0 level=user user=1 c2c=user", out)
         self.assertIn("record: ok (cycles, user space only)", out)
         self.assertIn("kernel-samples: unavailable", out)
-        out = self.run_pf(self.box(2, pmu=("cpu", "ibs_op")), "record c2c")
+        out = self.run_pf(self.box(2, pmu=("cpu", "ibs_op", "ibs_op/format/swfilt")), "record c2c")
         self.assertIn("c2c=amd-user", out)
+
+    def test_amd_user_space_c2c_needs_swfilt(self):
+        # ibs_op without the swfilt format bit (before kernel 6.14): "ibs_op/swfilt=1/u" does not parse.
+        out = self.run_pf(self.box(2, pmu=("cpu", "ibs_op")), "record c2c")
+        self.assertIn("rc=1", out)
+        self.assertIn("c2c: unavailable (user space only on AMD needs ibs_op/swfilt=1/u", out)
+        out = self.run_pf(self.box(1, pmu=("cpu", "ibs_op")), "record c2c")   # perf c2c record, all modes
+        self.assertIn("rc=0 level=task user=0 c2c=full", out)
 
     def test_paranoid_3_is_software_only(self):
         out = self.run_pf(self.box(3), "record")

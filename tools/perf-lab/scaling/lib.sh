@@ -388,9 +388,16 @@ perf_preflight() {
     if [ -z "$c2cwhy" ] && [ -z "$MEM_PMU" ]; then
         c2cwhy="no memory sampling PMU (Intel mem-loads, AMD ibs_op or arm_spe) in $EVSRC"
     fi
+    # User space only on AMD needs the swfilt bit of IBS (kernel 6.14 or later). Without
+    # it the event of amd-user does not parse: ibs_op alone proves nothing.
+    if [ -z "$c2cwhy" ] && [ "$PERF_USER_ONLY" = 1 ] && [ "$MEM_PMU" = amd ] \
+        && [ ! -e "$EVSRC/ibs_op/format/swfilt" ]; then
+        c2cwhy="user space only on AMD needs ibs_op/swfilt=1/u, and $EVSRC/ibs_op/format has no swfilt"
+        c2cwhy="$c2cwhy (kernel 6.14 or later); or CAP_PERFMON, or perf_event_paranoid <= 1"
+    fi
     if [ -z "$c2cwhy" ]; then
         if [ "$PERF_USER_ONLY" = 0 ]; then C2C_FORM=full
-        elif [ "$MEM_PMU" = amd ]; then C2C_FORM=amd-user   # ibs_op/swfilt=1/u needs kernel 6.14 or later
+        elif [ "$MEM_PMU" = amd ]; then C2C_FORM=amd-user   # ibs_op/swfilt=1/u, checked above
         else C2C_FORM=user; fi                               # perf c2c record --all-user, unverified
         _pf ok c2c "$C2C_FORM, $MEM_PMU"; _pf ok c2cg "$C2C_FORM, $MEM_PMU"
     else
