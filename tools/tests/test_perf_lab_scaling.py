@@ -484,7 +484,7 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
         self.assertEqual(read("failures.txt"), "")
         self.assertIn("capp: lock-related symbols: 50.00% of 100.00% sampled; load 1000 0 100.0", read("summary.txt"))
 
-    def test_strace_futex_accepts_only_the_timeout(self):
+    def test_strace_futex_accepts_only_the_full_time(self):
         stub = os.path.join(self.tmp, "strace")
         for body, rc in (("exec sleep 5", 0), ("exit 0", 1), ("exit 1", 1)):
             self.script(stub, "#!/bin/sh\n%s\n" % body)
@@ -493,7 +493,48 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
             self.assertEqual(r.returncode, rc, "%s: %s" % (body, r.stderr))
             if rc:
                 with open(err) as f:
-                    self.assertIn("before the timeout", f.read())
+                    self.assertIn("strace_futex: %s exited %d before 1 s" % (stub, int(body[5:])), f.read())
+
+    def test_strace_futex_kills_a_strace_that_ignores_int(self):
+        # "timeout -s INT" without -k waited for such a strace to end by itself, and then gave 124.
+        stub = self.script(os.path.join(self.tmp, "strace"), "#!/bin/sh\ntrap '' INT\nexec sleep 20\n")
+        t0 = time.monotonic()
+        r = self.lib('strace_futex 1 1 "$TMPD/out" "$TMPD/err"', STRACE=stub, TMPD=self.tmp)
+        took = time.monotonic() - t0
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertLess(took, 1 + 6, "strace_futex took %.1f s" % took)
+        with open(os.path.join(self.tmp, "err")) as f:
+            self.assertIn("did not stop within 5 s of SIGINT", f.read())
+
+    TARGET = """
+import ctypes, os, sys, threading, time
+ctypes.CDLL(None).prctl(0x59616d61, ctypes.c_ulong(2 ** 64 - 1), 0, 0, 0)   # PR_SET_PTRACER_ANY
+lock = threading.Lock()
+def spin():
+    while True:
+        with lock:
+            time.sleep(0.001)
+for _ in range(3):
+    threading.Thread(target=spin, daemon=True).start()
+print(os.getpid(), flush=True)
+time.sleep(30)
+"""
+
+    def test_strace_futex_with_a_real_strace(self):
+        # The real strace must stop on SIGINT as a background job and write its -c table.
+        if shutil.which("strace") is None:
+            self.skipTest("no strace")
+        p = subprocess.Popen([sys.executable, "-I", "-c", self.TARGET], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close()))
+        pid = p.stdout.readline().strip()
+        r = self.lib('strace_futex "$P" 1 "$TMPD/out" "$TMPD/err"', STRACE="strace", TMPD=self.tmp, P=pid)
+        with open(os.path.join(self.tmp, "err")) as f:
+            err = f.read()
+        if r.returncode and "ptrace" in err:
+            self.skipTest("ptrace refused here: " + err.strip())
+        self.assertEqual(r.returncode, 0, err)
+        with open(os.path.join(self.tmp, "out")) as f:
+            self.assertIn("futex", f.read())
 
 
 class SweepNameTest(Base):

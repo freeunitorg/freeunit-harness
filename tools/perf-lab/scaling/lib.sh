@@ -456,14 +456,32 @@ perf_args() {
 }
 
 # strace_futex PID SEC OUT ERR: strace -c -f of the futex calls of PID for SEC
-# seconds. Only the timeout may end it: timeout exits 124 then. Any other status
-# is a failure, for example an attach that ptrace refuses, or a PID that is gone.
+# seconds, then SIGINT: strace detaches and writes the -c table to OUT. A strace
+# that is still there 5 s later gets SIGKILL. Success means strace ran the full
+# SEC seconds and stopped on the SIGINT. An attach that ptrace refuses, or a PID
+# that is gone, ends strace early: that is a failure.
+# No timeout(1): GNU timeout exits 124 after the signal, busybox timeout passes
+# on the status of strace, and uutils timeout 0.10.0 with -k sends SIGKILL at
+# once, before strace writes its table.
 strace_futex() {
-    local rc=0
-    timeout -s INT "$2" "$STRACE" -c -f -e trace=futex -p "$1" -o "$3" 2>> "$4" || rc=$?
-    [ "$rc" = 124 ] && return 0
-    echo "strace_futex: $STRACE exited $rc before the timeout" >> "$4"
-    return 1
+    local sp i rc=0
+    "$STRACE" -c -f -e trace=futex -p "$1" -o "$3" 2>> "$4" &
+    sp=$!
+    for ((i = 0; i < $2 * 10; i++)); do kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
+    if ! kill -0 "$sp" 2>/dev/null; then
+        wait "$sp" || rc=$?
+        echo "strace_futex: $STRACE exited $rc before $2 s" >> "$4"
+        return 1
+    fi
+    kill -INT "$sp"
+    for ((i = 0; i < 50; i++)); do kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$sp" 2>/dev/null; then
+        kill -KILL "$sp"; wait "$sp" 2>/dev/null
+        echo "strace_futex: $STRACE did not stop within 5 s of SIGINT; killed" >> "$4"
+        return 1
+    fi
+    wait "$sp" 2>/dev/null
+    return 0
 }
 
 # c2c_record DATA ERR ARG...: perf c2c record in the form of the preflight
