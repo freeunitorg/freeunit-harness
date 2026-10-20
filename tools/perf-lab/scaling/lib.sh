@@ -462,19 +462,31 @@ perf_args() {
 
 # strace_futex PID SEC OUT ERR: strace -c -f of the futex calls of PID for SEC
 # seconds, then SIGINT: strace detaches and writes the -c table to OUT. A strace
-# that is still there 5 s later gets SIGKILL. Success means strace ran the full
-# SEC seconds and stopped on the SIGINT. An attach that ptrace refuses, or a PID
+# that is still there 5 s later gets SIGKILL. Success means: strace ran the full
+# SEC seconds, stopped on the SIGINT with status 0 or 130 (128 + SIGINT, as
+# strace 6.19 does), and OUT exists. An empty OUT is a success: strace -c writes
+# nothing when PID made no futex call. An attach that ptrace refuses, or a PID
 # that is gone, ends strace early: that is a failure.
 # No timeout(1): GNU timeout exits 124 after the signal, busybox timeout passes
 # on the status of strace, and uutils timeout 0.10.0 with -k sends SIGKILL at
 # once, before strace writes its table.
+# While strace runs, EXIT, HUP, INT and TERM of the caller kill it first. The
+# caller's own traps are kept and run after that. SIGKILL of the caller cannot
+# be trapped: then strace stays until the traced process ends.
 strace_futex() {
-    local sp i rc=0
+    local sp i rc=0 t
+    case $2 in
+        ''|0*|*[!0-9]*) echo "strace_futex: SEC is a positive integer, not '$2'" >> "$4"; return 1 ;;
+    esac
+    _SF_PID="" _SF_TRAPS=$(trap -p EXIT HUP INT TERM)
+    t=$(trap -p EXIT); t=${t#"trap -- "}; t=${t%" EXIT"}; eval "_SF_EXIT=$t"
+    trap '_sf_trap EXIT' EXIT; trap '_sf_trap HUP' HUP; trap '_sf_trap INT' INT; trap '_sf_trap TERM' TERM
     "$STRACE" -c -f -e trace=futex -p "$1" -o "$3" 2>> "$4" &
-    sp=$!
+    sp=$! _SF_PID=$!
     for ((i = 0; i < $2 * 10; i++)); do kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
     if ! kill -0 "$sp" 2>/dev/null; then
         wait "$sp" || rc=$?
+        _sf_untrap
         echo "strace_futex: $STRACE exited $rc before $2 s" >> "$4"
         return 1
     fi
@@ -482,11 +494,28 @@ strace_futex() {
     for ((i = 0; i < 50; i++)); do kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
     if kill -0 "$sp" 2>/dev/null; then
         kill -KILL "$sp"; wait "$sp" 2>/dev/null
+        _sf_untrap
         echo "strace_futex: $STRACE did not stop within 5 s of SIGINT; killed" >> "$4"
         return 1
     fi
-    wait "$sp" 2>/dev/null
-    return 0
+    wait "$sp" || rc=$?
+    _sf_untrap
+    if [ "$rc" != 0 ] && [ "$rc" != 130 ]; then
+        echo "strace_futex: $STRACE exited $rc after the SIGINT" >> "$4"; return 1
+    fi
+    [ -e "$3" ] || { echo "strace_futex: $STRACE wrote no $3" >> "$4"; return 1; }
+}
+
+_sf_untrap() {  # the caller's traps again
+    trap - EXIT HUP INT TERM
+    eval "$_SF_TRAPS"
+    _SF_PID=""
+}
+
+_sf_trap() {  # SIG: kill the strace, give the caller its traps back, then let SIG act as before
+    [ -n "$_SF_PID" ] && kill -KILL "$_SF_PID" 2>/dev/null
+    _sf_untrap
+    if [ "$1" = EXIT ]; then eval "$_SF_EXIT"; else kill -s "$1" "$BASHPID"; fi
 }
 
 # c2c_record DATA ERR ARG...: perf c2c record in the form of the preflight

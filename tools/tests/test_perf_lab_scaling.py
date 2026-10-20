@@ -9,6 +9,7 @@ import importlib.util
 import io
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -492,27 +493,120 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
         self.assertEqual(read("failures.txt"), "")
         self.assertIn("capp: lock-related symbols: 50.00% of 100.00% sampled; load 1000 0 100.0", read("summary.txt"))
 
-    def test_strace_futex_accepts_only_the_full_time(self):
+    # A strace stub: SIGINT (default disposition restored, a background job inherits it ignored)
+    # writes OUT unless MODE is "noout", then exits with MODE ("die" re-raises SIGINT, as strace 6.19).
+    STUB = """#!/usr/bin/env python3
+import os, signal, sys, time
+a = sys.argv[1:]
+out = a[a.index("-o") + 1]
+mode = os.environ.get("STUB_MODE", "0")
+pidfile = os.environ.get("STUB_PIDFILE")
+if pidfile:
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+def on_int(sig, frame):
+    if mode != "noout":
+        with open(out, "w") as f:
+            f.write("calls syscall\\n 10 futex\\n")
+    if mode == "die":
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
+    sys.exit(0 if mode == "noout" else int(mode))
+signal.signal(signal.SIGINT, on_int)
+time.sleep(30)
+"""
+
+    def stub(self):
+        return self.script(os.path.join(self.tmp, "strace"), self.STUB)
+
+    def strace_futex(self, sec="1", **env):
+        for name in ("out", "err"):
+            if os.path.exists(os.path.join(self.tmp, name)):
+                os.remove(os.path.join(self.tmp, name))
+        r = self.lib('strace_futex 1 "$SEC" "$TMPD/out" "$TMPD/err"', STRACE=os.path.join(self.tmp, "strace"),
+                     TMPD=self.tmp, SEC=sec, **env)
+        err = ""
+        if os.path.exists(os.path.join(self.tmp, "err")):
+            with open(os.path.join(self.tmp, "err")) as f:
+                err = f.read()
+        return r.returncode, err
+
+    def test_strace_futex_needs_the_sigint_its_status_and_out(self):
+        # A strace that failed after the SIGINT, or wrote no OUT, was a success.
+        self.stub()
+        for mode, rc, why in (("0", 0, ""), ("die", 0, ""), ("3", 1, "exited 3 after the SIGINT"),
+                              ("noout", 1, "wrote no")):
+            got, err = self.strace_futex(STUB_MODE=mode)
+            self.assertEqual(got, rc, "mode %s: %s" % (mode, err))
+            self.assertIn(why, err)
+
+    def test_strace_futex_fails_on_an_early_exit(self):
         stub = os.path.join(self.tmp, "strace")
-        for body, rc in (("exec sleep 5", 0), ("exit 0", 1), ("exit 1", 1)):
-            self.script(stub, "#!/bin/sh\n%s\n" % body)
-            err = os.path.join(self.tmp, "err")
-            r = self.lib('strace_futex 1 1 "$TMPD/out" "$TMPD/err"', STRACE=stub, TMPD=self.tmp)
-            self.assertEqual(r.returncode, rc, "%s: %s" % (body, r.stderr))
-            if rc:
-                with open(err) as f:
-                    self.assertIn("strace_futex: %s exited %d before 1 s" % (stub, int(body[5:])), f.read())
+        for code in (0, 1):
+            self.script(stub, "#!/bin/sh\nexit %d\n" % code)
+            got, err = self.strace_futex()
+            self.assertEqual(got, 1, err)
+            self.assertIn("strace_futex: %s exited %d before 1 s" % (stub, code), err)
+
+    def test_strace_futex_needs_a_positive_sec(self):
+        # SEC=0 sent the SIGINT at once and gave success; "abc" stopped the caller under set -u.
+        self.stub()
+        for sec in ("0", "abc", "", "-1"):
+            got, err = self.strace_futex(sec, STUB_MODE="0")
+            self.assertEqual(got, 1, "SEC=%r: %s" % (sec, err))
+            self.assertIn("SEC is a positive integer", err)
 
     def test_strace_futex_kills_a_strace_that_ignores_int(self):
         # "timeout -s INT" without -k waited for such a strace to end by itself, and then gave 124.
-        stub = self.script(os.path.join(self.tmp, "strace"), "#!/bin/sh\ntrap '' INT\nexec sleep 20\n")
+        self.script(os.path.join(self.tmp, "strace"), "#!/bin/sh\ntrap '' INT\nexec sleep 20\n")
         t0 = time.monotonic()
-        r = self.lib('strace_futex 1 1 "$TMPD/out" "$TMPD/err"', STRACE=stub, TMPD=self.tmp)
+        got, err = self.strace_futex()
         took = time.monotonic() - t0
-        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(got, 1, err)
         self.assertLess(took, 1 + 6, "strace_futex took %.1f s" % took)
-        with open(os.path.join(self.tmp, "err")) as f:
-            self.assertIn("did not stop within 5 s of SIGINT", f.read())
+        self.assertIn("did not stop within 5 s of SIGINT", err)
+
+    def test_strace_futex_dies_with_its_caller(self):
+        # The strace outlived a caller that got SIGTERM. The caller's traps must still run.
+        self.stub()
+        pidfile = os.path.join(self.tmp, "stub.pid")
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            if os.path.exists(pidfile):
+                os.remove(pidfile)
+            env = dict(self.env, LIB=LIB, STRACE=os.path.join(self.tmp, "strace"), TMPD=self.tmp,
+                       STUB_PIDFILE=pidfile)
+            log = os.path.join(self.tmp, "caller.log")
+            with open(log, "w") as f:   # a file, not a pipe: an orphan strace would hold a pipe open
+                p = subprocess.Popen(["bash", "-c", '. "$LIB"\ntrap "echo caller-exit" EXIT\n'
+                                      'strace_futex 1 20 "$TMPD/out" "$TMPD/err"\necho returned'],
+                                     stdout=f, env=env, stdin=subprocess.DEVNULL)
+            for _ in range(100):
+                if os.path.exists(pidfile) and os.path.getsize(pidfile):
+                    break
+                time.sleep(0.05)
+            with open(pidfile) as f:
+                stub = int(f.read())
+            self.addCleanup(lambda s=stub: os.path.exists("/proc/%d" % s) and os.kill(s, signal.SIGKILL))
+            p.send_signal(sig)
+            p.wait(timeout=10)
+            with open(log) as f:
+                out = f.read()
+            gone = False
+            for _ in range(40):
+                if not RunStageTest.alive(stub):
+                    gone = True
+                    break
+                time.sleep(0.05)
+            self.assertTrue(gone, "%s: the strace %d outlived its caller" % (sig.name, stub))
+            self.assertEqual(p.returncode, -sig, "%s: %r" % (sig.name, out))
+            self.assertIn("caller-exit", out, sig.name)
+            self.assertNotIn("returned", out, sig.name)
+
+    def test_strace_futex_gives_back_the_traps_of_the_caller(self):
+        self.stub()
+        r = self.lib('trap "echo mine" TERM\nstrace_futex 1 1 "$TMPD/out" "$TMPD/err"; echo "rc=$?"\ntrap -p TERM EXIT',
+                     STRACE=os.path.join(self.tmp, "strace"), TMPD=self.tmp, STUB_MODE="0")
+        self.assertEqual(r.stdout, "rc=0\ntrap -- 'echo mine' SIGTERM\n", r.stderr)
 
     TARGET = """
 import ctypes, os, sys, threading, time
