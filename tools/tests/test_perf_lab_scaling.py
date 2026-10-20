@@ -1181,6 +1181,17 @@ class RunStageTest(Base):
                 self.assertIn("letters, digits", r.stderr, "%s %s=%r: %s" % (stage, knob, value, r.stdout))
                 self.assertFalse(os.path.exists(log), "%s %s=%r started a container" % (stage, knob, value))
 
+    def test_profile_refuses_a_variant_that_is_a_path(self):
+        # run.sh profile passed V and WORKLOADS to the container unchecked.
+        log = os.path.join(self.tmp, "docker.log")
+        for knob, value in (("V", "../trees"), ("WORKLOADS", "capp a/b"), ("V", "*")):
+            env = dict(self.env, DOCKER_LOG=log, DOCKER_RC="0", **{knob: value})
+            r = subprocess.run(["sh", os.path.join(KIT, "run.sh"), "profile", "p1"], capture_output=True, text=True,
+                               env=env, timeout=60, stdin=subprocess.DEVNULL)
+            self.assertNotEqual(r.returncode, 0, "%s=%r" % (knob, value))
+            self.assertIn("letters, digits", r.stderr, "%s=%r: %s" % (knob, value, r.stdout))
+            self.assertFalse(os.path.exists(log), "%s=%r started a container" % (knob, value))
+
     def test_usage(self):
         r = self.run_sh()
         self.assertEqual(r.returncode, 2)

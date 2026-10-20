@@ -262,6 +262,9 @@ stage_locks() {
 }
 
 stage_profile() {
+    # V is one tree name: profile.sh runs $TREES/$V/build/sbin/unitd
+    check_name variant "${V:-master}"
+    check_names "" "${WORKLOADS:-capp static}"
     start "${1:?usage: run.sh profile TAG}" profile.sh \
         "N=${N:-}" "V=${V:-master}" "WORKLOADS=${WORKLOADS:-capp static}" "PERF_SEC=${PERF_SEC:-20}" \
         "C2C_G=${C2C_G:-0}" "LOAD_SEC=${LOAD_SEC:-}" "WARM=${WARM:-3}" "CONNS=${CONNS:-128}" \
