@@ -702,6 +702,19 @@ class LocksTest(Base):
         got = {r[5]: (int(r[7]), int(r[8])) for r in rows}
         self.assertEqual(got, {"router": (300, 3), "app": (30, 0)})
 
+    def test_a_cell_without_the_first_snapshot_has_no_counts(self):
+        # Only b/ has files: b minus nothing holds the start-up and the warm-up, with no mark.
+        d = os.path.join(self.tmp, "only-b")
+        self.shim(os.path.join(d, "b"), 10, 65534, [(0x401000, 250, 4)])
+        os.makedirs(os.path.join(d, "a", "x"))
+        rows = module("locks").diff(d, "v", "capp", "1", "1", "100")
+        self.assertEqual([r[7:] for r in rows], [["NA", "NA", "NA"]])
+        tsv = os.path.join(self.tmp, "locks.tsv")
+        with open(tsv, "w") as f:
+            f.write("variant\tworkload\tn\trun\tok\trole\tpid\tcalls\tcontended\twait_ns\n")
+            f.write("\t".join(rows[0]) + "\n")
+        self.assertEqual(module("locks").summary(tsv)[1], "capp 1 v 1 gone NO COUNTS")
+
     def test_summary_is_per_request(self):
         L = module("locks")
         tsv = os.path.join(self.tmp, "locks.tsv")

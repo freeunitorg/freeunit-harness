@@ -100,6 +100,11 @@ def diff(d, v, w, n, r, ok):
     roles = load_roles(d + "/b")
     out = []
     for pid, (c, ct, wt) in sorted(b.items(), key=lambda kv: int(kv[0])):
+        if not a:   # no first snapshot: b alone holds the start-up and the warm-up
+            out.append([v, w, n, r, ok, role(roles.get(pid, "")), pid, "NA", "NA", "NA"])
+            continue
+        # A pid with no file in a was born less than a second before a, or after it
+        # (the shim writes every second from the start): its count starts at 0.
         c0, ct0, wt0 = a.get(pid, (0, 0, 0))
         out.append([v, w, n, r, ok, role(roles.get(pid, "")), pid, str(c - c0), str(ct - ct0), str(wt - wt0)])
     if not out:   # no snapshot: the cell still gets a row, so summary sees it
