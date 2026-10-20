@@ -106,7 +106,9 @@ if [ "${LOCKS:-0}" = 1 ]; then
                 ok=NA
                 echo "  locks $v $w n=$n run $r: LOAD FAILED (no oha result)"
             fi
-            python3 "$HERE/locks.py" diff "$SD" "$v" "$w" "$n" "$r" "$ok" >> "$LT"
+            # Every cell gets a row, with or without snapshots: a lost row would hide a failed cell.
+            python3 "$HERE/locks.py" diff "$SD" "$v" "$w" "$n" "$r" "$ok" >> "$LT" \
+                || printf '%s\t%s\t%s\t%s\t%s\tnone\t-\tNA\tNA\tNA\n' "$v" "$w" "$n" "$r" "$ok" >> "$LT"
           done
         done
       done

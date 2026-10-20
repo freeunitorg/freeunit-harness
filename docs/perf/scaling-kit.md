@@ -49,7 +49,8 @@ appears, and exits 3.
   never zeros. analyze.py leaves a run with `NA` or 0 rps out of the medians, marks the cell `NO LOAD k/n`, gives
   its ratios the verdict `NO LOAD`, and exits 1. sweep.sh then keeps the tables as `summary.txt.failed` and writes
   `FAILED`; it writes `summary.txt` and `DONE` only on success. `run.sh watch` waits for `DONE` and exits 5 on
-  `FAILED`. A locks run does the same with `locks-summary.txt`.
+  `FAILED`. A locks run does the same with `locks-summary.txt`. Each locks cell gets a row in `locks.tsv` even
+  when the shim wrote no file: role `none` and calls `NA`. Its summary line says `NO LOAD` or `NO COUNTS`.
 - **Lock counts.** `LOCKS=1` preloads `mutexshim.so`. For each run the kit copies the shim files after the warm-up
   and after the measured window, each after 2.5 s idle, each copy twice 0.3 s apart. Calls per request are
   (second snapshot minus first) / oha requests of the window. The shim slows every lock call, so a locks run

@@ -102,7 +102,14 @@ def diff(d, v, w, n, r, ok):
     for pid, (c, ct, wt) in sorted(b.items(), key=lambda kv: int(kv[0])):
         c0, ct0, wt0 = a.get(pid, (0, 0, 0))
         out.append([v, w, n, r, ok, role(roles.get(pid, "")), pid, str(c - c0), str(ct - ct0), str(wt - wt0)])
+    if not out:   # no snapshot: the cell still gets a row, so summary sees it
+        out.append(cell_row(v, w, n, r, ok))
     return out
+
+
+def cell_row(v, w, n, r, ok):
+    """The row of a cell without counts: role "none", calls NA. sweep.sh writes the same row when diff fails."""
+    return [v, w, n, r, ok, "none", "-", "NA", "NA", "NA"]
 
 
 def summary(path):
@@ -112,15 +119,20 @@ def summary(path):
         for line in f:
             x = dict(zip(head, line.rstrip("\n").split("\t")))
             k = (x["workload"], int(x["n"]), x["variant"], x["run"], x["role"])
-            agg[k][0] += int(x["calls"]); agg[k][1] += int(x["contended"])
+            if x["calls"].isdigit() and agg[k][0] is not None:
+                agg[k][0] += int(x["calls"]); agg[k][1] += int(x["contended"])
+            else:   # "NA": the shim wrote no snapshot in this cell
+                agg[k][0] = None
             agg[k][2] = int(x["ok"]) if x["ok"].isdigit() else 0   # "NA": the load failed
     lines = ["workload n variant run role calls/req contended/req"]
     for k in sorted(agg):
         c, ct, ok = agg[k]
-        if ok:
-            lines.append(f"{k[0]} {k[1]} {k[2]} {k[3]} {k[4]} {c / ok:.4f} {ct / ok:.5f}")
-        else:   # no request in the window: no count per request
+        if not ok:   # no request in the window: no count per request
             lines.append(f"{k[0]} {k[1]} {k[2]} {k[3]} {k[4]} NO LOAD")
+        elif c is None:
+            lines.append(f"{k[0]} {k[1]} {k[2]} {k[3]} {k[4]} NO COUNTS")
+        else:
+            lines.append(f"{k[0]} {k[1]} {k[2]} {k[3]} {k[4]} {c / ok:.4f} {ct / ok:.5f}")
     return lines
 
 
@@ -182,8 +194,9 @@ def main(argv):
     elif len(argv) == 3 and argv[1] == "summary":
         lines = summary(argv[2])
         print("\n".join(lines))
-        if any(x.endswith(" NO LOAD") for x in lines):
-            sys.exit("locks.py: a run had no load (ok NA or 0); its counts per request are not printed")
+        if any(x.endswith((" NO LOAD", " NO COUNTS")) for x in lines):
+            sys.exit("locks.py: a run had no load (ok NA or 0) or no shim snapshot; "
+                     "its counts per request are not printed")
     elif len(argv) in (3, 5) and argv[1] == "sites":
         trees = argv[4] if len(argv) == 5 and argv[3] == "--trees" else None
         print("\n".join(sites(argv[2], trees)))

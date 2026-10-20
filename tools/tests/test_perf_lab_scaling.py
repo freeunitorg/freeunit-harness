@@ -532,6 +532,24 @@ class LocksTest(Base):
         self.assertNotIn("Traceback", r.stderr)
         self.assertEqual(r.stdout.split("\n")[1:3], ["capp 1 v 1 router NO LOAD", "capp 1 v 2 router NO LOAD"])
 
+    def test_a_cell_without_snapshots_keeps_its_row(self):
+        # A failed load with no shim file gave no row: summary then exited 0 and DONE followed.
+        script = os.path.join(KIT, "locks.py")
+        tsv = os.path.join(self.tmp, "locks.tsv")
+        with open(tsv, "w") as f:
+            f.write("variant\tworkload\tn\trun\tok\trole\tpid\tcalls\tcontended\twait_ns\n")
+        for run, ok in (("1", "NA"), ("2", "100")):
+            d = os.path.join(self.tmp, "cell" + run)
+            os.makedirs(d)
+            with open(tsv, "a") as f:
+                r = subprocess.run([sys.executable, script, "diff", d, "v", "capp", "1", run, ok], stdout=f,
+                                   timeout=60)
+            self.assertEqual(r.returncode, 0)
+        r = subprocess.run([sys.executable, script, "summary", tsv], capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.stdout.split("\n")[1:3], ["capp 1 v 1 none NO LOAD", "capp 1 v 2 none NO COUNTS"])
+
 
 class ShimSiteTest(Base):
     """mutexshim.so and locks.py sites name the function that locks.
