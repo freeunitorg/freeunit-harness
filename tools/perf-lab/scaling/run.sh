@@ -25,7 +25,7 @@
 #
 # The box, its paths, the image and oha come from run/lab.env (tools/lib/env.sh):
 # PERF_HOST, SSH_USER, REMOTE_WORKDIR, CLAIM_DIR, LAB_IMAGE, OHA, UNIT_REPO.
-# PERF_KERNEL=1 adds --cap-add SYSLOG and -v /sys/kernel/tracing:/sys/kernel/tracing to
+# PERF_KERNEL=1 adds --cap-add SYSLOG and -v /sys/kernel/tracing:/sys/kernel/tracing:ro to
 # the profile container: kernel symbols and the futex tracepoint, from a rootful docker only.
 # NATIVE=1 builds and runs on the box without docker (a box without docker, or a
 # run as a normal user). The kit pins its own cpus from the box topology;
@@ -222,7 +222,7 @@ start() {
         if [ "$script" = profile.sh ]; then
             caps="--cap-add PERFMON --cap-add SYS_PTRACE"
             # PERF_KERNEL=1: kernel symbols at kptr_restrict 1, and the futex tracepoint
-            [ "${PERF_KERNEL:-0}" = 1 ] && caps="$caps --cap-add SYSLOG -v /sys/kernel/tracing:/sys/kernel/tracing"
+            [ "${PERF_KERNEL:-0}" = 1 ] && caps="$caps --cap-add SYSLOG -v /sys/kernel/tracing:/sys/kernel/tracing:ro"
         fi
         rsh "docker run -d --rm --name $(q "scaling-$tag") $caps \
             -v $(q "$RD/trees"):/t:ro -v $(q "$RD/scripts"):/lab:ro -v $(q "$out"):/out \

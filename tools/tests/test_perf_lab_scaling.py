@@ -916,7 +916,8 @@ class RunStageTest(Base):
         # kernel symbols and the futex tracepoint only on request
         prof = self.docker_run("profile", "p2", PERF_KERNEL="1")
         self.assertIn("--cap-add SYSLOG", prof)
-        self.assertIn("-v /sys/kernel/tracing:/sys/kernel/tracing", prof)
+        # read-only: perf reads the event id and format; the container must not write the host's tracefs
+        self.assertIn("-v /sys/kernel/tracing:/sys/kernel/tracing:ro ", prof)
 
     def unit_repo(self):
         repo = os.path.join(self.tmp, "unit-src")

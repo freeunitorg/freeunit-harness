@@ -128,7 +128,7 @@ appears, and exits 3.
   CAP_SYS_PTRACE in the target's user namespace, so in a container it works rootless too.
 - **The container of run.sh profile** gets `--cap-add PERFMON` (perf) and `--cap-add SYS_PTRACE` (the strace
   fallback). A sweep and a locks run get no capability. `PERF_KERNEL=1` also adds `--cap-add SYSLOG` (kernel
-  symbols at `kptr_restrict` 1) and `-v /sys/kernel/tracing:/sys/kernel/tracing` (the futex tracepoint). Both work
+  symbols at `kptr_restrict` 1) and `-v /sys/kernel/tracing:/sys/kernel/tracing:ro` (the futex tracepoint). Both work
   only with a rootful docker daemon, and the bind mount gives the container the host's tracefs, so they are an
   opt-in. `NATIVE=1` runs as the box user, with no capability.
 - **The lab boxes.** Another session probed two boxes read-only on 2026-10-19. These facts are reported, not
