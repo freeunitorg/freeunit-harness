@@ -184,6 +184,14 @@ class PreflightTest(FakeBox):
         out = self.run_pf(self.box(2, pmu=("cpu", "ibs_op", "ibs_op/format/swfilt")), "record c2c")
         self.assertIn("c2c=amd-user", out)
 
+    def test_a_reason_in_two_parts_is_printed_whole(self):
+        # _pf printed only its third argument: the strace half of the futex reason was lost.
+        out = self.run_pf(self.box(1, scope=3), "futex cpus")
+        self.assertIn("rc=1", out)
+        self.assertIn("strace -p needs /nonexistent/strace and ptrace_scope 0, or CAP_SYS_PTRACE at ptrace_scope 1 or 2)",
+                      out)
+        self.assertIn("CAP_PERFMON in the initial user namespace)", out)
+
     def test_amd_user_space_c2c_needs_swfilt(self):
         # ibs_op without the swfilt format bit (before kernel 6.14): "ibs_op/swfilt=1/u" does not parse.
         out = self.run_pf(self.box(2, pmu=("cpu", "ibs_op")), "record c2c")

@@ -330,9 +330,11 @@ perf_facts() {
     CAP_PTRACE=$(cap_bit 19)   # Yama accepts it in the user namespace of the target
 }
 
-_pf() {  # ok|unavailable metric text: one report line; a requested metric that is unavailable fails
-    echo "$2: $1${3:+ ($3)}"
-    if [ "$1" = unavailable ] && [[ $PF_WANT == *" $2 "* ]]; then PF_BAD=$((PF_BAD + 1)); fi
+_pf() {  # ok|unavailable metric text...: one report line; a requested metric that is unavailable fails
+    local st=$1 m=$2
+    shift 2
+    echo "$m: $st${1:+ ($*)}"
+    if [ "$st" = unavailable ] && [[ $PF_WANT == *" $m "* ]]; then PF_BAD=$((PF_BAD + 1)); fi
 }
 
 # perf_preflight METRIC...: METRIC is record, futex, c2c, c2cg or cpus (system-wide
