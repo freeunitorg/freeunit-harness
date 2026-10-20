@@ -137,10 +137,10 @@ class FakeBox(Base):
     SYS_ADMIN = 1 << 21
 
     def box(self, paranoid, pmu=("cpu", "cpu/events/mem-loads"), kptr=1, scope=1, cap=0, uid_map=INIT,
-            tracefs=False):
+            tracefs=False, release="6.8.0-90-generic"):
         root = os.path.join(self.tmp, "box%d" % len(os.listdir(self.tmp)))
         files = {"sys/kernel/perf_event_paranoid": str(paranoid), "sys/kernel/kptr_restrict": str(kptr),
-                 "sys/kernel/yama/ptrace_scope": str(scope),
+                 "sys/kernel/yama/ptrace_scope": str(scope), "sys/kernel/osrelease": release,
                  "self/status": "Name:\tbash\nCapEff:\t%016x\n" % cap, "self/uid_map": uid_map,
                  "ev/software/type": "1", "ev/tracepoint/type": "2"}
         for d in pmu:
@@ -218,7 +218,7 @@ class PreflightTest(FakeBox):
         out = self.run_pf(self.box(4, cap=self.PERFMON, uid_map=self.ROOTLESS), "record")
         self.assertIn("rc=1 level=none", out)
         # rootful with CAP_PERFMON: allowed, with a note on older Ubuntu kernels
-        out = self.run_pf(self.box(4, cap=self.PERFMON), "record c2c cpus", KERNEL_RELEASE="6.8.0-136-generic")
+        out = self.run_pf(self.box(4, cap=self.PERFMON, release="6.8.0-136-generic"), "record c2c cpus")
         self.assertIn("rc=0 level=full user=0", out)
         self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Enough on this kernel, 6.8.0-136-generic"
                       " (measured on pro4s-2).", out)
@@ -228,10 +228,14 @@ class PreflightTest(FakeBox):
 
     def test_level_4_note_names_only_the_measured_kernel(self):
         # The note said "Enough on Ubuntu 6.8.0-136 (measured)" on every kernel.
-        out = self.run_pf(self.box(4, cap=self.PERFMON), "record", KERNEL_RELEASE="6.8.0-90-generic")
+        out = self.run_pf(self.box(4, cap=self.PERFMON), "record")
         self.assertIn("rc=0 level=full", out)
         self.assertIn("CAP_PERFMON only. Not measured on this kernel, 6.8.0-90-generic.", out)
         self.assertNotIn("measured on pro4s-2", out)
+        # only the exact release, and no environment variable can claim it
+        out = self.run_pf(self.box(4, cap=self.PERFMON, release="6.8.0-136-made-up"), "record",
+                          KERNEL_RELEASE="6.8.0-136-generic")
+        self.assertIn("Not measured on this kernel, 6.8.0-136-made-up.", out)
 
     def test_no_pmu(self):
         out = self.run_pf(self.box(1, pmu=()), "record c2c")
