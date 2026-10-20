@@ -265,7 +265,9 @@ class ProfilePreflightTest(FakeBox):
         if os.path.exists(calls):
             os.remove(calls)
         with open(os.path.join(stubs, "perf"), "w") as f:
-            f.write('#!/bin/sh\necho "$*" >> "%s"\necho "1.00,msec,task-clock" >&2\n' % calls)
+            f.write('#!/bin/sh\necho "$*" >> "%s"\n'
+                    'case " ${PERF_FAIL:-} " in *" $1 "*) echo "perf $1: failed" >&2; exit 1 ;; esac\n'
+                    'echo "1.00,msec,task-clock" >&2\n' % calls)
         os.chmod(os.path.join(stubs, "perf"), 0o755)
         out = os.path.join(self.tmp, tag)
         env = dict(self.env, **box)
@@ -291,10 +293,26 @@ class ProfilePreflightTest(FakeBox):
         self.assertIn("probe: not needed", r.stdout)
         r, out, perf = self.profile(box, tag="c2c", PROFILE="c2c", PREFLIGHT_ONLY="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(perf, "stat -x, -e task-clock -- true\n")
+        self.assertEqual(perf, "stat -x, -e task-clock -- true\nc2c record -o %s/probe-c2c.data -- true\n" % out)
         r, out, perf = self.profile(self.box(-1, scope=0, tracefs=True), tag="tp", PROFILE="futex", PREFLIGHT_ONLY="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(perf, "stat -x, -e task-clock,syscalls:sys_enter_futex -- true\n")
+
+    def test_c2c_is_probed(self):
+        # PROFILE=c2c probed only task-clock: "c2c: ok" came from the PMU files alone.
+        box = self.box(2)
+        r, out, perf = self.profile(box, tag="c2c-user", PROFILE="c2c", PREFLIGHT_ONLY="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("c2c record --all-user -o %s/probe-c2c.data -- true" % out, perf)
+        r, out, perf = self.profile(box, tag="c2c-fail", PROFILE="c2c", PREFLIGHT_ONLY="1", PERF_FAIL="c2c")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("c2c probe", r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(out, "FAILED")))
+        self.assertFalse(os.path.exists(os.path.join(out, "DONE")))
+        # the AMD user space form
+        r, out, perf = self.profile(self.box(2, pmu=("cpu", "ibs_op", "ibs_op/format/swfilt")), tag="c2c-amd",
+                                    PROFILE="c2c", PREFLIGHT_ONLY="1")
+        self.assertIn("record -W -d --sample-cpu -e ibs_op/swfilt=1/u -o %s/probe-c2c.data -- true" % out, perf)
 
     def test_unknown_scope_is_refused(self):
         # The check called die before lib.sh defined it: "die: command not found", and the run went on.
@@ -320,7 +338,8 @@ class ProfilePreflightTest(FakeBox):
         r, out, perf = self.profile(self.box(1, scope=0), PROFILE="record\tfutex\n c2c ", PREFLIGHT_ONLY="1",
                                     STRACE="sh")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(perf, "stat -x, -e task-clock,cycles -- true\n")
+        self.assertEqual(perf, "stat -x, -e task-clock,cycles -- true\nc2c record -o %s/probe-c2c.data -- true\n"
+                         % out)
         with open(os.path.join(out, "meta.txt")) as f:
             self.assertIn("PROFILE='record futex c2c'", f.read())
 
@@ -469,21 +488,27 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
                 return f.read()
         return r, read
 
+    def assert_failed_run(self, r, read):
+        """A requested step failed: summary.txt is there, the run ends FAILED with exit 1, no DONE."""
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIsNone(read("DONE"), "DONE after a failed step")
+        self.assertIn("see failures.txt", read("FAILED") or "")
+        self.assertIn("failures: ", read("summary.txt") or "")
+
     def test_strace_that_cannot_attach_is_a_failure(self):
         # "bash -c 'timeout ... strace ...; true'" hid every strace failure.
         strace = self.script(os.path.join(self.tmp, "strace"),
                              '#!/bin/sh\necho "strace: attach: ptrace(PTRACE_SEIZE): Operation not permitted" >&2\n'
                              'exit 1\n')
         r, read = self.run_kit(self.box(1, scope=0), PROFILE="futex", STRACE=strace)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIsNotNone(read("DONE"))
+        self.assert_failed_run(r, read)
         self.assertIn("FAILED: strace futex capp", read("failures.txt") or "")
         self.assertIn("Operation not permitted", read("futex-capp.err") or "")
 
     def test_failed_record_and_load_give_no_result(self):
         # A failed perf record and report gave "0.00% of 0.00% sampled", and a failed load was not counted.
         r, read = self.run_kit(self.box(1, scope=0), PROFILE="record", PERF_FAIL="record report", OHA="true")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assert_failed_run(r, read)
         summary, fails = read("summary.txt") or "", read("failures.txt") or ""
         self.assertNotIn("% of ", summary)
         self.assertIn("capp: lock share: FAILED", summary)
@@ -495,6 +520,8 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
         r, read = self.run_kit(self.box(1, scope=0), PROFILE="record")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(read("failures.txt"), "")
+        self.assertIsNotNone(read("DONE"))
+        self.assertIsNone(read("FAILED"))
         self.assertIn("capp: lock-related symbols: 50.00% of 100.00% sampled; load 1000 0 100.0", read("summary.txt"))
 
     # A strace stub: SIGINT (default disposition restored, a background job inherits it ignored)

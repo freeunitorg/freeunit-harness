@@ -73,8 +73,11 @@ appears, and exits 3.
   `unavailable` with the sysctl or capability that is missing. When a requested step (`PROFILE`, default
   `record futex c2c`) cannot work, it writes `FAILED` and exits 1 before unitd starts. An unknown word in
   `PROFILE` also stops it. Then `perf stat -x, -e <events> -- true` must count: task-clock, `PERF_EVENT` for
-  `record`, and the futex tracepoint when the futex step uses it. A profile whose steps run no perf (futex with
-  strace) skips the probe. `PREFLIGHT_ONLY=1 run.sh profile TAG` stops there.
+  `record`, and the futex tracepoint when the futex step uses it. With c2c, `perf c2c record -- true` in the form
+  that the preflight chose must work too: perf stat cannot count the memory sampling events. A profile whose
+  steps run no perf (futex with strace) skips the probe. `PREFLIGHT_ONLY=1 run.sh profile TAG` stops there.
+  A step can still fail during the run. It goes to `failures.txt`, and so does a load without an oha result.
+  Then profile.sh writes `summary.txt` and `FAILED`, exits 1 and writes no `DONE`; `run.sh watch` exits 5.
   Without a hardware PMU, `PROFILE="record futex" PERF_EVENT=cpu-clock` samples the clock; the kit never falls back
   to it on its own.
 - **Own processes.** Every kill is limited to processes whose exe is under the kit's tree directory.
@@ -126,7 +129,7 @@ appears, and exits 3.
     the Ubuntu 6.8.0-136 kernel of pro4s-2 (measured, see "The lab boxes"). Another session read in the Ubuntu
     kernel changelog that CAP_PERFMON is accepted from `linux (6.8.0-98.98) noble`, and that an older noble
     kernel needs CAP_SYS_ADMIN; that is read, not tested here. With CAP_PERFMON only, the preflight prints a
-    note, and the probe (`perf stat` of the events of the requested steps) decides.
+    note, and the probe (`perf stat` of the events of the requested steps, and the c2c record probe) decides.
 - **Per-process mode without a capability** (`NATIVE=1`, or a rootless container) gives user and kernel samples
   where `perf_event_paranoid` is 1 or lower, as on the maintainer laptop (1), and user space only at 2. On
   pro4s-2 and pro4s-4 (4) the host user fails every perf call; there only the rootful profile container works.

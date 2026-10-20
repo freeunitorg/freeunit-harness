@@ -23,7 +23,8 @@
 # exits 1 before it starts unitd: no step produces an empty or zero result.
 # Then a probe: "perf stat -x, -e <events> -- true" must count. The events are
 # task-clock, PERF_EVENT with record, and syscalls:sys_enter_futex when the futex
-# step uses the tracepoint. A profile whose steps run no perf skips the probe.
+# step uses the tracepoint. With c2c, "perf c2c record -- true" in the form of the
+# preflight must work too. A profile whose steps run no perf skips the probe.
 #
 # One unitd per workload under one oha load of LOAD_SEC seconds. Every record
 # runs inside the load; the reports run after it:
@@ -38,7 +39,8 @@
 #      each hot line.
 # A step that passed the preflight may still fail; failures go to failures.txt,
 # and so does a load without an oha result. A failed record gives no lock share.
-# summary.txt is written last, then DONE.
+# summary.txt is written last. Then DONE when failures.txt is empty; otherwise
+# FAILED and exit 1. There is no best-effort mode.
 #
 # Lock counts are a separate stage (run.sh locks): the shim slows every lock call.
 set -u
@@ -97,6 +99,17 @@ else
         || grep -q -e '<not supported>' -e '<not counted>' "$OUT/probe.txt"; then
         echo "probe: perf stat -e $ev failed; see probe.txt" | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
         own_out; die "perf does not count here; see probe.txt"
+    fi
+    # c2c samples memory events that perf stat cannot count (IBS samples only), so
+    # the c2c probe is the record itself, in the form of the preflight, on "true".
+    if has c2c; then
+        PERF_T=(); [ "$PERF_SCOPE" = cpus ] && PERF_T=(-a -C "$(cpus_server "$N")")
+        if ! c2c_record "$OUT/probe-c2c.data" "$OUT/probe-c2c.err" -- true; then
+            echo "probe: perf c2c record ($C2C_FORM) failed; see probe-c2c.err" \
+                | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
+            own_out; die "the c2c probe failed; see probe-c2c.err"
+        fi
+        rm -f "$OUT/probe-c2c.data"
     fi
 fi
 if [ "$PREFLIGHT_ONLY" = 1 ]; then
@@ -191,4 +204,10 @@ chmod -R a+r "$OUT" 2>/dev/null
     cat "$FAIL"
 } > "$OUT/summary.txt"
 cat "$OUT/summary.txt"
+# A failed requested step fails the run: FAILED, exit 1, and no DONE, so
+# run.sh watch exits 5. summary.txt and failures.txt stay for the reading.
+if [ -s "$FAIL" ]; then
+    echo "profile: $(wc -l < "$FAIL") failed step(s); see failures.txt" | tee "$OUT/FAILED" >&2
+    exit 1
+fi
 : > "$OUT/DONE"
