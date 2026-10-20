@@ -836,8 +836,9 @@ class LocksTest(Base):
         self.shim(os.path.join(d, "b"), 10, 65534, [(0x401000, 250, 4), (0x402000, 150, 0)])
         # the second copy of b was taken during a rewrite: one line is missing
         self.shim(os.path.join(d, "b", "x"), 10, 65534, [(0x401000, 250, 4)])
-        # an app process whose first file appears only in b
-        self.shim(os.path.join(d, "b"), 11, 65534, [(0x403000, 30, 0)])
+        # an app process: 10 calls at a, 40 at b
+        self.shim(os.path.join(d, "a"), 11, 65534, [(0x403000, 10, 0)])
+        self.shim(os.path.join(d, "b"), 11, 65534, [(0x403000, 40, 0)])
         return d
 
     def test_counts_are_the_window_only(self):
@@ -857,6 +858,34 @@ class LocksTest(Base):
             f.write("variant\tworkload\tn\trun\tok\trole\tpid\tcalls\tcontended\twait_ns\n")
             f.write("\t".join(rows[0]) + "\n")
         self.assertEqual(module("locks").summary(tsv)[1], "capp 1 v 1 gone NO COUNTS")
+
+    def test_a_pid_without_a_first_snapshot_has_no_counts(self):
+        # a={10: 100}, b={10: 150, 11: 250}: pid 11 got 250, though it may have counted 120 before a.
+        d = os.path.join(self.tmp, "new-pid")
+        self.shim(os.path.join(d, "a"), 10, 0, [(0x401000, 100, 2)])
+        self.shim(os.path.join(d, "b"), 10, 0, [(0x401000, 150, 3)])
+        self.shim(os.path.join(d, "b"), 11, 0, [(0x401000, 250, 4)])
+        rows = module("locks").diff(d, "v", "capp", "1", "1", "100")
+        self.assertEqual([r[6:] for r in rows], [["10", "50", "1", "1000"], ["11", "NA", "NA", "NA"]])
+
+    def test_sites_without_a_first_snapshot_has_no_counts(self):
+        # sites counted b from 0 when a was missing, while diff said NA.
+        L = module("locks")
+        d = os.path.join(self.tmp, "only-b-sites")
+        self.shim(os.path.join(d, "b"), 10, 0, [(0x401000, 250, 4)])
+        os.makedirs(os.path.join(d, "a"))
+        with open(os.path.join(d, "oha.json"), "w") as f:
+            f.write('{"statusCodeDistribution": {"200": 100}}')
+        lines = L.sites(d)
+        self.assertEqual(lines[:2], ["ok 100", "role    calls/req contended/req  site"])
+        self.assertEqual(lines[2:], ["gone    NO COUNTS (pid 10: no first snapshot)"])
+        # a pid missing in a, next to one that is there
+        self.shim(os.path.join(d, "a"), 12, 0, [(0x401000, 100, 0)])
+        self.shim(os.path.join(d, "b"), 12, 0, [(0x401000, 300, 0)])
+        lines = L.sites(d)
+        self.assertIn("gone    NO COUNTS (pid 10: no first snapshot)", lines)
+        self.assertNotIn("2.500", "\n".join(lines))
+        self.assertTrue(any(ln.startswith("gone        2.000") for ln in lines), lines)
 
     def test_summary_is_per_request(self):
         L = module("locks")
@@ -942,6 +971,8 @@ int main(void) { wrapper_caller(); outer(); sleep(2); return 0; }
         files = os.listdir(os.path.join(d, "b"))
         self.assertTrue(files, "the shim wrote no file")
         pid = files[0].split("-")[1]
+        # snapshot a: the file of the pid before any lock call (the shim writes one with no line)
+        open(os.path.join(d, "a", files[0]), "w").close()
         with open(os.path.join(d, "b", "roles.txt"), "w") as f:
             f.write(pid + " " + prog + "\n")
         with open(os.path.join(d, "oha.json"), "w") as f:

@@ -51,6 +51,8 @@ appears, and exits 3.
   `FAILED`; it writes `summary.txt` and `DONE` only on success. `run.sh watch` waits for `DONE` and exits 5 on
   `FAILED`. A locks run does the same with `locks-summary.txt`. Each locks cell gets a row in `locks.tsv` even
   when the shim wrote no file: role `none` and calls `NA`. Its summary line says `NO LOAD` or `NO COUNTS`.
+  A pid with no file in the first snapshot also gets `NA`, in `locks.tsv` and in `sites-*.txt`: its second
+  count may hold calls from before the window.
 - **Lock counts.** `LOCKS=1` preloads `mutexshim.so`. For each run the kit copies the shim files after the warm-up
   and after the measured window, each after 2.5 s idle, each copy twice 0.3 s apart. Calls per request are
   (second snapshot minus first) / oha requests of the window. The shim slows every lock call, so a locks run

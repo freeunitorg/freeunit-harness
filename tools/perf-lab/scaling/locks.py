@@ -54,6 +54,13 @@ def load_counts(d):
     return tot
 
 
+def first_snapshot(d):
+    """The pids with a file in snapshot a. A pid without one has no count for the window.
+    Its b count may hold calls from before a: the shim sleeps a second before its first
+    write, and writes the counts since the start of the process. So it is NA, never b - 0."""
+    return set(load_counts(d + "/a"))
+
+
 def load_sites(d):
     """{(pid, site, base, object, caller, caller_base, caller_object): (calls, contended)},
     the largest copy of each key. A file of an older shim has no caller columns: caller 0."""
@@ -100,12 +107,10 @@ def diff(d, v, w, n, r, ok):
     roles = load_roles(d + "/b")
     out = []
     for pid, (c, ct, wt) in sorted(b.items(), key=lambda kv: int(kv[0])):
-        if not a:   # no first snapshot: b alone holds the start-up and the warm-up
+        if pid not in a:   # no first snapshot of this pid: see first_snapshot()
             out.append([v, w, n, r, ok, role(roles.get(pid, "")), pid, "NA", "NA", "NA"])
             continue
-        # A pid with no file in a was born less than a second before a, or after it
-        # (the shim writes every second from the start): its count starts at 0.
-        c0, ct0, wt0 = a.get(pid, (0, 0, 0))
+        c0, ct0, wt0 = a[pid]
         out.append([v, w, n, r, ok, role(roles.get(pid, "")), pid, str(c - c0), str(ct - ct0), str(wt - wt0)])
     if not out:   # no snapshot: the cell still gets a row, so summary sees it
         out.append(cell_row(v, w, n, r, ok))
@@ -165,6 +170,7 @@ def _sym(site, base, name):
 
 def sites(d, trees=None):
     a, b = load_sites(d + "/a"), load_sites(d + "/b")
+    first = first_snapshot(d)
     roles = load_roles(d + "/b")
     with open(os.path.join(d, "oha.json")) as f:
         ok = int(json.load(f)["statusCodeDistribution"]["200"])
@@ -176,9 +182,13 @@ def sites(d, trees=None):
         return s if s != "?" else "? %#x" % site
 
     agg = collections.defaultdict(lambda: [0, 0])
+    missing = {}
     for k, (c, ct) in b.items():
-        c0, ct0 = a.get(k, (0, 0))
         pid, site, base, obj, caller, cbase, cobj = k
+        if pid not in first:   # as diff: no first snapshot, no count
+            missing[pid] = role(roles.get(pid, ""))
+            continue
+        c0, ct0 = a.get(k, (0, 0))   # a site with no line in a had no call before a
         where = name(site, base, obj)
         if where.split(" ")[0] in WRAPPERS and caller:
             where, obj = name(caller, cbase, cobj), cobj
@@ -189,6 +199,8 @@ def sites(d, trees=None):
         if not ok or c / ok < 0.01:
             continue
         lines.append(f"{k[0]:7} {c / ok:9.3f} {ct / ok:13.4f}  {k[1]}  [{k[2]}]")
+    for pid in sorted(missing, key=int):
+        lines.append(f"{missing[pid]:7} NO COUNTS (pid {pid}: no first snapshot)")
     return lines
 
 
