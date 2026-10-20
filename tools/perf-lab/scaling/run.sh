@@ -232,7 +232,17 @@ start() {
     echo "started $script as $tag; log $out/run.log"
 }
 
+# check_names VARIANTS WORKLOADS: each word is a path component in sweep.sh,
+# which removes $OUT/shim/<variant>-<workload>-<n>-<run> with rm -rf.
+# set -f: a "*" must reach check_name as it is, not as the file names of the cwd.
+check_names() (
+    set -f
+    for v in $1; do check_name variant "$v"; done
+    for w in $2; do check_name workload "$w"; done
+)
+
 stage_sweep() {
+    check_names "${VARIANTS:-master}" "${WORKLOADS:-capp static}"
     start "${1:?usage: run.sh sweep TAG}" sweep.sh \
         "VARIANTS=${VARIANTS:-master}" "WORKLOADS=${WORKLOADS:-capp static}" "NS=${NS:-1 2 3}" \
         "RUNS=${RUNS:-5}" "DUR=${DUR:-30}" "WARM=${WARM:-3}" "CONNS=${CONNS:-128}" \
@@ -242,6 +252,7 @@ stage_sweep() {
 stage_locks() {
     shim=/lab/mutexshim.so
     [ "${NATIVE:-0}" = 1 ] && shim=$RD/scripts/mutexshim.so
+    check_names "${VARIANTS:-master}" "${WORKLOADS:-capp}"
     start "${1:?usage: run.sh locks TAG}" sweep.sh LOCKS=1 "SHIM=$shim" \
         "VARIANTS=${VARIANTS:-master}" "WORKLOADS=${WORKLOADS:-capp}" "NS=${NS:-1 2 3}" \
         "LRUNS=${LRUNS:-2}" "LDUR=${LDUR:-10}" "WARM=${WARM:-3}" "CONNS=${CONNS:-128}" \

@@ -18,6 +18,14 @@ export LC_ALL=C
 
 die() { echo "scaling: $*" >&2; exit 1; }
 
+# check_name WHAT VALUE: VALUE is one path component. sweep.sh builds paths from
+# each variant and workload and runs rm -rf on them. run.sh has the same check.
+check_name() {
+    case $2 in
+        ''|.|..|*[!A-Za-z0-9._-]*) die "$1 '$2': use letters, digits, '.', '_' and '-'; not '.' or '..'" ;;
+    esac
+}
+
 # Root (the lab container) drops the workers to nobody; a native run as a normal
 # user keeps its own user.
 USER_ARGS=""

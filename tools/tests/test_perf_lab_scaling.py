@@ -466,6 +466,31 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
                     self.assertIn("before the timeout", f.read())
 
 
+class SweepNameTest(Base):
+    """sweep.sh builds a path from each variant and workload and runs rm -rf on it."""
+
+    def test_a_variant_or_workload_that_is_a_path_is_refused(self):
+        shim = os.path.join(self.tmp, "mutexshim.so")
+        open(shim, "w").close()
+        out = os.path.join(self.tmp, "out")
+        os.makedirs(os.path.join(out, "shim"))   # as an earlier cell of the run leaves it
+        for variants, workloads, victim in (("../../victim", "capp", "victim-capp-1-1"),
+                                            ("master", "/../../../victim", "victim-1-1")):
+            keep = os.path.join(self.tmp, victim, "keep")
+            os.makedirs(os.path.dirname(keep), exist_ok=True)
+            open(keep, "w").close()
+            env = dict(self.env, OUT=out, SHIM=shim, OHA="true", LOCKS="1", VARIANTS=variants, WORKLOADS=workloads,
+                       NS="1", LRUNS="1", LDUR="1", WARM="1", R=os.path.join(self.tmp, "r"),
+                       WWW=os.path.join(self.tmp, "www"), TREES=os.path.join(self.tmp, "none"),
+                       SYSCPU=os.path.join(self.tmp, "cpu") if os.path.isdir(os.path.join(self.tmp, "cpu"))
+                       else self.topology(["0", "1"]))
+            r = subprocess.run(["bash", os.path.join(KIT, "sweep.sh")], capture_output=True, text=True, env=env,
+                               timeout=60, stdin=subprocess.DEVNULL)
+            self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue(os.path.exists(keep), "VARIANTS=%r WORKLOADS=%r removed %s" % (variants, workloads, keep))
+            self.assertIn("letters, digits", r.stderr)
+
+
 class ScopedKillTest(Base):
     def setUp(self):
         super().setUp()
@@ -953,6 +978,17 @@ class RunStageTest(Base):
             self.assertIn("letters, digits", r.stderr, stage + ": " + r.stdout + r.stderr)
         self.assertFalse(os.path.exists(os.path.join(rw, "trees", "STOP")), "stop wrote trees/STOP")
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "results", "trees")), "fetch made results/trees")
+
+    def test_sweep_and_locks_refuse_a_variant_that_is_a_path(self):
+        log = os.path.join(self.tmp, "docker.log")
+        for stage in ("sweep", "locks"):
+            for knob, value in (("VARIANTS", "master ../trees"), ("WORKLOADS", "capp a/b"), ("VARIANTS", "*")):
+                env = dict(self.env, DOCKER_LOG=log, DOCKER_RC="0", **{knob: value})
+                r = subprocess.run(["sh", os.path.join(KIT, "run.sh"), stage, "t1"], capture_output=True, text=True,
+                                   env=env, timeout=60, stdin=subprocess.DEVNULL)
+                self.assertNotEqual(r.returncode, 0, "%s %s=%r" % (stage, knob, value))
+                self.assertIn("letters, digits", r.stderr, "%s %s=%r: %s" % (stage, knob, value, r.stdout))
+                self.assertFalse(os.path.exists(log), "%s %s=%r started a container" % (stage, knob, value))
 
     def test_usage(self):
         r = self.run_sh()

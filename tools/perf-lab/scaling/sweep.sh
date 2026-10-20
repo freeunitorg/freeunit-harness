@@ -33,6 +33,9 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=tools/perf-lab/scaling/lib.sh
 . "$HERE/lib.sh"
 
+# set -f: a "*" must reach check_name as it is, not as the file names of the cwd
+(set -f; for v in $VARIANTS; do check_name variant "$v"; done; for w in $WORKLOADS; do check_name workload "$w"; done) \
+    || exit 1
 command -v "$OHA" >/dev/null || die "no oha ($OHA)"
 command -v taskset >/dev/null || die "no taskset"
 read_topology
