@@ -63,13 +63,16 @@ appears, and exits 3.
   user namespace. Per-process mode leaves out the time of other tasks on the server cpus, and kernel work done
   for the kit outside its own threads. At `perf_event_paranoid` 2 the kit records user space only:
   `perf record --all-user --user-callchains`, and `perf c2c record --all-user`, or on AMD
-  `perf record -W -d --sample-cpu -e ibs_op/swfilt=1/u` (kernel 6.14 or later). These user space forms come from
+  `perf record -W -d --sample-cpu -e ibs_op/swfilt=1/u` (kernel 6.14 or later; the preflight needs the file
+  `ibs_op/format/swfilt`). These user space forms come from
   a laptop test and the kernel source; they are unverified on the lab boxes.
 - **Preflight.** profile.sh first reads `perf_event_paranoid`, `kptr_restrict`, `ptrace_scope`, the PMU devices in
   `/sys/bus/event_source/devices` and its own capabilities, and writes `preflight.txt`: one line per step, `ok` or
   `unavailable` with the sysctl or capability that is missing. When a requested step (`PROFILE`, default
-  `record futex c2c`) cannot work, it writes `FAILED` and exits 1 before unitd starts. Then
-  `perf stat -e task-clock,PERF_EVENT -- true` must count. `PREFLIGHT_ONLY=1 run.sh profile TAG` stops there.
+  `record futex c2c`) cannot work, it writes `FAILED` and exits 1 before unitd starts. An unknown word in
+  `PROFILE` also stops it. Then `perf stat -x, -e <events> -- true` must count: task-clock, `PERF_EVENT` for
+  `record`, and the futex tracepoint when the futex step uses it. A profile whose steps run no perf (futex with
+  strace) skips the probe. `PREFLIGHT_ONLY=1 run.sh profile TAG` stops there.
   Without a hardware PMU, `PROFILE="record futex" PERF_EVENT=cpu-clock` samples the clock; the kit never falls back
   to it on its own.
 - **Own processes.** Every kill is limited to processes whose exe is under the kit's tree directory.
@@ -117,28 +120,42 @@ appears, and exits 3.
   - 1: per-process mode, user and kernel.
   - 2 (the upstream default): per-process mode, user space only.
   - 3: software events only, as another session reports for Debian and Ubuntu kernels. Unverified here.
-  - 4 (Ubuntu): every perf call needs a capability, software events and `-p` included. Whether CAP_PERFMON is
-    enough or CAP_SYS_ADMIN is needed is unverified. With CAP_PERFMON only, the preflight prints a note, and the
-    probe (`perf stat -e task-clock,PERF_EVENT -- true`) decides.
+  - 4 (Ubuntu): every perf call needs a capability, software events and `-p` included. CAP_PERFMON is enough on
+    the Ubuntu 6.8.0-136 kernel of pro4s-2 (measured, see "The lab boxes"). Another session read in the Ubuntu
+    kernel changelog that CAP_PERFMON is accepted from `linux (6.8.0-98.98) noble`, and that an older noble
+    kernel needs CAP_SYS_ADMIN; that is read, not tested here. With CAP_PERFMON only, the preflight prints a
+    note, and the probe (`perf stat` of the events of the requested steps) decides.
+- **Per-process mode without a capability** (`NATIVE=1`, or a rootless container) gives user and kernel samples
+  where `perf_event_paranoid` is 1 or lower, as on the maintainer laptop (1), and user space only at 2. On
+  pro4s-2 and pro4s-4 (4) the host user fails every perf call; there only the rootful profile container works.
 - **A VM may have no hardware PMU.** Then cycles, instructions and c2c fail in every mode with any capability or
   sysctl. Software events (cpu-clock, task-clock) still work: `PROFILE="record futex" PERF_EVENT=cpu-clock`.
 - **Kernel symbols** need `kptr_restrict` 0 with `perf_event_paranoid` 1 or lower, or CAP_SYSLOG in the initial
   user namespace at `kptr_restrict` 1. **The futex tracepoint** needs `perf_event_paranoid` -1 or a capability,
   and a readable tracefs. **strace -p** needs `ptrace_scope` 0, or CAP_SYS_PTRACE at 1 or 2. Yama accepts
   CAP_SYS_PTRACE in the target's user namespace, so in a container it works rootless too.
-- **The container of run.sh profile** gets `--cap-add PERFMON` (perf) and `--cap-add SYS_PTRACE` (the strace
-  fallback). A sweep and a locks run get no capability. `PERF_KERNEL=1` also adds `--cap-add SYSLOG` (kernel
-  symbols at `kptr_restrict` 1) and `-v /sys/kernel/tracing:/sys/kernel/tracing:ro` (the futex tracepoint). Both work
-  only with a rootful docker daemon, and the bind mount gives the container the host's tracefs, so they are an
-  opt-in. `NATIVE=1` runs as the box user, with no capability.
-- **The lab boxes.** Another session probed two boxes read-only on 2026-10-19. These facts are reported, not
-  verified by the kit; run `PREFLIGHT_ONLY=1 run.sh profile TAG` on a box first.
+- **The container of run.sh profile** runs as the container root with
+  `--cap-add PERFMON --cap-add SYS_PTRACE --security-opt no-new-privileges`: PERFMON for perf, SYS_PTRACE for
+  the strace fallback. It gets no `--privileged` and keeps the default seccomp profile. A `--user` container has
+  CapEff 0, and perf refuses it. A sweep and a locks run get no added capability. `PERF_KERNEL=1` also adds
+  `--cap-add SYSLOG` (kernel symbols at `kptr_restrict` 1) and `-v /sys/kernel/tracing:/sys/kernel/tracing:ro`
+  (the futex tracepoint). Both work only with a rootful docker daemon, and the bind mount gives the container
+  the host's tracefs, read-only, so they are an opt-in. `NATIVE=1` runs as the box user, with no capability.
+- **The lab boxes.** Other sessions measured these on 2026-10-19 and 2026-10-20. They are reported, not verified
+  by the tests of the kit; run `PREFLIGHT_ONLY=1 run.sh profile TAG` on a box first.
   - fu-build-arm (o-build): kernel 6.18.54-virt, `perf_event_paranoid` 1, no hardware PMU. cycles, instructions
     and c2c fail in every mode; cpu-clock and task-clock work.
-  - pro4s-4: kernel 6.8.0, perf 6.8.12, `perf_event_paranoid` 4, CapEff 0. Every perf call fails for an ordinary
-    user, `-p` and software events included.
-  - pro4s-2: not probed.
-  - The first kit's profile ran in the lab container with `--cap-add PERFMON`. Why that was enough is unexplained.
+  - pro4s-4: Ubuntu kernel 6.8.0-136, perf 6.8.12, `perf_event_paranoid` 4, `kptr_restrict` 1, CapEff 0. Every
+    perf call fails for an ordinary user, `-p` and software events included.
+  - pro4s-2: Ubuntu kernel 6.8.0-136, `perf_event_paranoid` 4, `kptr_restrict` 1, Docker 29.8.1. A container as
+    uid 0 with PERFMON, SYSLOG and SYS_PTRACE, no-new-privileges, tracefs mounted `:ro`, the default seccomp
+    profile and no `--privileged` passed 18 of 18 checks: `perf stat`, `perf record -a -C -g`,
+    `perf c2c record`, msr/aperf, kernel symbols and `strace -p` among them. The futex tracepoint check passed
+    with the value 0: it proves access, not that the tracepoint counts.
+  - So CAP_PERFMON is enough at level 4 on that kernel. That explains why the first kit's profile ran in the lab
+    container with `--cap-add PERFMON`.
+  - The research behind the flag line is reported in another session's notes, docker-perf-profile.md, a local
+    file of the maintainer that is not in this repository.
 
 ## Files
 

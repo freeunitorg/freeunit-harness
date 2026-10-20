@@ -353,8 +353,9 @@ perf_preflight() {
     elif [ "$CAP_PERF" != none ]; then
         PERF_LEVEL=full
         if [ "$PARANOID" -ge 4 ] && [ "$CAP_PERF" = perfmon ]; then
-            echo "note: perf_event_paranoid=$PARANOID and CAP_PERFMON only. Unverified: the Ubuntu patch for" \
-                 "level 4 may need CAP_SYS_ADMIN. profile.sh probes perf before it measures."
+            echo "note: perf_event_paranoid=$PARANOID and CAP_PERFMON only. Enough on Ubuntu 6.8.0-136 (measured);" \
+                 "an Ubuntu noble kernel before 6.8.0-98.98 needs CAP_SYS_ADMIN (read, not tested)." \
+                 "profile.sh probes perf before it measures."
         fi
     elif [ "$PARANOID" -le 1 ]; then PERF_LEVEL=task
     elif [ "$PARANOID" -eq 2 ]; then PERF_LEVEL=user
@@ -363,8 +364,8 @@ perf_preflight() {
         why="perf_event_paranoid=3 allows software events only (reported for Debian and Ubuntu kernels, unverified)"
     else
         PERF_LEVEL=none
-        why="perf_event_paranoid=$PARANOID: every perf call needs CAP_PERFMON or CAP_SYS_ADMIN in the initial user"
-        why="$why namespace (which one is unverified), or the box admin sets kernel.perf_event_paranoid=2"
+        why="perf_event_paranoid=$PARANOID: every perf call needs CAP_PERFMON (CAP_SYS_ADMIN on an older Ubuntu"
+        why="$why kernel) in the initial user namespace, or the box admin sets kernel.perf_event_paranoid=2"
     fi
     echo "level: $PERF_LEVEL"
     case $PERF_LEVEL in user|software) PERF_USER_ONLY=1 ;; esac

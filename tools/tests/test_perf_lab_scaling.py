@@ -202,17 +202,16 @@ class PreflightTest(FakeBox):
     def test_paranoid_4_needs_a_capability(self):
         out = self.run_pf(self.box(4), "record")
         self.assertIn("rc=1 level=none", out)
-        self.assertIn("CAP_PERFMON or CAP_SYS_ADMIN", out)
-        self.assertIn("unverified", out)
+        self.assertIn("needs CAP_PERFMON (CAP_SYS_ADMIN on an older Ubuntu kernel)", out)
         out = self.run_pf(self.box(4), "record", PERF_EVENT="cpu-clock")
         self.assertIn("rc=1", out, "software events need a capability at level 4 too")
         # a rootless container: the capability is in a user namespace, and perf ignores it
         out = self.run_pf(self.box(4, cap=self.PERFMON, uid_map=self.ROOTLESS), "record")
         self.assertIn("rc=1 level=none", out)
-        # rootful with CAP_PERFMON: allowed, with the unverified note
+        # rootful with CAP_PERFMON: allowed, with a note on older Ubuntu kernels
         out = self.run_pf(self.box(4, cap=self.PERFMON), "record c2c cpus")
         self.assertIn("rc=0 level=full user=0", out)
-        self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Unverified", out)
+        self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Enough on Ubuntu 6.8.0-136", out)
         out = self.run_pf(self.box(4, cap=self.SYS_ADMIN), "record")
         self.assertIn("rc=0 level=full", out)
         self.assertNotIn("note:", out)
