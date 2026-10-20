@@ -262,6 +262,15 @@ class ProfilePreflightTest(FakeBox):
                 perf = f.read()
         return r, out, perf
 
+    def test_unknown_scope_is_refused(self):
+        # The check called die before lib.sh defined it: "die: command not found", and the run went on.
+        r, out, perf = self.profile(self.box(1, scope=0), PERF_SCOPE="typo", PREFLIGHT_ONLY="1", STRACE="sh")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("PERF_SCOPE is pids or cpus, not 'typo'", r.stderr)
+        self.assertNotIn("command not found", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(out, "DONE")))
+        self.assertEqual(perf, "")
+
     def test_unknown_step_is_refused(self):
         # "recrod" passed the preflight, no step ran, and DONE followed.
         for i, prof in enumerate(("recrod", "record futx", " ")):

@@ -42,11 +42,11 @@ set -u
 : "${N:=}" "${V:=master}" "${WORKLOADS:=capp static}" "${PERF_SEC:=20}" "${WARM:=3}" "${C2C_G:=0}"
 : "${LOAD_SEC:=$((75 + 15 * C2C_G))}"   # covers every record step below; the reports run after the load
 : "${PROFILE:=record futex c2c}" "${PERF_EVENT:=cycles}" "${PREFLIGHT_ONLY:=0}" "${PERF_SCOPE:=pids}"
-case $PERF_SCOPE in pids|cpus) ;; *) die "PERF_SCOPE is pids or cpus, not '$PERF_SCOPE'" ;; esac
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=tools/perf-lab/scaling/lib.sh
 . "$HERE/lib.sh"
 
+case $PERF_SCOPE in pids|cpus) ;; *) die "PERF_SCOPE is pids or cpus, not '$PERF_SCOPE'" ;; esac
 # A misspelt step must not pass: no step would run, and DONE would follow.
 read -r -a steps <<< "$PROFILE"
 [ "${#steps[@]}" -gt 0 ] || die "PROFILE is empty; the steps are record, futex and c2c"
