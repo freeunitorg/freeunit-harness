@@ -437,6 +437,17 @@ perf_args() {
     if [ "${PERF_USER_ONLY:-0}" = 1 ]; then PERF_U=(--all-user --user-callchains); fi
 }
 
+# strace_futex PID SEC OUT ERR: strace -c -f of the futex calls of PID for SEC
+# seconds. Only the timeout may end it: timeout exits 124 then. Any other status
+# is a failure, for example an attach that ptrace refuses, or a PID that is gone.
+strace_futex() {
+    local rc=0
+    timeout -s INT "$2" "$STRACE" -c -f -e trace=futex -p "$1" -o "$3" 2>> "$4" || rc=$?
+    [ "$rc" = 124 ] && return 0
+    echo "strace_futex: $STRACE exited $rc before the timeout" >> "$4"
+    return 1
+}
+
 # c2c_record DATA ERR ARG...: perf c2c record in the form of the preflight
 # (C2C_FORM). ARG... ends with "-- sleep S". amd-user is the user-space-only form
 # for AMD IBS, which "perf c2c record --all-user" refuses in per-process mode;

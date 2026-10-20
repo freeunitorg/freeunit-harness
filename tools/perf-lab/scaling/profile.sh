@@ -118,8 +118,7 @@ for w in $WORKLOADS; do
             tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q '^unit: router' && { rp=$p; break; }
         done
         if [ -n "$rp" ] && command -v "$STRACE" >/dev/null; then
-            try "strace futex $w" bash -c "timeout -s INT 10 '$STRACE' -c -f -e trace=futex -p $rp \
-                -o '$OUT/futex-strace-$w.txt' 2>> '$OUT/futex-$w.err'; true"
+            try "strace futex $w" strace_futex "$rp" 10 "$OUT/futex-strace-$w.txt" "$OUT/futex-$w.err"
         else
             echo "FAILED: strace futex $w (router pid '$rp', strace $(command -v "$STRACE" || echo missing))" >> "$FAIL"
         fi

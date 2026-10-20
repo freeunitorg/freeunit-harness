@@ -328,6 +328,109 @@ class PerProcessTest(FakeBox):
         self.assertIn("cpus: unavailable (system-wide mode needs perf_event_paranoid <= 0", r.stdout)
 
 
+class FakeKitTest(FakeBox):
+    """profile.sh end to end on a fake kit. unitd is a script that starts a "unit: router"
+    process under TREES. curl, perf, oha and strace are stubs."""
+
+    ROUTER = r"""
+#include <signal.h>
+#include <unistd.h>
+static void quit(int s) { (void) s; _exit(0); }
+int main(void) { signal(SIGQUIT, quit); sleep(60); return 0; }
+"""
+    UNITD = """#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+    case $1 in --pid) pidf=$2; shift ;; --control) ctl=${2#unix:}; shift ;; esac
+    shift
+done
+# bind in the directory: the absolute path can be longer than a unix socket path
+(cd "$(dirname "$ctl")" && python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \\
+    "$(basename "$ctl")")
+(exec -a "unit: router" "$(dirname "$0")/router") > /dev/null 2>&1 &
+echo $! > "$pidf"
+"""
+    CURL = """#!/bin/sh
+case "$*" in *"-X PUT"*) echo '{"success": "Reconfiguration done."}' ;; *http_code*) printf 200 ;; esac
+"""
+    # PERF_FAIL: a perf subcommand (record, report, stat, c2c) that fails
+    PERF = """#!/bin/sh
+echo "$*" >> "$PERF_CALLS"
+case " ${PERF_FAIL:-} " in *" $1 "*) echo "perf $1: failed" >&2; exit 1 ;; esac
+case $1 in
+    report) printf '    50.00%%  pthread_mutex_lock\\n    50.00%%  main\\n' ;;
+    *) echo "1.00,msec,task-clock" >&2 ;;
+esac
+"""
+    OHA = """#!/bin/sh
+echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1000}}'
+"""
+
+    def setUp(self):
+        super().setUp()
+        cc = shutil.which("cc")
+        if cc is None or shutil.which("taskset") is None:
+            self.skipTest("no cc or no taskset")
+        self.trees = os.path.join(self.tmp, "trees")
+        sbin = os.path.join(self.trees, "master", "build", "sbin")
+        os.makedirs(sbin)
+        src = os.path.join(self.tmp, "router.c")
+        with open(src, "w") as f:
+            f.write(self.ROUTER)
+        subprocess.run([cc, "-o", os.path.join(sbin, "router"), src], check=True)
+        self.stubs = os.path.join(self.tmp, "stubs")
+        os.makedirs(self.stubs)
+        for path, text in ((os.path.join(sbin, "unitd"), self.UNITD), (os.path.join(self.stubs, "curl"), self.CURL),
+                           (os.path.join(self.stubs, "perf"), self.PERF), (os.path.join(self.stubs, "oha"), self.OHA)):
+            self.script(path, text)
+        self.calls = os.path.join(self.tmp, "perf.calls")
+
+    def script(self, path, text):
+        with open(path, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o755)
+        return path
+
+    def run_kit(self, box, **extra):
+        out = os.path.join(self.tmp, "out")
+        env = dict(self.env, **box)
+        env.update(OUT=out, OHA=os.path.join(self.stubs, "oha"), R=os.path.join(self.tmp, "r"),
+                   WWW=os.path.join(self.tmp, "www"), TREES=self.trees, SYSCPU=self.topology(["0", "1"]),
+                   PATH=self.stubs + os.pathsep + os.environ["PATH"], PERF_CALLS=self.calls, WORKLOADS="capp",
+                   PERF_SEC="1", WARM="1", **extra)
+        r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
+                           timeout=120, stdin=subprocess.DEVNULL)
+
+        def read(name):
+            p = os.path.join(out, name)
+            if not os.path.exists(p):
+                return None
+            with open(p) as f:
+                return f.read()
+        return r, read
+
+    def test_strace_that_cannot_attach_is_a_failure(self):
+        # "bash -c 'timeout ... strace ...; true'" hid every strace failure.
+        strace = self.script(os.path.join(self.tmp, "strace"),
+                             '#!/bin/sh\necho "strace: attach: ptrace(PTRACE_SEIZE): Operation not permitted" >&2\n'
+                             'exit 1\n')
+        r, read = self.run_kit(self.box(1, scope=0), PROFILE="futex", STRACE=strace)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNotNone(read("DONE"))
+        self.assertIn("FAILED: strace futex capp", read("failures.txt") or "")
+        self.assertIn("Operation not permitted", read("futex-capp.err") or "")
+
+    def test_strace_futex_accepts_only_the_timeout(self):
+        stub = os.path.join(self.tmp, "strace")
+        for body, rc in (("exec sleep 5", 0), ("exit 0", 1), ("exit 1", 1)):
+            self.script(stub, "#!/bin/sh\n%s\n" % body)
+            err = os.path.join(self.tmp, "err")
+            r = self.lib('strace_futex 1 1 "$TMPD/out" "$TMPD/err"', STRACE=stub, TMPD=self.tmp)
+            self.assertEqual(r.returncode, rc, "%s: %s" % (body, r.stderr))
+            if rc:
+                with open(err) as f:
+                    self.assertIn("before the timeout", f.read())
+
+
 class ScopedKillTest(Base):
     def setUp(self):
         super().setUp()
