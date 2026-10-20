@@ -34,7 +34,8 @@
 #      it is a second report, never the only one.
 #   D. with C2C_G=1: perf c2c record -g, and c2cg-<w>.txt with the callers of
 #      each hot line.
-# A step that passed the preflight may still fail; failures go to failures.txt.
+# A step that passed the preflight may still fail; failures go to failures.txt,
+# and so does a load without an oha result. A failed record gives no lock share.
 # summary.txt is written last, then DONE.
 #
 # Lock counts are a separate stage (run.sh locks): the shim slows every lock call.
@@ -90,6 +91,18 @@ fi
 trap 'stop_unit; own_out' EXIT
 setup_www
 try() { local what=$1; shift; "$@" || echo "FAILED: $what ($*)" >> "$FAIL"; }
+# lock_share DATA OUT ERR: the share of the lock symbols in the samples of DATA.
+# No OUT when perf report fails or finds no sample: "0.00% of 0.00%" is not a result.
+lock_share() {
+    local rep
+    rep=$(perf report -i "$1" --no-children --stdio -g none --sort symbol 2>> "$3") || return 1
+    printf '%s\n' "$rep" | awk '/^ +[0-9.]+%/ { n++; p = $1; sub("%", "", p); tot += p
+            if ($0 ~ /futex|pthread_mutex|nxt_thread_mutex|lll_lock|lll_unlock|__lll_/) lock += p }
+        END { if (!n) exit 1; printf "lock-related symbols: %.2f%% of %.2f%% sampled\n", lock, tot }' > "$2.tmp" \
+        && mv "$2.tmp" "$2" && return 0
+    rm -f "$2.tmp"; echo "lock_share: no sample in $1" >> "$3"
+    return 1
+}
 
 for w in $WORKLOADS; do
     srv=$(cpus_server "$N"); load=$(cpus_load "$N")
@@ -134,14 +147,12 @@ for w in $WORKLOADS; do
 
     wait "$LP" 2>/dev/null
     stop_unit
+    read_oha "$OUT/load-$w.json" > /dev/null 2>&1 || echo "FAILED: load $w (no oha result in load-$w.json)" >> "$FAIL"
 
     # the reports, with the load gone
     has record && try "perf report $w" bash -c "perf report -i '$OUT/perf-$w.data' --no-children --stdio -g none \
         --percent-limit 0.5 --sort comm,symbol > '$OUT/top-$w.txt' 2>> '$OUT/perf-$w.err'"
-    has record && perf report -i "$OUT/perf-$w.data" --no-children --stdio -g none --sort symbol 2>/dev/null \
-        | awk '/^ +[0-9.]+%/ { p = $1; sub("%", "", p); tot += p
-                if ($0 ~ /futex|pthread_mutex|nxt_thread_mutex|lll_lock|lll_unlock|__lll_/) lock += p }
-               END { printf "lock-related symbols: %.2f%% of %.2f%% sampled\n", lock, tot }' > "$OUT/lockshare-$w.txt"
+    has record && try "lock share $w" lock_share "$OUT/perf-$w.data" "$OUT/lockshare-$w.txt" "$OUT/perf-$w.err"
     has c2c && try "perf c2c report $w" bash -c "perf c2c report -i '$OUT/c2c-$w.data' --stdio -c pid,iaddr --full-symbols \
         > '$OUT/c2c-$w.txt' 2>> '$OUT/c2c-$w.err'"
     has c2c && try "perf c2c stats $w" bash -c "perf c2c report -i '$OUT/c2c-$w.data' --stats > '$OUT/c2c-$w-stats.txt' \
@@ -158,8 +169,9 @@ chmod -R a+r "$OUT" 2>/dev/null
          "c2c ${C2C_FORM:-none}, futex ${FUTEX_FORM:-none}"
     cat "$OUT/pids.txt" 2>/dev/null
     for w in $WORKLOADS; do
-        echo "$w: $(cat "$OUT/lockshare-$w.txt" 2>/dev/null); load $(read_oha "$OUT/load-$w.json" 2>/dev/null \
-            || echo "FAILED: no oha result")"
+        share=""
+        has record && { share=$(cat "$OUT/lockshare-$w.txt" 2>/dev/null) || share="lock share: FAILED"; }
+        echo "$w: $share; load $(read_oha "$OUT/load-$w.json" 2>/dev/null || echo "FAILED: no oha result")"
     done
     echo "failures: $(wc -l < "$FAIL")"
     cat "$FAIL"

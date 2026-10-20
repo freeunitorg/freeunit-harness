@@ -413,7 +413,8 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
         env.update(OUT=out, OHA=os.path.join(self.stubs, "oha"), R=os.path.join(self.tmp, "r"),
                    WWW=os.path.join(self.tmp, "www"), TREES=self.trees, SYSCPU=self.topology(["0", "1"]),
                    PATH=self.stubs + os.pathsep + os.environ["PATH"], PERF_CALLS=self.calls, WORKLOADS="capp",
-                   PERF_SEC="1", WARM="1", **extra)
+                   PERF_SEC="1", WARM="1")
+        env.update(extra)
         r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
                            timeout=120, stdin=subprocess.DEVNULL)
 
@@ -435,6 +436,23 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
         self.assertIsNotNone(read("DONE"))
         self.assertIn("FAILED: strace futex capp", read("failures.txt") or "")
         self.assertIn("Operation not permitted", read("futex-capp.err") or "")
+
+    def test_failed_record_and_load_give_no_result(self):
+        # A failed perf record and report gave "0.00% of 0.00% sampled", and a failed load was not counted.
+        r, read = self.run_kit(self.box(1, scope=0), PROFILE="record", PERF_FAIL="record report", OHA="true")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        summary, fails = read("summary.txt") or "", read("failures.txt") or ""
+        self.assertNotIn("% of ", summary)
+        self.assertIn("capp: lock share: FAILED", summary)
+        self.assertIsNone(read("lockshare-capp.txt"))
+        for line in ("FAILED: perf record capp", "FAILED: lock share capp", "FAILED: load capp"):
+            self.assertIn(line, fails)
+
+    def test_record_gives_the_lock_share(self):
+        r, read = self.run_kit(self.box(1, scope=0), PROFILE="record")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(read("failures.txt"), "")
+        self.assertIn("capp: lock-related symbols: 50.00% of 100.00% sampled; load 1000 0 100.0", read("summary.txt"))
 
     def test_strace_futex_accepts_only_the_timeout(self):
         stub = os.path.join(self.tmp, "strace")
