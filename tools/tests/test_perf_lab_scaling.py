@@ -945,11 +945,16 @@ class RunStageTest(Base):
             return f.read()
 
     def test_container_capabilities(self):
-        # profile.sh needs PERFMON (perf) and SYS_PTRACE (strace); a sweep needs neither.
-        sweep = self.docker_run("sweep", "s1")
-        self.assertNotIn("--cap-add", sweep)
+        # profile.sh needs PERFMON (perf) and SYS_PTRACE (strace); a sweep and a locks run need neither.
+        for stage in ("sweep", "locks"):
+            line = self.docker_run(stage, "s1")
+            self.assertNotIn("--cap-add", line, stage)
+            self.assertNotIn("--privileged", line, stage)
         prof = self.docker_run("profile", "p1")
-        self.assertIn("--cap-add PERFMON --cap-add SYS_PTRACE", prof)
+        self.assertIn("--cap-add PERFMON --cap-add SYS_PTRACE --security-opt no-new-privileges ", prof)
+        # container root: with --user the capabilities are not effective
+        self.assertNotIn("--user", prof)
+        self.assertNotIn("--privileged", prof)
         self.assertNotIn("SYSLOG", prof)
         self.assertNotIn("/sys/kernel/tracing", prof)
         # kernel symbols and the futex tracepoint only on request

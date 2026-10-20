@@ -217,10 +217,12 @@ start() {
         # Only profile.sh needs a capability: PERFMON for perf, SYS_PTRACE for the
         # strace fallback. A capability does not grant perf privilege by itself:
         # perf checks the initial user namespace, so it counts only in a rootful
-        # container (docs/perf/scaling-kit.md, "Perf privileges").
+        # container (docs/perf/scaling-kit.md, "Perf privileges"). The container
+        # runs as its root: with --user its CapEff is 0, and perf is refused.
+        # no-new-privileges: no exec in it can gain more than these.
         caps=""
         if [ "$script" = profile.sh ]; then
-            caps="--cap-add PERFMON --cap-add SYS_PTRACE"
+            caps="--cap-add PERFMON --cap-add SYS_PTRACE --security-opt no-new-privileges"
             # PERF_KERNEL=1: kernel symbols at kptr_restrict 1, and the futex tracepoint
             [ "${PERF_KERNEL:-0}" = 1 ] && caps="$caps --cap-add SYSLOG -v /sys/kernel/tracing:/sys/kernel/tracing:ro"
         fi
