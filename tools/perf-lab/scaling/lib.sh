@@ -344,7 +344,7 @@ _pf() {  # ok|unavailable metric text...: one report line; a requested metric th
 # user, amd-user or empty) and FUTEX_FORM (tracepoint, strace or empty).
 # PERF_EVENT is the record event (cycles; cpu-clock is the clock, no PMU needed).
 perf_preflight() {
-    local why="" hwwhy="" c2cwhy="" ev=${PERF_EVENT:-cycles}
+    local why="" hwwhy="" c2cwhy="" ev=${PERF_EVENT:-cycles} kr seen
     PF_WANT=" $* " PF_BAD=0 PERF_USER_ONLY=0 C2C_FORM="" FUTEX_FORM=""
     perf_facts
     echo "facts: perf_event_paranoid=${PARANOID:-missing} kptr_restrict=$KPTR ptrace_scope=$PTRACE_SCOPE" \
@@ -355,9 +355,14 @@ perf_preflight() {
     elif [ "$CAP_PERF" != none ]; then
         PERF_LEVEL=full
         if [ "$PARANOID" -ge 4 ] && [ "$CAP_PERF" = perfmon ]; then
-            echo "note: perf_event_paranoid=$PARANOID and CAP_PERFMON only. Enough on Ubuntu 6.8.0-136 (measured);" \
-                 "an Ubuntu noble kernel before 6.8.0-98.98 needs CAP_SYS_ADMIN (read, not tested)." \
-                 "profile.sh probes perf before it measures."
+            # KERNEL_RELEASE: uname -r; a test sets it.
+            kr=${KERNEL_RELEASE:-$(uname -r)}
+            case $kr in
+                6.8.0-136-*) seen="Enough on this kernel, $kr (measured on pro4s-2)." ;;
+                *) seen="Not measured on this kernel, $kr." ;;
+            esac
+            echo "note: perf_event_paranoid=$PARANOID and CAP_PERFMON only. $seen An Ubuntu noble kernel before" \
+                 "6.8.0-98.98 needs CAP_SYS_ADMIN (read, not tested). profile.sh probes perf before it measures."
         fi
     elif [ "$PARANOID" -le 1 ]; then PERF_LEVEL=task
     elif [ "$PARANOID" -eq 2 ]; then PERF_LEVEL=user

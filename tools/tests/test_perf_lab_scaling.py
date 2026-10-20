@@ -217,12 +217,20 @@ class PreflightTest(FakeBox):
         out = self.run_pf(self.box(4, cap=self.PERFMON, uid_map=self.ROOTLESS), "record")
         self.assertIn("rc=1 level=none", out)
         # rootful with CAP_PERFMON: allowed, with a note on older Ubuntu kernels
-        out = self.run_pf(self.box(4, cap=self.PERFMON), "record c2c cpus")
+        out = self.run_pf(self.box(4, cap=self.PERFMON), "record c2c cpus", KERNEL_RELEASE="6.8.0-136-generic")
         self.assertIn("rc=0 level=full user=0", out)
-        self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Enough on Ubuntu 6.8.0-136", out)
+        self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Enough on this kernel, 6.8.0-136-generic"
+                      " (measured on pro4s-2).", out)
         out = self.run_pf(self.box(4, cap=self.SYS_ADMIN), "record")
         self.assertIn("rc=0 level=full", out)
         self.assertNotIn("note:", out)
+
+    def test_level_4_note_names_only_the_measured_kernel(self):
+        # The note said "Enough on Ubuntu 6.8.0-136 (measured)" on every kernel.
+        out = self.run_pf(self.box(4, cap=self.PERFMON), "record", KERNEL_RELEASE="6.8.0-90-generic")
+        self.assertIn("rc=0 level=full", out)
+        self.assertIn("CAP_PERFMON only. Not measured on this kernel, 6.8.0-90-generic.", out)
+        self.assertNotIn("measured on pro4s-2", out)
 
     def test_no_pmu(self):
         out = self.run_pf(self.box(1, pmu=()), "record c2c")
