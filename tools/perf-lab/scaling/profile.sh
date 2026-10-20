@@ -21,8 +21,9 @@
 # kptr_restrict, ptrace_scope, the PMU devices and the capabilities, and writes
 # preflight.txt. When a requested step cannot work, profile.sh writes FAILED and
 # exits 1 before it starts unitd: no step produces an empty or zero result.
-# Then a probe: "perf stat -e task-clock,PERF_EVENT -- true" must count. It names
-# only the events of the requested steps; a strace-only profile needs no probe.
+# Then a probe: "perf stat -x, -e <events> -- true" must count. The events are
+# task-clock, PERF_EVENT with record, and syscalls:sys_enter_futex when the futex
+# step uses the tracepoint. A profile whose steps run no perf skips the probe.
 #
 # One unitd per workload under one oha load of LOAD_SEC seconds. Every record
 # runs inside the load; the reports run after it:
