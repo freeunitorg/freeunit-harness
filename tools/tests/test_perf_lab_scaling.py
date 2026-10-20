@@ -262,6 +262,20 @@ class ProfilePreflightTest(FakeBox):
                 perf = f.read()
         return r, out, perf
 
+    def test_probe_only_what_the_steps_use(self):
+        # A strace-only profile ran "perf stat -e task-clock,cycles" and failed where cycles cannot count.
+        box = self.box(1, scope=0)
+        r, out, perf = self.profile(box, tag="futex", PROFILE="futex", PREFLIGHT_ONLY="1", STRACE="sh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(perf, "", "a strace-only profile ran perf")
+        self.assertIn("probe: not needed", r.stdout)
+        r, out, perf = self.profile(box, tag="c2c", PROFILE="c2c", PREFLIGHT_ONLY="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(perf, "stat -x, -e task-clock -- true\n")
+        r, out, perf = self.profile(self.box(-1, scope=0, tracefs=True), tag="tp", PROFILE="futex", PREFLIGHT_ONLY="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(perf, "stat -x, -e task-clock,syscalls:sys_enter_futex -- true\n")
+
     def test_unknown_scope_is_refused(self):
         # The check called die before lib.sh defined it: "die: command not found", and the run went on.
         r, out, perf = self.profile(self.box(1, scope=0), PERF_SCOPE="typo", PREFLIGHT_ONLY="1", STRACE="sh")

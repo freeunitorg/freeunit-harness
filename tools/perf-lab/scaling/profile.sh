@@ -21,7 +21,8 @@
 # kptr_restrict, ptrace_scope, the PMU devices and the capabilities, and writes
 # preflight.txt. When a requested step cannot work, profile.sh writes FAILED and
 # exits 1 before it starts unitd: no step produces an empty or zero result.
-# Then a probe: "perf stat -e task-clock,PERF_EVENT -- true" must count.
+# Then a probe: "perf stat -e task-clock,PERF_EVENT -- true" must count. It names
+# only the events of the requested steps; a strace-only profile needs no probe.
 #
 # One unitd per workload under one oha load of LOAD_SEC seconds. Every record
 # runs inside the load; the reports run after it:
@@ -56,7 +57,6 @@ for s in "${steps[@]}"; do
 done
 
 command -v "$OHA" >/dev/null || die "no oha ($OHA)"
-command -v perf >/dev/null || die "no perf"
 read_topology
 [ -n "$N" ] || N=$(default_n)
 [ "$N" -le "$NCORES" ] || die "N=$N is more than the $NCORES cores"
@@ -77,13 +77,23 @@ if ! perf_preflight $want > "$OUT/preflight.txt"; then
 fi
 cat "$OUT/preflight.txt"
 # The files say what should work; this probe says whether perf_event_open agrees.
+# It counts only the events of the requested steps: task-clock for any perf call,
+# PERF_EVENT for record, the futex tracepoint for its form. strace needs no perf.
 # "<not supported>" is exit 0 for perf stat, so read the output too.
 u=""; [ "$PERF_USER_ONLY" = 1 ] && u=:u
-if ! perf stat -x, -e "task-clock$u,$PERF_EVENT$u" -- true > "$OUT/probe.txt" 2>&1 \
-    || grep -q -e '<not supported>' -e '<not counted>' "$OUT/probe.txt"; then
-    echo "probe: perf stat -e task-clock$u,$PERF_EVENT$u failed; see probe.txt" \
-        | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
-    own_out; die "perf does not count here; see probe.txt"
+ev=""
+has record && ev="$ev,$PERF_EVENT$u"
+has futex && [ "$FUTEX_FORM" = tracepoint ] && ev="$ev,syscalls:sys_enter_futex"
+if [ -z "$ev" ] && ! has c2c; then
+    echo "probe: not needed (PROFILE='$PROFILE' runs no perf)" | tee -a "$OUT/preflight.txt"
+else
+    ev="task-clock$u$ev"
+    command -v perf >/dev/null || { own_out; die "no perf"; }
+    if ! perf stat -x, -e "$ev" -- true > "$OUT/probe.txt" 2>&1 \
+        || grep -q -e '<not supported>' -e '<not counted>' "$OUT/probe.txt"; then
+        echo "probe: perf stat -e $ev failed; see probe.txt" | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
+        own_out; die "perf does not count here; see probe.txt"
+    fi
 fi
 if [ "$PREFLIGHT_ONLY" = 1 ]; then
     cp "$OUT/preflight.txt" "$OUT/summary.txt"; : > "$OUT/DONE"; own_out; exit 0
