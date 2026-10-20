@@ -124,8 +124,9 @@ stage_release() {
     esac
     # The pid and the start come from the claim file on the box, not from the
     # local record. Kill the pid only while it is still the holder: the sleep
-    # whose start time is the "started" of the claim. After the claim expires,
-    # the pid can belong to any process of the box user.
+    # whose start time is the "started" of the claim, within 2 s (a real holder
+    # starts 0 or 1 s before it). After the claim expires, the pid can belong to
+    # any process of the box user.
     held=$(rsh "sh -s" <<EOF
 f=$(q "$claim")
 pid=\$(sed -n 's/^pid=//p' "\$f" 2>/dev/null); started=\$(sed -n 's/^started=//p' "\$f" 2>/dev/null)
@@ -134,7 +135,7 @@ if [ -n "\$pid" ] && [ "\$(cat /proc/\$pid/comm 2>/dev/null)" = sleep ]; then
     st=\$(sed 's/.*) //' /proc/\$pid/stat | awk '{ print \$20 }')
     t=\$(( \$(awk '/^btime/ { print \$2 }' /proc/stat) + st / \$(getconf CLK_TCK) ))
     d=\$((t - started))
-    if [ "\$d" -ge -5 ] && [ "\$d" -le 5 ] && kill "\$pid" 2>/dev/null; then echo "holder \$pid stopped"; pid=""; fi
+    if [ "\$d" -ge -2 ] && [ "\$d" -le 2 ] && kill "\$pid" 2>/dev/null; then echo "holder \$pid stopped"; pid=""; fi
 fi
 [ -z "\$pid" ] || echo "pid \$pid is not the holder; not killed"
 rm -f "\$f"

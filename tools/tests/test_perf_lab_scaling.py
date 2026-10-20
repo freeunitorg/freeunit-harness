@@ -837,6 +837,36 @@ class RunStageTest(Base):
         time.sleep(0.2)
         self.assertIsNone(other.poll(), "release killed pid %d, which is not the holder" % other.pid)
 
+    @staticmethod
+    def start_time(pid):
+        """The start of pid in epoch seconds, as run.sh release computes it."""
+        with open("/proc/%d/stat" % pid) as f:
+            st = int(f.read().rsplit(") ", 1)[1].split()[19])
+        with open("/proc/stat") as f:
+            btime = int([x for x in f if x.startswith("btime ")][0].split()[1])
+        return btime + st // os.sysconf("SC_CLK_TCK")
+
+    def test_release_keeps_a_sleep_started_4_s_off(self):
+        # A real holder starts within -1..0 s of "started". The window was +-5 s.
+        rec = os.path.join(self.tmp, "results", "scaling")
+        os.makedirs(rec)
+        for off in (4, -4):
+            other = subprocess.Popen(["sleep", "60"])
+            self.addCleanup(lambda p=other: (p.kill(), p.wait()))
+            time.sleep(0.1)
+            claim = os.path.join(self.claims, "CLAIMED-perflab-scaling-20261019T00000%d" % (off > 0))
+            now = int(time.time())
+            with open(claim, "w") as f:
+                f.write("format=perflab-1\nwho=t\npurpose=scaling kit\nhost=t\npid=%d\nstarted=%d\nexpires=%d\n"
+                        % (other.pid, self.start_time(other.pid) - off, now + 600))
+            with open(os.path.join(rec, ".claim"), "w") as f:
+                f.write("claim=%s\npid=%d\n" % (claim, other.pid))
+            r = self.run_sh("release")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("is not the holder", r.stdout)
+            time.sleep(0.2)
+            self.assertIsNone(other.poll(), "release killed a sleep that started %d s off the claim" % off)
+
     def test_claim_refuses_a_live_foreign_claim(self):
         open(os.path.join(self.claims, "CLAIMED-other-bench"), "w").close()   # fresh legacy claim
         r = self.run_sh("claim", "5")
