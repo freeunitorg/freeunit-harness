@@ -47,6 +47,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=tools/perf-lab/scaling/lib.sh
 . "$HERE/lib.sh"
 
+# A misspelt step must not pass: no step would run, and DONE would follow.
+read -r -a steps <<< "$PROFILE"
+[ "${#steps[@]}" -gt 0 ] || die "PROFILE is empty; the steps are record, futex and c2c"
+for s in "${steps[@]}"; do
+    case $s in record|futex|c2c) ;; *) die "PROFILE: unknown step '$s'; the steps are record, futex and c2c" ;; esac
+done
+
 command -v "$OHA" >/dev/null || die "no oha ($OHA)"
 command -v perf >/dev/null || die "no perf"
 read_topology

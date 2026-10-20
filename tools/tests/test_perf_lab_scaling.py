@@ -230,22 +230,39 @@ class PreflightTest(FakeBox):
 class ProfilePreflightTest(FakeBox):
     """profile.sh stops before unitd when the preflight fails, and writes no result."""
 
-    def profile(self, box, **extra):
+    def profile(self, box, tag="out", **extra):
         stubs = os.path.join(self.tmp, "stubs")
         os.makedirs(stubs, exist_ok=True)
         calls = os.path.join(self.tmp, "perf.calls")
+        if os.path.exists(calls):
+            os.remove(calls)
         with open(os.path.join(stubs, "perf"), "w") as f:
             f.write('#!/bin/sh\necho "$*" >> "%s"\necho "1.00,msec,task-clock" >&2\n' % calls)
         os.chmod(os.path.join(stubs, "perf"), 0o755)
-        out = os.path.join(self.tmp, "out")
+        out = os.path.join(self.tmp, tag)
         env = dict(self.env, **box)
         env.update(OUT=out, OHA="true", R=os.path.join(self.tmp, "r"), WWW=os.path.join(self.tmp, "www"),
-                   TREES=os.path.join(self.tmp, "none"), SYSCPU=self.topology(["0", "1"]),
+                   TREES=os.path.join(self.tmp, "none"),
+                   SYSCPU=os.path.join(self.tmp, "cpu") if os.path.isdir(os.path.join(self.tmp, "cpu"))
+                   else self.topology(["0", "1"]),
                    PATH=stubs + os.pathsep + os.environ["PATH"], **extra)
         r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
                            timeout=60, stdin=subprocess.DEVNULL)
-        perf = open(calls).read() if os.path.exists(calls) else ""
+        perf = ""
+        if os.path.exists(calls):
+            with open(calls) as f:
+                perf = f.read()
         return r, out, perf
+
+    def test_unknown_step_is_refused(self):
+        # "recrod" passed the preflight, no step ran, and DONE followed.
+        for i, prof in enumerate(("recrod", "record futx", " ")):
+            r, out, perf = self.profile(self.box(1, scope=0), tag="out%d" % i, PROFILE=prof, PREFLIGHT_ONLY="1",
+                                        STRACE="sh")
+            self.assertEqual(r.returncode, 1, "PROFILE=%r: %s" % (prof, r.stdout + r.stderr))
+            self.assertIn("the steps are record, futex and c2c", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(out, "DONE")), "PROFILE=%r wrote DONE" % prof)
+            self.assertEqual(perf, "", "perf ran with PROFILE=%r" % prof)
 
     def test_paranoid_4_stops_before_any_measurement(self):
         r, out, perf = self.profile(self.box(4))
