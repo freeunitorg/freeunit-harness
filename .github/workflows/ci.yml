@@ -1,0 +1,143 @@
+# Harness CI. What each job checks, and why it needs no secrets: docs/ci.md.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run. Each push to main gets
+# its own group, so no run on main is cancelled or dropped from the queue.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # PyYAML is for the one test in tools/tests/test_task.py that reads a task file with it.
+      - name: Install pytest and PyYAML
+        run: |
+          python3 -m pip install --disable-pip-version-check --only-binary=:all: \
+            pytest==9.0.2 PyYAML==6.0.3
+      - name: make tools-test
+        run: make tools-test
+
+  public-text:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: check-public --all
+        run: tools/check-public.sh --all
+      # Runs even when the step above failed, so one run reports both.
+      - name: check-public --history
+        if: ${{ !cancelled() }}
+        # --history scans git log --all. Drop every ref but the checked-out branch, so other pull requests are not scanned.
+        run: |
+          current=$(git symbolic-ref -q HEAD || true)
+          git for-each-ref --format='%(refname)' |
+            awk -v keep="$current" '$0 != keep { print "delete " $0 }' |
+            git update-ref --no-deref --stdin
+          tools/check-public.sh --history
+
+  agents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: make agents-check
+        run: make agents-check
+
+  trailers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: check-trailers on each new commit
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          PUSH_REF: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            what="$PR_BASE..$PR_HEAD"
+            set -- "$what"
+          elif git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            what="$PUSH_BEFORE..$PUSH_AFTER"
+            set -- "$what"
+          else
+            # A new branch or a forced push: the old tip is unknown here. Check
+            # every pushed commit that no other branch of this repository has.
+            what="$PUSH_AFTER, not on another branch"
+            set -- "$PUSH_AFTER" --not --exclude="origin/$PUSH_REF" \
+              --exclude=origin/HEAD --remotes=origin
+          fi
+          echo "commits: $what"
+          if ! commits=$(git rev-list --reverse "$@"); then
+            echo "error: cannot list the commits: $what" >&2
+            exit 2
+          fi
+          if [ -z "$commits" ]; then
+            if [ "$EVENT" = pull_request ]; then
+              echo "error: no commits in $what" >&2
+              exit 2
+            fi
+            echo "no new commits"
+            exit 0
+          fi
+          status=0
+          for c in $commits; do
+            if out=$(python3 tools/check-trailers.py "$c"); then
+              echo "ok   $(git log -1 --format='%h %s' "$c")"
+            else
+              echo "FAIL $(git log -1 --format='%h %s' "$c")"
+              printf '%s\n' "$out" | sed 's/^/     /'
+              status=1
+            fi
+          done
+          exit "$status"
+
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SHELLCHECK_VERSION: v0.11.0
+      # sha256 of shellcheck-v0.11.0.linux.x86_64.tar.xz, as GitHub lists it for the release asset.
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck
+        run: |
+          tarball="shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/$tarball"
+          echo "$SHELLCHECK_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-$SHELLCHECK_VERSION" >> "$GITHUB_PATH"
+      - name: check-shell
+        run: tools/check-shell.py
