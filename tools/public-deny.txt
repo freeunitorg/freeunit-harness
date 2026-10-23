@@ -12,6 +12,28 @@ session-link	claude\.ai/code/session_|^Claude-Session:	# session URLs
 # match. Four-part versions and OIDs that end at a boundary still do: allowlist
 # them one by one.
 ipv4	(?<![\w.])(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?!\w|\.[0-9])	# any IPv4 not in the allowlist
+# ipv6-private: unique local (fc00::/7) and link-local (fe80::/10) addresses,
+# the IPv6 twins of the private IPv4 ranges. Two colons are needed, so a hex
+# word with one colon passes. The address ends in a hex digit (fe80::1) or in
+# "::" (fd12:3456::, as in http://[fd12:3456::]:80/). A range ("fe80::/10")
+# passes: it names no host. A group in the middle of a longer address
+# (2001:db8:fd12::1) passes: a ":" or a word character comes before it.
+ipv6-private	(?i)(?<![\w:])(?:f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])(?::[0-9a-f]{0,4}:[0-9a-f:]*[0-9a-f]|(?::[0-9a-f]{1,4})*::)(?![\w/:])	# private or link-local IPv6
+# private-dns: a host name under a suffix that only resolves on a private
+# network. ".local" is left out: file names (public-deny.local) and test server
+# names (test.local) use it. "x.lan.md" passes: a dot and a word follow.
+# Code has the same shape as a letters-only name: self.internal,
+# import foo.bar.internal, print(a.b.internal). No rule on the name alone can
+# tell "return a.b.internal" from "build.example.internal", so .lan, .internal
+# and .intranet hit only when the name itself cannot be code: a label with a
+# digit or a hyphen (ws01.lan, db-1.internal), a URL (http://cache.lan/x) or
+# a port (box.lan:80). A letters-only name passes (buildbox.lan,
+# build.example.internal), and so does a name with "_" (build_box.lan): "_" is
+# not valid in a host name and joins words in code. Add such names to the
+# private list. The name must not follow a word character, ".", "$", "@" or
+# "-" (user@host is the email rule), and must not precede "=", "(" or "[".
+# .home.arpa is never code: any name hits.
+private-dns	(?i)(?<![\w.$@-])(?:(?:(?<=//)|(?=[a-z0-9.-]*[0-9-])|(?=[a-z0-9.-]*:[0-9]))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.(?:lan|internal|intranet)|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.home\.arpa)(?![\w-]|\.\w|[=(\[]|\s+=)	# private DNS name
 # ssh-literal: spec used a word boundary before ssh/scp; "(?<![\w/.-])" also skips
 # "tools/ssh" and "ssh-keygen". Host forms ssh "$HOST", ssh $HOST pass.
 ssh-literal	(?<![\w/.-])(ssh|scp)( +-[A-Za-z]+)* +[a-z0-9][A-Za-z0-9._-]*( +['"]|[0-9]\b)	# ssh <literal-host>
