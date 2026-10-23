@@ -8,14 +8,24 @@
 #   --deny-file F  private list, one ERE or literal per line, case-insensitive.
 #                  HARNESS_DENY_FILE does the same. The file is never published.
 # Exit: 0 clean, 1 at least one hit, 2 usage or setup error.
-# Output: one TSV line per hit: file, line, rule id. The matched text is never
-# printed, so a CI log does not repeat it. History hits use the file name
-# "history:<sha8>:<path>" or "history:<sha8>:message".
+# Output: one TSV line per hit: file, line, rule id. The matched line text is
+# never printed, so a CI log does not repeat it. A file name is printed as is:
+# a file named after a private term shows that term. History hits use the file
+# name "history:<sha8>:<path>" or "history:<sha8>:message".
 # Rules: tools/public-deny.txt (id, TAB, ERE, TAB, "# why").
 # Allowlist: tools/public-allow.txt. A line is an exact string a rule may match.
 # A line "re:<ERE>" allows any match that the whole ERE matches.
 # Files under tools/tests/check-public/ are test fixtures and are not scanned,
 # and neither are the rule and allow files themselves.
+#
+# Private list: host names, user names and other terms that only the maintainer
+# knows. The public repository holds the mechanism, never the terms. Pass the
+# list with --deny-file or HARNESS_DENY_FILE. Without either, the private rules
+# do not run and the exit code does not change; CI runs this way. A private hit
+# prints rule "private-<line number>" in place of the term; the file name is
+# printed as is. `make check-public` uses run/public-deny.local (gitignored)
+# when it exists. Create it with one command, one term per line:
+#   printf '%s\n' <host> <user> > run/public-deny.local
 #
 # TODO: the HMAC layer of docs/public-harness-plan.md section 3
 # (tools/public-deny.hmac, key HARNESS_DENY_KEY) is not implemented yet.
@@ -58,8 +68,13 @@ def git(args, cwd=None, check=True):
 
 
 def read_lines(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read().splitlines()
+    # A rule or private file that is not UTF-8 is a setup error (exit 2), not
+    # a hit (exit 1). The message names the file, never its content.
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().splitlines()
+    except UnicodeDecodeError as e:
+        die("%s: not UTF-8 (byte %d)" % (path, e.start))
 
 
 def load_rules(path):

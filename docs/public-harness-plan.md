@@ -127,7 +127,7 @@ git grep -n -i -E -f "$PRIV/run/public-deny.local"; \
 git grep -n -E '/home/[a-z_][a-z0-9_-]*/|/tmp/claude-[0-9]|/scratch[p]ad/|claude\.ai/code/session_'
 ```
 
-## 3. `tools/check-public.sh` (spec, not yet written)
+## 3. `tools/check-public.sh`
 
 Purpose: fail when a file that would be committed carries a private detail.
 Runs as a pre-commit hook (`make hooks` installs it) and as a CI job on every push and
@@ -139,18 +139,20 @@ Inputs:
 - `tools/public-deny.txt` (public): one rule per line, `id<TAB>ERE`. Generic patterns only.
 - `tools/public-allow.txt` (public): exact strings that a deny rule may match (loopback
   and documentation IPs, published GHSA and CVE ids, the anthropic noreply address).
-- `tools/public-deny.hmac` (public): HMAC-SHA256 values of private tokens. The key is
-  the CI secret `HARNESS_DENY_KEY` and a copy in `run/`. Without the key the values
-  cannot be reversed, which plain hashes of a hostname or an IPv4 address can be in
-  seconds. The script lowercases every token (`[A-Za-z0-9][A-Za-z0-9._-]*`), computes
-  `openssl dgst -sha256 -hmac "$KEY"` and compares. Fork pull requests get no secret,
-  so this layer runs on pushes to `main` and in the maintainer's hook; the generic
-  layer runs everywhere.
-- `run/public-deny.local` (private, optional via `HARNESS_DENY_FILE`): the plain list
-  the HMAC file is generated from. Initial content, by kind: the two build-host names
-  and their family prefix, the IP in `run/servers.md`, the packages DNS IP, the
-  hosting-org name and the user name on the build hosts, three client names, the
-  internal codenames of the maintainer's other projects, the cloud instance name.
+- Private list (built): `run/public-deny.local`, gitignored, one term per line. Each line is
+  a Python regex, or a literal when it does not compile; matching ignores case. Pass it with
+  `--deny-file` or `HARNESS_DENY_FILE`; `make check-public` passes it when it exists. Create
+  it with one command: `printf '%s\n' <host> <user> > run/public-deny.local`. A hit prints
+  `private-<line number>` in place of the term. The matched line text is never printed; a
+  file name is printed as is, so a file named after a term shows it. Without the file the
+  private rules do not run and the exit code does not change, so CI and contributors run
+  the generic rules only. The initial content, by kind: the two build-host names and their
+  family prefix, the IP in `run/servers.md`, the packages DNS IP, the hosting-org name and
+  the user name on the build hosts, three client names, the internal codenames of the
+  maintainer's other projects, the cloud instance name.
+- HMAC layer (not built in 0.1): `tools/public-deny.hmac` would hold HMAC-SHA256 values of
+  the private terms, keyed by the CI secret `HARNESS_DENY_KEY`, so CI on pushes to `main`
+  could check them too. Fork pull requests get no secret, so it would not cover them.
 - Scope: `git ls-files` plus staged files; `--all` also scans untracked files that
   are not ignored; `--history` adds `git log -p --all` and commit messages.
 
