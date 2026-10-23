@@ -370,7 +370,7 @@ http_get() {   # $1 = port, $2 = path
     # first body line is then the chunk LENGTH ("3"), not the payload. That
     # reads as "the app is up but returning the wrong thing" and the poll
     # below never terminates. HTTP/1.0 gets the body delimited by close.
-    printf 'GET %s HTTP/1.0\r\nHost: b\r\n\r\n' "$2" >&"$fd" 2>/dev/null || {
+    printf 'GET %s HTTP/1.0\r\nHost: b\r\n\r\n' "$2" 1>&"$fd" 2>/dev/null || {
         exec {fd}>&-; return 1; }
     IFS= read -r -t 5 -u "$fd" line || { exec {fd}>&-; return 1; }
     status=${line#* }; status=${status%% *}
@@ -414,7 +414,7 @@ ctrl_put() {   # $1 = path, $2 = body
     CTRL_REPLY=""
     exec {fd}<>"/dev/tcp/127.0.0.1/$CTRL_PORT" 2>/dev/null || return 1
     printf 'PUT %s HTTP/1.1\r\nHost: b\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
-        "$1" "${#2}" "$2" >&"$fd" 2>/dev/null || { exec {fd}>&-; return 1; }
+        "$1" "${#2}" "$2" 1>&"$fd" 2>/dev/null || { exec {fd}>&-; return 1; }
     while IFS= read -r -t 10 -u "$fd" line; do
         CTRL_REPLY="$CTRL_REPLY$line"
     done
