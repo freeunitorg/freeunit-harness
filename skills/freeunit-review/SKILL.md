@@ -13,7 +13,11 @@ else's.
 only for a model whose finding changed the commit. Canonical spellings live in
 `tools/reviewers.txt`; run `tools/check-trailers.py <commit>` before you push and
 `tools/check-trailers.py -c comment.md` before you post a review. In a comment
-no model line takes an address, and the trailers go last.
+no model line takes an address, and the trailers go last. The harness in
+parentheses after the model is free text; only the model is checked. In a
+comment the harness may hold an `@handle`, but `<...>` and an email-shaped
+string still fail, and a Claude co-author in a commit still needs
+`<noreply@anthropic.com>` or a `(claude X.Y.Z)` suffix.
 
 ```bash
 make lint          # whitespace + convention gates
