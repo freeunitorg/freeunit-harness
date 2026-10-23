@@ -8,14 +8,21 @@ Usage:
     check-trailers.py -                 # the message on stdin
     check-trailers.py -c -              # a comment on stdin
 
-Rules (AGENTS.md, "Attribution: the trailer pair"):
+Rules (AGENTS.md, "Conventions here", the Trailers item):
 - Co-Authored-By and Reviewed-by name a model from tools/reviewers.txt, spelled as its
   canonical name. An alias is an error; the message names the canonical spelling.
-- The model may be followed by the harness that ran it, in parentheses:
-  "Reviewed-by: DeepSeek V4.1 Flash (DSH)".  A Claude address goes after it.
+  Only the model name is checked against the list.
+- Ask for the harness that ran the model. Write it only when the answer is complete
+  (name and version), in parentheses after the model:
+  "Reviewed-by: DeepSeek V4.1 Flash (dsh 0.2.1-rc.2)". Any string is accepted there,
+  nested parentheses too, so a custom harness passes. When the harness is not disclosed,
+  leave it out or write "()". The model is the longest canonical name or alias that the
+  value starts with; everything in the parentheses after it is the harness.
+  A Claude address goes after it.
 - In a commit, Claude models carry " <noreply@anthropic.com>" or end with "(claude <version>)",
   for example "Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)"; other models carry no address.
-- In a comment (-c), no model carries an address: no "@" and no "<...>" in the value.
+- In a comment (-c), no model carries an address: no "<...>", no email address
+  and no "@" in the model name. Another "@" in the harness is accepted.
 - Trailers sit in the last paragraph, one per line, with no blank line between them
   and no text after them.
 - Claude-Session trailers are not allowed.
@@ -32,6 +39,15 @@ ADDR = "<noreply@anthropic.com>"
 # "(claude 2.1.302)": the Claude Code version that ran the model; stands in for the address.
 CLAUDE_VER = re.compile(r"\(claude \d+\.\d+\.\d+\)$")
 KEYS = ("co-authored-by", "reviewed-by")
+# An email address: a plain or quoted local part, "@", then a domain with a dot whose
+# last label starts with a letter, or an address literal such as "[192.0.2.1]".
+# Unicode counts on both sides. "agent@lab", "x@y" and "dsh@0.2.1" are not addresses.
+_LOCAL = r'(?:"[^"\n]*"|[^\s()<>@,;:"\[\]]+)'
+_LABEL = r'[^\s()<>@,;:"\[\].]+'
+EMAIL = re.compile(_LOCAL + r"@(?:(?:" + _LABEL + r"\.)+[^\W\d_]" + _LABEL
+                   + r"|\[(?:IPv6:)?[0-9A-Fa-f:.]+\])")
+# The whitespace between the model and its harness: a tab and a no-break space count.
+HARNESS_OPEN = re.compile(r"\s+\(")
 
 
 def load(path=LIST):
@@ -53,6 +69,30 @@ def load(path=LIST):
     return canon, alias
 
 
+def split_model(name, canon, alias):
+    """Split "<model> (<harness>)" into the model and the harness (None if there is none).
+
+    A whole value in the list wins, so an alias that ends in parentheses is still an
+    alias. Otherwise the model is the longest canonical name or alias that the value
+    starts with, followed by whitespace and "(". The whitespace may be a tab or a
+    no-break space. The harness is everything after that "(" up to the final ")": any
+    string, empty included. A value that starts with no listed name splits at its
+    first whitespace and "(", so the error names the unknown model.
+    """
+    low = name.lower()
+    if low in canon or low in alias:
+        return name, None
+    if name.endswith(")"):
+        for k in sorted(list(canon) + list(alias), key=len, reverse=True):
+            m = HARNESS_OPEN.match(name, len(k)) if low.startswith(k) else None
+            if m:
+                return name[: len(k)], name[m.end(): -1]
+        m = HARNESS_OPEN.search(name)
+        if m and m.start() > 0:
+            return name[: m.start()], name[m.end(): -1]
+    return name, None
+
+
 def check(text, canon, alias, comment=False):
     """Return a list of problems in a commit message or comment body."""
     problems = []
@@ -69,10 +109,12 @@ def check(text, canon, alias, comment=False):
         if key.lower() not in KEYS:
             continue
         found.append(i)
-        # Before the harness suffix is dropped, so "(<noreply@anthropic.com>)" is caught too.
-        if comment and ("@" in value or re.search(r"<[^>]*>", value)):
-            problems.append("line %d: a comment takes no address" % i)
-            continue
+        if comment:
+            # The whole value is searched, so "(<noreply@anthropic.com>)" is caught too.
+            model = split_model(value, canon, alias)[0]
+            if re.search(r"<[^>]*>", value) or EMAIL.search(value) or "@" in model:
+                problems.append("line %d: a comment takes no address" % i)
+                continue
         if key not in ("Co-Authored-By", "Reviewed-by"):
             problems.append("line %d: spell the key %s" % (i, "Co-Authored-By" if key.lower() == KEYS[0] else "Reviewed-by"))
         has_addr = value.endswith(ADDR)
@@ -80,12 +122,7 @@ def check(text, canon, alias, comment=False):
         if re.search(r"<[^>]*>$", name):
             problems.append("line %d: unexpected address %r; only %s is used" % (i, name, ADDR))
             continue
-        # A whole value in the list wins, so an alias that ends in parentheses
-        # is still reported as an alias; otherwise drop a "(harness)" suffix.
-        if name.lower() not in canon and name.lower() not in alias:
-            h = re.match(r"^(.*\S)\s+\([^()]+\)$", name)
-            if h:
-                name = h.group(1)
+        name = split_model(name, canon, alias)[0]
         if name.lower() in canon:
             cname, want_addr = canon[name.lower()]
             if cname != name:
