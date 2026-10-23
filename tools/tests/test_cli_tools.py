@@ -154,6 +154,17 @@ class CliTest(unittest.TestCase):
         rec = json.loads(r.stdout)
         self.assertEqual((rec["session"], rec["cwd"], rec["start"], rec["tokens"]["out"]), ("abc123", "unit", "2026-10-09T10:00:00Z", 4))
 
+    def test_session_extract_cwd_class_puts_a_known_checkout_before_scratch_prefixes(self):
+        # A checkout under /tmp/ (TMPDIR on a CI runner) or a scratchpad is still the server checkout.
+        pad = os.path.join("/srv/agent", "scratchpad")
+        for root in ("/tmp/ci-run/unit", os.path.join(pad, "unit")):
+            common = self.load_common({"LAB_ENV": os.devnull, "UNIT_SRC": root})
+            self.assertEqual(common.cwd_class(root), "unit", root)
+            self.assertEqual(common.cwd_class(os.path.join(root, "src", "test")), "unit", root)
+            self.assertEqual(common.cwd_class(os.path.join(root, "x", "scratchpad", "w")), "scratch", root)
+            self.assertEqual(common.cwd_class(os.path.join(pad, "other")), "scratch", root)
+            self.assertEqual(common.cwd_class("/srv/elsewhere"), "other", root)
+
     # ---- clean-findings.py, loop-invariant-scan.py ----
 
     def test_clean_findings_needs_its_directory(self):
