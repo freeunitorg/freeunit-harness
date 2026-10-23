@@ -74,7 +74,7 @@ help:
 	@echo "  make test           pytest suite (TESTS=path/to/test_x.py to narrow)"
 	@echo "  make ctest          the C unit-test runner (build/tests)"
 	@echo "  make lint           whitespace + style gates, as CI runs them"
-	@echo "  make tools-test     unit tests of the harness tools (tools/tests)"
+	@echo "  make tools-test     unit tests of the harness tools (tools/tests, tools/model/tests)"
 	@echo "  make check-public   scan for private details (--all, plus run/public-deny.local if present)"
 	@echo "  make agents         write the skills links and the .claude/.opencode agent files"
 	@echo "  make agents-check   fail when those differ from a fresh tools/gen-agents.py run"
@@ -205,6 +205,7 @@ lint:
 tools-test:
 	@python3 -m unittest discover -s tools/tests -v
 	@python3 tools/perf-lab/test_perf_compare.py
+	@python3 -m pytest -q tools/model/tests
 
 .PHONY: check-public
 check-public:

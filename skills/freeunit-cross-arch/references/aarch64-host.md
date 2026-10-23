@@ -4,7 +4,7 @@
 reproduces on one architecture only and you want a real CPU rather than an emulator.
 
 Configured through the `alpine` role: `run/lab.env` sets `ALPINE_HOST` (see
-[lab.env.example](../../../tools/perf-lab/lab.env.example)), `tools/hosts alpine` resolves it,
+`tools/perf-lab/lab.env.example`), `tools/hosts alpine` resolves it,
 and `tools/unit-build -t alpine -H alpine -j 2 build` is the packaged path. The host
 inventory itself is private and stays in `run/servers.md`.
 
