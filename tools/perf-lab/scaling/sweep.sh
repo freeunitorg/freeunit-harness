@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# sweep.sh -- router-thread scaling sweep. Runs inside the lab container (run.sh
+# sweep) or natively on the perf box (NATIVE=1 run.sh sweep). Never on a laptop
+# that holds the load generator for another job.
+#
+#   $TREES/<variant>/build/sbin/unitd and build/lab_capp are built before (run.sh build).
+#   Writes $OUT/sweep.tsv (one row per run), $OUT/meta.txt, $OUT/freq.log and
+#   $OUT/summary.txt, then $OUT/DONE. A run whose oha result cannot be read
+#   gets "NA" for ok, bad, rps, p50 and p99, never zeros. Then analyze.py
+#   fails, summary.txt is not written, and $OUT/FAILED says why (exit 1).
+#
+# Layout: the server (router threads, and the application processes, which
+# inherit the cpuset) runs on the first thread of the first n physical cores.
+# Their SMT siblings stay idle. oha runs on both threads of the remaining cores.
+# With n equal to the core count no core is left: oha then gets the SMT siblings
+# of the server cores, and the row is marked "shared". Without SMT it shares
+# every server cpu.
+#
+# Runs are interleaved: round r runs every variant once, each with a fresh unitd,
+# and the variant order rotates by one each round. A slow drift of the box (heat,
+# frequency, a neighbour) then spreads over all variants instead of landing on one.
+#
+# LOCKS=1 counts mutex calls per request instead (SHIM: the path of
+# mutexshim.so). It writes $OUT/locks.tsv, locks-summary.txt and one
+# sites-<variant>-<workload>-<n>-<run>.txt per run; see locks.py.
+#
+# Stop early: touch $OUT/STOP. The sweep stops before the next run, so every row
+# in sweep.tsv is a complete run.
+set -u
+: "${VARIANTS:=master}" "${WORKLOADS:=capp static}" "${NS:=1 2 3}" "${RUNS:=5}" "${DUR:=30}" "${WARM:=3}"
+: "${LRUNS:=2}" "${LDUR:=10}"
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=tools/perf-lab/scaling/lib.sh
+. "$HERE/lib.sh"
+
+# set -f: a "*" must reach check_name as it is, not as the file names of the cwd
+(set -f; for v in $VARIANTS; do check_name variant "$v"; done; for w in $WORKLOADS; do check_name workload "$w"; done) \
+    || exit 1
+command -v "$OHA" >/dev/null || die "no oha ($OHA)"
+command -v taskset >/dev/null || die "no taskset"
+read_topology
+[ "$NCORES" -ge 2 ] || die "cannot read the topology from $SYSCPU"
+mkdir -p "$OUT"; chmod 1777 "$OUT"   # the router and the apps run as nobody in the container
+RUN_NS=$(usable_ns "$NS" 2> "$OUT/.skipped")
+TSV=$OUT/sweep.tsv
+
+# --- meta -------------------------------------------------------------------------
+mode=sweep; [ "${LOCKS:-0}" = 1 ] && mode=locks
+# shellcheck disable=SC2086  # one word per variant
+write_meta "$mode" $VARIANTS
+tee -a "$OUT/meta.txt" < "$OUT/.skipped" >&2; rm -f "$OUT/.skipped"   # a skipped n is in run.log and meta.txt
+[ -n "$RUN_NS" ] || die "no n of NS='$NS' fits the $NCORES cores"
+
+# --- frequency samples: "epoch kHz(cpu0) kHz(cpu1) ...", every 2 s (freq.py reads them)
+freq_sampler() {
+    local i line
+    while :; do
+        line=$(date +%s); i=0
+        while [ -r "$SYSCPU/cpu$i/cpufreq/scaling_cur_freq" ]; do
+            line="$line $(cat "$SYSCPU/cpu$i/cpufreq/scaling_cur_freq")"; i=$((i + 1))
+        done
+        echo "$line"
+        sleep 2
+    done
+}
+FREQ_PID=""
+if [ -r "$SYSCPU/cpu0/cpufreq/scaling_cur_freq" ]; then
+    freq_sampler > "$OUT/freq.log" & FREQ_PID=$!
+fi
+trap '[ -n "$FREQ_PID" ] && kill "$FREQ_PID" 2>/dev/null; stop_unit; own_out' EXIT
+
+setup_www
+
+# --- lock counts per request (LOCKS=1): shim snapshots around the measured window -------
+# The shim slows every lock call, so this stage writes no throughput rows.
+if [ "${LOCKS:-0}" = 1 ]; then
+    [ -f "${SHIM:-}" ] || die "LOCKS=1 needs SHIM, the path of mutexshim.so (run.sh shim)"
+    LT=$OUT/locks.tsv
+    printf 'variant\tworkload\tn\trun\tok\trole\tpid\tcalls\tcontended\twait_ns\n' > "$LT"
+    snap() {  # dir: two copies of the shim files 0.3 s apart (locks.py takes the larger), and the roles
+        local f p
+        mkdir -p "$1/x"
+        cp "$SD"/mutex-*.tsv "$1"/ 2>/dev/null; sleep 0.3; cp "$SD"/mutex-*.tsv "$1/x"/ 2>/dev/null
+        for f in "$1"/mutex-*.tsv; do
+            [ -e "$f" ] || continue
+            p=${f##*/mutex-}; p=${p%%-*}
+            echo "$p $(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | cut -c1-60)"
+        done > "$1/roles.txt"
+    }
+    for w in $WORKLOADS; do
+      for n in $RUN_NS; do
+        load=$(cpus_load "$n")
+        for ((r = 1; r <= LRUNS; r++)); do
+          for v in $VARIANTS; do
+            [ -e "$OUT/STOP" ] && { echo "STOP file: stopping before locks $v $w n=$n run $r"; break 4; }
+            SD=$OUT/shim/$v-$w-$n-$r; rm -rf "$SD"; mkdir -p "$SD"; chmod 1777 "$SD"
+            PRELOAD=$SHIM MUTEXSHIM_OUT=$SD start_unit "$v" "$w" "$n"
+            oha_run "$WARM" "$load" "$(url_for "$w")"
+            # 2.5 s idle: the dumper writes once a second, so the files hold the warm-up
+            sleep 2.5; snap "$SD/a"
+            oha_run "$LDUR" "$load" "$(url_for "$w")" "$SD/oha.json"
+            sleep 2.5; snap "$SD/b"
+            stop_unit
+            if res=$(read_oha "$SD/oha.json"); then
+                read -r ok bad rps p50 p99 <<< "$res"
+                python3 "$HERE/locks.py" sites "$SD" > "$OUT/sites-$v-$w-$n-$r.txt" 2>&1
+                echo "  locks $v $w n=$n run $r: ok=$ok bad=$bad rps(shim)=$rps"
+            else
+                ok=NA
+                echo "  locks $v $w n=$n run $r: LOAD FAILED (no oha result)"
+            fi
+            # Every cell gets a row, with or without snapshots: a lost row would hide a failed cell.
+            python3 "$HERE/locks.py" diff "$SD" "$v" "$w" "$n" "$r" "$ok" >> "$LT" \
+                || printf '%s\t%s\t%s\t%s\t%s\tnone\t-\tNA\tNA\tNA\n' "$v" "$w" "$n" "$r" "$ok" >> "$LT"
+          done
+        done
+      done
+    done
+    finish_summary "$OUT/locks-summary.txt" python3 "$HERE/locks.py" summary "$LT" || exit 1
+    echo "locks done"
+    exit 0
+fi
+
+printf 'variant\tworkload\tn\tlayout\trun\tok\tbad\trps\tp50_ms\tp99_ms\tsrv_cpu_pct\tload_cpu_pct\tts\n' > "$TSV"
+
+# --- throughput: interleaved rounds, a fresh server per run, the order rotates per round
+read -r -a VA <<< "$VARIANTS"; nv=${#VA[@]}
+for w in $WORKLOADS; do
+  for n in $RUN_NS; do
+    srv=$(cpus_server "$n"); load=$(cpus_load "$n")
+    layout=clean; [ "$n" -ge "$NCORES" ] && layout=shared
+    for ((r = 1; r <= RUNS; r++)); do
+      for ((k = 0; k < nv; k++)); do
+        v=${VA[(k + r - 1) % nv]}
+        [ -e "$OUT/STOP" ] && { echo "STOP file: stopping before $v $w n=$n run $r"; break 4; }
+        start_unit "$v" "$w" "$n"
+        oha_run "$WARM" "$load" "$(url_for "$w")"
+        read -r sb st < <(cpu_ticks "$srv"); read -r lb lt < <(cpu_ticks "$load")
+        oha_run "$DUR" "$load" "$(url_for "$w")" "$R/oha.json"
+        read -r sb2 st2 < <(cpu_ticks "$srv"); read -r lb2 lt2 < <(cpu_ticks "$load")
+        if res=$(read_oha "$R/oha.json"); then
+            read -r ok bad rps p50 p99 <<< "$res"
+        else
+            ok=NA bad=NA rps=NA p50=NA p99=NA   # analyze.py: NO LOAD, and no verdict
+        fi
+        sc=$(awk -v b=$((sb2 - sb)) -v t=$((st2 - st)) 'BEGIN{printf "%.1f", (t > 0 ? 100 * b / t : 0)}')
+        lc=$(awk -v b=$((lb2 - lb)) -v t=$((lt2 - lt)) 'BEGIN{printf "%.1f", (t > 0 ? 100 * b / t : 0)}')
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$v" "$w" "$n" "$layout" "$r" \
+            "$ok" "$bad" "$rps" "$p50" "$p99" "$sc" "$lc" "$(date +%s)" >> "$TSV"
+        echo "  $v $w n=$n run $r: rps=$rps p50=${p50}ms p99=${p99}ms srv=${sc}% load=${lc}% bad=$bad"
+        stop_unit
+      done
+    done
+  done
+done
+
+finish_summary "$OUT/summary.txt" python3 "$HERE/analyze.py" "$TSV" "${PAIRS:-}" || exit 1
+echo "sweep done"

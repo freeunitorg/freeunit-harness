@@ -115,4 +115,8 @@ logic to Python:
 - `tools/unitd-ctl`
 - `tools/watch-run.sh`
 
-`tools/check-public.sh` is the one tracked script with a `#!/bin/sh` shebang.
+`tools/check-public.sh`, `tools/perf-lab/scaling/run.sh` and `tools/perf-lab/scaling/build-tree.sh` are the
+tracked scripts with a `#!/bin/sh` shebang. `lib.sh`, `sweep.sh` and `profile.sh` in `tools/perf-lab/scaling/` use
+`#!/usr/bin/env bash` by design. `sweep.sh` and `profile.sh` run only in the lab container or on the perf box.
+`lib.sh` runs there too, and `tools/tests/test_perf_lab_scaling.py` also sources it under bash on the developer
+host, so `make tools-test` needs bash.
