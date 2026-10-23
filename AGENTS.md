@@ -183,8 +183,13 @@ carries a private detail (a host name, an address, a private path).
 - If the source disagrees with a doc, the source wins and the doc gets fixed.
 - Trailers: `Co-Authored-By: <model>` for the model that wrote the code, and
   `Reviewed-by: <model>` only for a model whose finding changed the commit.
-  Spell the model as `tools/reviewers.txt` does, optionally followed by the
-  harness in parentheses (`Reviewed-by: DeepSeek V4.1 Flash (DSH)`); Claude
+  Spell the model as `tools/reviewers.txt` does; only the model name is checked
+  against it. Ask for the harness that ran the model and write it in parentheses
+  only when the answer is complete, name and version
+  (`Reviewed-by: DeepSeek V4.1 Flash (dsh 0.2.1-rc.2)`). Any string is accepted
+  there, so a custom harness passes. When the harness is not disclosed, leave it
+  out or write `()`. In a comment the harness may hold an `@handle`, but `<...>`
+  and an email-shaped string still fail. Claude
   models add `<noreply@anthropic.com>` or end with `(claude <version>)` in a
   commit (`Co-Authored-By: Claude Opus 5.5 (claude 2.1.302)`), others take no address. In a
   GitHub comment no model line takes an address. In both, the trailers go last, in one

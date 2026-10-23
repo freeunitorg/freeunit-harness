@@ -48,8 +48,10 @@ Never inflate severity to get attention, and never downgrade a verified defect.
 3. "Not covered by tests" list (may be empty, but always present).
 4. "Master and CI" section: conflict status, and red jobs with their cause.
 5. "What I ran": commands and results, in the order you ran them, including mutation checks and each fix you tried for a failure.
-6. Trailers, last, exactly as in this repo:
-   Reviewed-by: DeepSeek V4.1 Flash (DSH)
+6. Trailers, last, exactly as in this repo. Put the harness name and version in
+   the parentheses. When you do not know the version, write `()` or leave the
+   parentheses out:
+   Reviewed-by: DeepSeek V4.1 Flash (dsh <version>)
    Harness: DeepSeek Harness
    Tools: <tools you used>
 

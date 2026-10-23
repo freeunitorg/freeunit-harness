@@ -128,6 +128,73 @@ class TrailerTest(unittest.TestCase):
         r = subprocess.run([sys.executable, SCRIPT, "-c", "-"], input="x\n\nReviewed-by: Claude Fable 5.1\n", capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    # The harness agreement (2026-10-23): any harness string passes, an undisclosed
+    # one may be empty, and only the model name is checked against the list.
+    def test_empty_harness_is_undisclosed(self):
+        self.assertEqual(self.comment("x\n\nReviewed-by: Codex ()\n"), [])
+        self.assertEqual(self.problems("x\n\nReviewed-by: Codex ()\n"), [])
+        self.assertEqual(self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 () %s\n" % ADDR), [])
+
+    def test_comment_harness_may_hold_an_at_sign(self):
+        self.assertEqual(self.comment("x\n\nReviewed-by: Codex (@deepseek-ai/dsh 0.2.1-rc.2)\n"), [])
+        self.assertEqual(self.comment("x\n\nReviewed-by: Codex (agent@lab 1.0)\n"), [])
+        # The negative half: an email address, a "<...>" or an "@" in the model still fails.
+        for v in ("Codex (agent@example.com 1.0)", "Codex noreply@anthropic.com",
+                  "Claude Fable 5.1 (dsh <x>)", "Codex (<agent@lab>)", "Codex@lab (dsh 1.0)"):
+            self.assertEqual(self.comment("x\n\nReviewed-by: %s\n" % v),
+                             ["line 3: a comment takes no address"], v)
+
+    def test_comment_rejects_every_email_form(self):
+        # A quoted local part, a Unicode local part, Unicode domains and address literals.
+        # "\u30c6\u30b9\u30c8" is the reserved IDN test TLD.
+        for v in ('Codex ("agent name"@example.com 1.0)', "Codex (\u7528\u6237@example.com 1.0)",
+                  "Codex (agent@b\u00fccher.example 1.0)", "Codex (agent@example.\u30c6\u30b9\u30c8 1.0)",
+                  "Codex (jane@[192.0.2.1] 1.0)", "Codex (jane@[IPv6:2001:db8::1] 1.0)",
+                  "Codex (mailto:agent@example.org)"):
+            self.assertEqual(self.comment("x\n\nReviewed-by: %s\n" % v),
+                             ["line 3: a comment takes no address"], v)
+        # The positive half: an "@" with no email-shaped domain after it still passes.
+        for v in ("Codex (agent@lab 1.0)", "Codex (x@y 1.0)", "Codex (@deepseek-ai/dsh 0.2.1-rc.2)",
+                  "Codex (@deepseek-ai/dsh@0.2.1-rc.2)", "Codex (dsh@0.2.1)"):
+            self.assertEqual(self.comment("x\n\nReviewed-by: %s\n" % v), [], v)
+
+    def test_any_whitespace_before_the_harness(self):
+        # A tab, a no-break space and two spaces all separate the model from the harness.
+        for sep in ("\t", "\u00a0", "  "):
+            v = "Codex%s(dsh 1.0)" % sep
+            self.assertEqual(self.problems("x\n\nReviewed-by: %s\n" % v), [], repr(v))
+            self.assertEqual(self.comment("x\n\nReviewed-by: %s\n" % v), [], repr(v))
+            v = "DeepSeek V4.1 Flash%s(DSH) (dsh 0.2.1-rc.2)" % sep
+            self.assertEqual(self.comment("x\n\nReviewed-by: %s\n" % v), [], repr(v))
+            v = "Llama 9%s(my (fork) 1.0)" % sep
+            self.assertEqual(self.comment("x\n\nReviewed-by: %s\n" % v),
+                             ["line 3: unknown model 'Llama 9'; add it to tools/reviewers.txt"], repr(v))
+
+    def test_harness_with_nested_parentheses(self):
+        self.assertEqual(self.comment("x\n\nReviewed-by: DeepSeek V4.1 Flash (DSH) (dsh 0.2.1-rc.2)\n"), [])
+        self.assertEqual(self.comment("x\n\nReviewed-by: Codex (my (fork) 1.0)\n"), [])
+        self.assertEqual(self.problems("x\n\nReviewed-by: Codex (my (fork) 1.0)\n"), [])
+
+    def test_nested_harness_still_checks_the_model(self):
+        p = self.comment("x\n\nReviewed-by: DeepSeek (DSH) (dsh 0.2.1-rc.2)\n")
+        self.assertEqual(p, ["line 3: 'DeepSeek' is an alias; use 'DeepSeek V4.1 Flash'"])
+        p = self.comment("x\n\nReviewed-by: Llama 9 (my (fork) 1.0)\n")
+        self.assertEqual(p, ["line 3: unknown model 'Llama 9'; add it to tools/reviewers.txt"])
+        p = self.comment("x\n\nReviewed-by: codex (my (fork) 1.0)\n")
+        self.assertEqual(p, ["line 3: 'codex' should be spelled 'Codex'"])
+
+    def test_custom_harness_and_claude_address_in_a_commit(self):
+        self.assertEqual(self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (custom-loop 7) %s\n" % ADDR), [])
+        self.assertEqual(self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (my (fork) 1.0) %s\n" % ADDR), [])
+        p = self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (custom-loop 7)\n")
+        self.assertEqual(p, ["line 3: 'Claude Opus 5.5' needs ' %s' or a '(claude <version>)' suffix" % ADDR])
+        p = self.problems("x\n\nCo-Authored-By: Claude Opus 5.5 (my (fork) 1.0)\n")
+        self.assertEqual(p, ["line 3: 'Claude Opus 5.5' needs ' %s' or a '(claude <version>)' suffix" % ADDR])
+
+    def test_gpt_sol_is_a_canonical_model(self):
+        self.assertEqual(self.problems("x\n\nReviewed-by: GPT-6.1-Sol (codex-cli 0.9.1)\n"), [])
+        self.assertIn("should be spelled 'GPT-6.1-Sol'", self.problems("x\n\nReviewed-by: gpt-6.1-sol\n")[0])
+
     def test_every_list_entry_is_self_consistent(self):
         for key, (name, addr) in CANON.items():
             line = "Reviewed-by: %s%s\n" % (name, " " + ADDR if addr else "")
