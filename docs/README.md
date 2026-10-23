@@ -21,6 +21,7 @@ How FreeUnit works, written against the source tree, and how this harness is run
 
 | Document | What it covers |
 |---|---|
+| [ci.md](ci.md) | the CI of this harness repository: the five jobs, why it needs no secrets, the checks to require in branch protection |
 | [ci-rebalance-2026-10-08.md](ci-rebalance-2026-10-08.md) | current: CI cost by workflow, what runs on which event, the recommendations with their status |
 | [ci-matrix-audit-2026-10-07.md](ci-matrix-audit-2026-10-07.md) | the earlier audit of the CI matrix: toolchains, runner images, pins; recommendations with their status |
 
