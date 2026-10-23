@@ -1,5 +1,5 @@
 """Tests of the small command line tools: inbox, hosts, perf-bisect.sh, session-extract, clean-findings.py
-and loop-invariant-scan.py. Each test works in its own temporary directory. Nothing touches the network.
+and loop-invariant-scan.py, plus the suites that make tools-test runs. Each test works in its own temporary directory. Nothing touches the network.
 
 Run: python3 -m unittest discover -s tools/tests -v
 """
@@ -183,6 +183,29 @@ class CliTest(unittest.TestCase):
         r = self.run_cmd(sys.executable, script, scope, env={"PATH": empty})
         self.assertEqual(r.returncode, 2)
         self.assertIn("ast-grep", r.stderr)
+
+
+class MakeToolsTestTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("make"), "make is not installed")
+    def test_tools_test_runs_every_suite(self):
+        # Run make tools-test with a stub python3 first in PATH. The stub records its arguments and exits 0,
+        # so a recipe that only prints a command, or names a suite in a comment, records nothing.
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="make-test-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        stub, log = os.path.join(tmp, "python3"), os.path.join(tmp, "argv.log")
+        with open(stub, "w") as f:
+            f.write('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$PYTHON3_ARGV_LOG"\n')
+        os.chmod(stub, 0o755)
+        env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        env.update(PATH=tmp + os.pathsep + os.environ.get("PATH", ""), PYTHON3_ARGV_LOG=log)
+        r = subprocess.run(["make", "-s", "tools-test"], capture_output=True, text=True, env=env,
+                           cwd=os.path.dirname(TOOLS), stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(log) as f:
+            runs = f.read().splitlines()
+        for suite in ("-m unittest discover -s tools/tests -v", "tools/perf-lab/test_perf_compare.py",
+                      "-m pytest -q tools/model/tests"):
+            self.assertIn(suite, runs, f"make tools-test does not run python3 {suite}")
 
 
 if __name__ == "__main__":
