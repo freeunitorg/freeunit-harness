@@ -358,7 +358,7 @@ perf_preflight() {
             # The release as uname -r prints it; a test fakes PROCSYS.
             kr=$(cat "$PROCSYS/kernel/osrelease" 2>/dev/null) || kr=unknown
             case $kr in
-                6.8.0-136-generic) seen="Enough on this kernel, $kr (measured on pro4s-2)." ;;
+                6.8.0-136-generic) seen="Enough on this kernel, $kr (measured on the lab box)." ;;
                 *) seen="Not measured on this kernel, $kr." ;;
             esac
             echo "note: perf_event_paranoid=$PARANOID and CAP_PERFMON only. $seen An Ubuntu noble kernel before" \

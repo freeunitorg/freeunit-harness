@@ -221,7 +221,7 @@ class PreflightTest(FakeBox):
         out = self.run_pf(self.box(4, cap=self.PERFMON, release="6.8.0-136-generic"), "record c2c cpus")
         self.assertIn("rc=0 level=full user=0", out)
         self.assertIn("note: perf_event_paranoid=4 and CAP_PERFMON only. Enough on this kernel, 6.8.0-136-generic"
-                      " (measured on pro4s-2).", out)
+                      " (measured on the lab box).", out)
         out = self.run_pf(self.box(4, cap=self.SYS_ADMIN), "record")
         self.assertIn("rc=0 level=full", out)
         self.assertNotIn("note:", out)
@@ -231,7 +231,7 @@ class PreflightTest(FakeBox):
         out = self.run_pf(self.box(4, cap=self.PERFMON), "record")
         self.assertIn("rc=0 level=full", out)
         self.assertIn("CAP_PERFMON only. Not measured on this kernel, 6.8.0-90-generic.", out)
-        self.assertNotIn("measured on pro4s-2", out)
+        self.assertNotIn("measured on the lab box", out)
         # only the exact release, and no environment variable can claim it
         out = self.run_pf(self.box(4, cap=self.PERFMON, release="6.8.0-136-made-up"), "record",
                           KERNEL_RELEASE="6.8.0-136-generic")
