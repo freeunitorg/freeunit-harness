@@ -5,3 +5,15 @@ ssh $HOST make
 Listen on 127.0.0.1 or 0.0.0.0 or 192.0.2.7.
 Co-Authored-By: Claude <noreply@anthropic.com>
 Author: test@example.invalid
+Read notes.lan.md and settings.internal.json; loopback is ::1, a hash is cafe:1.
+The ranges fc00::/7 and fe80::/10 name no host.
+self.internal = 1
+obj.lan=2
+import foo.internal
+from foo.bar.internal import x
+import foo.bar.internal
+print(a.b.internal)
+return a.b.internal
+x = self.a.internal
+foo.internal()
+Read ws01.lan.md now; 2001:db8:fd12::1 is not private.
