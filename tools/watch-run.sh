@@ -124,12 +124,12 @@ start=$(date +%s)
 misses=0
 failed=0
 incomplete=0
-declare -A DONE=()
+declare -A FINISHED=()
 
 while :; do
     pending=0
     for id in "${IDS[@]}"; do
-        [ -n "${DONE[$id]:-}" ] && continue
+        [ -n "${FINISHED[$id]:-}" ] && continue
         if ! json=$(gh_ run view "$id" \
                        --json status,conclusion,url,workflowName 2>/dev/null); then
             misses=$((misses + 1))
@@ -148,7 +148,7 @@ while :; do
         name=$(jq -r .workflowName <<<"$json")
 
         if [ "$status" = "completed" ]; then
-            DONE[$id]=1
+            FINISHED[$id]=1
             echo "RUN $id completed ${concl:-unknown} $url"
             if [ "$concl" != "success" ]; then
                 failed=$((failed + 1))
@@ -172,7 +172,7 @@ while :; do
     now=$(date +%s)
     if [ $((now - start)) -ge "$DEADLINE" ]; then
         for id in "${IDS[@]}"; do
-            [ -n "${DONE[$id]:-}" ] || { echo "RUN $id in_progress deadline-reached"; incomplete=1; }
+            [ -n "${FINISHED[$id]:-}" ] || { echo "RUN $id in_progress deadline-reached"; incomplete=1; }
         done
         echo "OVERALL incomplete ${#IDS[@]} run(s)"
         echo "!! deadline of ${DEADLINE}s reached; $pending run(s) have NOT concluded." >&2
