@@ -87,6 +87,36 @@ if have ab; then say_ok "ab — secondary load generator"; else say_warn "ab not
 if have taskset; then say_ok "taskset — CPU pinning"; else say_fail "taskset not found (Debian: util-linux); bench results would be unpinned and untrustworthy"; fi
 
 echo
+echo "Kernel & descriptor limits (recommended with PR #810 RLIMIT_NOFILE raise):"
+nofile_soft=$(ulimit -Sn 2>/dev/null || echo 0)
+nofile_hard=$(ulimit -Hn 2>/dev/null || echo 0)
+if [ "$nofile_hard" = "unlimited" ] || [ "${nofile_hard:-0}" -ge 65535 ] 2>/dev/null; then
+    say_ok "RLIMIT_NOFILE (ulimit -n) — soft=$nofile_soft hard=$nofile_hard (unitd router/controller raise soft to min(hard, 1048576))"
+else
+    say_warn "RLIMIT_NOFILE hard=$nofile_hard (< 65535); raise LimitNOFILE / container --ulimit nofile so unitd can raise soft limit"
+fi
+if [ -r /proc/sys/fs/file-max ]; then
+    fmax=$(cat /proc/sys/fs/file-max 2>/dev/null || echo 0)
+    if [ "${fmax:-0}" -ge 524288 ] 2>/dev/null; then
+        say_ok "fs.file-max = $fmax"
+    else
+        say_warn "fs.file-max = $fmax (recommend >= 2097152 via sysctl so system-wide table matches raised RLIMIT_NOFILE)"
+    fi
+fi
+if [ -r /proc/sys/net/core/somaxconn ]; then
+    somax=$(cat /proc/sys/net/core/somaxconn 2>/dev/null || echo 0)
+    if [ "${somax:-0}" -ge 4096 ] 2>/dev/null; then
+        say_ok "net.core.somaxconn = $somax (recommend >= 8192 for high-concurrency accept queues)"
+    else
+        say_warn "net.core.somaxconn = $somax (< 4096; recommend sysctl net.core.somaxconn=32768 and net.ipv4.tcp_max_syn_backlog=32768)"
+    fi
+fi
+if [ -r /proc/sys/fs/aio-max-nr ]; then
+    aiomax=$(cat /proc/sys/fs/aio-max-nr 2>/dev/null || echo 0)
+    say_ok "fs.aio-max-nr = $aiomax (recommend >= 262144 for heavy async I/O; see skills/freeunit-benchmark/references/methodology.md)"
+fi
+
+echo
 echo "Local CI (make ci-local):"
 if have docker; then say_ok "docker ($(docker --version 2>/dev/null | cut -d, -f1))"; else say_warn "docker not found — 'make ci-local' unavailable"; fi
 
