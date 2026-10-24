@@ -1,0 +1,155 @@
+#!/bin/sh
+#
+# shell_check <checkout>: G8 of run-gates.  Report-only.
+#
+# For each tracked regular file whose shebang is #!/bin/sh (or env sh):
+#   - dash -n and busybox ash -n (a local busybox, else alpine in docker);
+#   - greps for the traps in docs/shell.md that shellcheck -s sh misses.
+# Each finding is one "WARN: ..." line.  The exit status is 0 unless the
+# checkout is not a git repository, cannot be read, or holds no #!/bin/sh
+# scripts (2).  A shell that is missing prints a SKIP line and leaves the
+# exit status at 0 so the remaining checks still report.
+
+set -u
+
+DOC=https://github.com/freeunitorg/freeunit-harness/blob/main/docs/shell.md
+
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+repo=${1:?usage: shell_check <checkout>}
+cd "$repo" || exit 2
+
+files=$(mktemp "${TMPDIR:-/tmp}/g8-files.XXXXXX") || exit 2
+list=$(mktemp "${TMPDIR:-/tmp}/g8-list.XXXXXX") || { rm -f "$files"; exit 2; }
+err=$(mktemp "${TMPDIR:-/tmp}/g8-err.XXXXXX") || { rm -f "$files" "$list"; exit 2; }
+trap 'rm -f "$files" "$list" "$err"' EXIT
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "shell_check: $repo is not a git checkout" >&2
+    exit 2
+fi
+
+git -c core.quotePath=off ls-files > "$files" || exit 2
+
+while IFS= read -r f; do
+    if ! test -f "./$f" || test -L "./$f"; then
+        continue
+    fi
+    first=
+    IFS= read -r first < "./$f" || :
+    case "$first" in
+        "#!/bin/sh"|"#!/bin/sh "*|"#!/bin/sh	"*|"#! /bin/sh"|"#! /bin/sh "*|"#! /bin/sh	"*|"#!/usr/bin/env sh"|"#!/usr/bin/env sh "*|"#!/usr/bin/env sh	"*)
+            printf '%s\n' "$f" >> "$list"
+            ;;
+    esac
+done < "$files"
+
+n=$(wc -l < "$list" | tr -d ' ')
+if [ "$n" -eq 0 ]; then
+    echo "shell_check: nothing to check in $repo" >&2
+    exit 2
+fi
+
+printf 'G8: %s #!/bin/sh scripts\n' "$n"
+warns=0
+
+warn() {
+    printf 'WARN: %s\n' "$1"
+    warns=$((warns + 1))
+}
+
+warn_lines() {
+    prefix=$1
+    text=$2
+    if [ -z "$text" ]; then
+        warn "${prefix% }"
+        return
+    fi
+    while IFS= read -r l; do
+        warn "$prefix$l"
+    done <<EOF_WARN
+$text
+EOF_WARN
+}
+
+# Syntax under dash.
+if command -v dash >/dev/null; then
+    while IFS= read -r f; do
+        out=$(dash -n "./$f" 2>&1) || warn_lines "$f: dash -n: " "$out"
+    done < "$list"
+else
+    printf 'G8 (dash): SKIP: dash not found\n'
+fi
+
+# Syntax under busybox ash.
+if command -v busybox >/dev/null; then
+    while IFS= read -r f; do
+        out=$(busybox ash -n "./$f" 2>&1) || warn_lines "$f: ash -n: " "$out"
+    done < "$list"
+elif command -v docker >/dev/null; then
+    # One container for all files; stderr goes to $err so docker pull lines
+    # never become WARN lines.
+    # shellcheck disable=SC2016 # the script runs inside the container
+    if ! out=$(docker run --quiet --rm -i -v "$PWD:/src:ro" -w /src alpine:3.22 sh -c '
+        while IFS= read -r f; do
+            e=$(ash -n "./$f" 2>&1) || printf "%s\n" "$e" | while IFS= read -r l; do
+                printf "%s: ash -n: %s\n" "$f" "$l"
+            done
+        done' < "$list" 2>"$err")
+    then
+        msg=$(tr '\n' ' ' < "$err" | sed 's/[[:space:]]*$//')
+        printf 'G8 (ash): SKIP: docker run failed: %s\n' "$msg"
+    elif [ -n "$out" ]; then
+        warn_lines "" "$out"
+    fi
+else
+    printf 'G8 (ash): SKIP: neither busybox nor docker found\n'
+fi
+
+while IFS= read -r f; do
+    # dash and ash expand backslashes in echo.  JSON or base64 piped on
+    # breaks; printf '%s\n' does not.
+    # Comment lines are dropped; a heredoc body is not, so read the hit.
+    hits=$(grep -nE '(^|[;&|[:space:]])echo[[:space:]]+"?\$[^|]*\|' -- "$f" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' || :)
+    if [ -n "$hits" ]; then
+        while IFS= read -r l; do
+            case "$l" in
+                *'|'*jq*|*'|'*python*|*'|'*base64*)
+                    warn "$f:$l [strong: echo of a variable into a parser]" ;;
+                *)
+                    warn "$f:$l [echo of a variable into a pipe]" ;;
+            esac
+        done <<EOF_ECHO
+$hits
+EOF_ECHO
+    fi
+
+    # grep -q exits early; under pipefail the writer's SIGPIPE fails the
+    # pipeline.
+    if grep -qE '^[[:space:]]*set[[:space:]].*pipefail' -- "$f"; then
+        hits=$(grep -nE '(^|[^|])\|[[:space:]]*grep[[:space:]]+(-[[:alnum:]]*q|--quiet)' -- "$f" \
+            | grep -vE '^[0-9]+:[[:space:]]*#' || :)
+        if [ -n "$hits" ]; then
+            while IFS= read -r l; do
+                warn "$f:$l [grep -q in a pipe under pipefail]"
+            done <<EOF_GREP
+$hits
+EOF_GREP
+        fi
+    fi
+
+    # dash and ash skip the EXIT trap when a signal kills the shell.
+    hits=$(grep -nE '^[[:space:]]*trap[[:space:]].*[[:space:]](EXIT|0)([[:space:]]|$)' -- "$f" || :)
+    if [ -n "$hits" ] \
+        && ! grep -qE '^[[:space:]]*trap[[:space:]].*[[:space:]](HUP|INT|TERM|1|2|15)([[:space:]]|$)' -- "$f"
+    then
+        l=$(printf '%s\n' "$hits" | head -n 1)
+        warn "$f:$l [EXIT trap without HUP/INT/TERM traps]"
+    fi
+done < "$list"
+
+printf 'G8: %s warning(s); the rules are in %s\n' "$warns" "$DOC"
+exit 0

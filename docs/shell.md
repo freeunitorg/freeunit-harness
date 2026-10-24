@@ -82,6 +82,19 @@ shellcheck -s sh "$f"
 checkbashisms "$f"          # Debian devscripts
 ```
 
+`tools/gates/run-gates -s <checkout> -g 8` (G8) runs `dash -n` and busybox
+`ash -n` on each tracked `#!/bin/sh` file of a FreeUnit checkout. It also
+greps for traps that `shellcheck -s sh` misses: `echo "$x" |` (stronger
+when piped to `jq`, `python` or `base64`), `| grep -q` in a file that sets
+`pipefail`, and an `EXIT` trap without `HUP`/`INT`/`TERM` traps. It prints
+`WARN:` lines (`WARN: file:line:` for grep hits, or the shell's diagnostic
+for parse errors) and does not fail. Comment lines are skipped; a heredoc
+body is not, so read each hit. The failing checks are in the server repo's
+CI: `.github/workflows/lint-shell.yml` runs `.github/scripts/lint-shell.sh`
+(`shellcheck -s sh`, `dash -n` and a bare `set -o pipefail` check on
+non-generated `sh` scripts). G8 adds what that job does not run: `ash -n`,
+the three greps, and checks on `configure` and `*.in`.
+
 For a sed expression, compare outputs on the same input:
 
 ```sh
@@ -115,4 +128,4 @@ logic to Python:
 - `tools/unitd-ctl`
 - `tools/watch-run.sh`
 
-`tools/check-public.sh` is the one tracked script with a `#!/bin/sh` shebang.
+`tools/check-public.sh` and `tools/gates/shell_check` are the tracked scripts with a `#!/bin/sh` shebang.
