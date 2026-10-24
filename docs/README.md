@@ -45,6 +45,7 @@ How FreeUnit works, written against the source tree, and how this harness is run
 |---|---|
 | [../skills/freeunit-benchmark/references/guide.md](../skills/freeunit-benchmark/references/guide.md) | end-to-end guide to `freeunit-harness` and benchmarking: overview, cell architecture, `tools/doctor` and run commands, reading JSONL / `epx-fit.py` / `perf-compare.py` results, and references |
 | [perf/perf-lab.md](perf/perf-lab.md) | the perf lab: one command per job (`tools/perf-job.sh`), the box schedule, claim and idle gate, job and TSV format, the verdict from `tools/perf-compare.py`, measured noise floors |
+| [perf/scaling-kit.md](perf/scaling-kit.md) | the router-thread scaling kit (`tools/perf-lab/scaling/`): sweep over listen_threads, lock counts per request from shim snapshots, perf and c2c at one point; the method and its traps |
 | [perf/perf-plan-2026-10.md](perf/perf-plan-2026-10.md) | the performance plan for October 2026, from the research pages below |
 | [perf/freeunit-php-path-2026-10.md](perf/freeunit-php-path-2026-10.md) | the PHP request path: cost per request, and a worker mode |
 | [perf/php-worker-mode-api-survey-2026-10.md](perf/php-worker-mode-api-survey-2026-10.md) | worker-mode APIs of other PHP application servers |

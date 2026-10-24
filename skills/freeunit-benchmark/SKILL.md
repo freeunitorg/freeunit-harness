@@ -81,6 +81,10 @@ nearly went into a release report before anyone checked — see
   `tools/perf-job.sh <job>` runs a claimed, idle-gated A/B with its own null
   phase on the perf box, and `tools/perf-compare.py` prints the verdict.
   Use it for any per-request cost claim that small models must be able to rerun.
+- `docs/perf/scaling-kit.md` (from the repository root): the router-thread
+  scaling kit, `tools/perf-lab/scaling/run.sh`. Interleaved sweeps over
+  listen_threads, mutex calls per request from two shim snapshots, perf c2c,
+  and the traps: clock drift, loadgen-bound cells, one-run pairs.
 - [`references/methodology.md`](references/methodology.md) — the scenario
   matrix, the knobs, and how to read RPS against CPU-per-request.
 - [`references/startup.md`](references/startup.md) — `tools/bench-startup.sh`,
