@@ -203,6 +203,8 @@ which CI does not have. In public text, name a machine by its role
   the canonical spelling on a miss. A model not in the list goes into the list first.
 - `/src/`, `/build/`, `/run/`, `/scratch/` are local working state and are
   gitignored. Nothing under them belongs in a commit.
+- Shell scripts follow [docs/shell.md](docs/shell.md) (POSIX `sh`, portable
+  `sed`, the server shell gate, and the lint-blind traps).
 
 The pages `docs/review-pipeline.md`, `docs/model-routing.md`, `docs/context-priming.md`
 and `docs/agent-coordination.md` describe the maintainer's own Claude setup. They are

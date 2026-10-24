@@ -1,19 +1,24 @@
-#!/bin/bash
+#!/bin/sh
 # check-style — run the style gates CI runs, locally, before you push.
 #
 # FreeUnit has no .clang-format and no formatter that can be run over the tree;
-# style is enforced by review plus two mechanical gates in .github/workflows/:
+# style is enforced by review plus three mechanical gates in .github/workflows/:
 #
 #   lint-whitespace.yml    `git log --check` over the commits in the PR
+#   lint-shell.yml         `.github/scripts/lint-shell.sh`: shellcheck 0.11.0
+#                          (-S warning) and dash -n for #!/bin/sh, bash -n for
+#                          #!/bin/bash, over every tracked script
 #   analysis-clang-ast.yml a clang plugin (freeunitorg/clang-ast, branch `unit`)
 #                          that validates nginx/Unit-specific conventions the
 #                          compiler cannot — e.g. that nxt_sprintf format
 #                          specifiers use the Unit dialect (%02Xd, not %02X).
 #                          -Werror will NOT catch that class of mistake.
 #
-# This script runs the first gate always, and the second when a clang-ast build
-# is available (it is expensive to build, so it is opt-in via CLANG_AST=path or
-# `make ci-local`, which has it in the image).
+# This script runs the first gate always, the second when
+# .github/scripts/lint-shell.sh is in the tree and shellcheck and dash are
+# installed, and the third when a clang-ast build is available (it is expensive
+# to build, so it is opt-in via CLANG_AST=path or `make ci-local`, which has it
+# in the image).
 #
 # Usage: check-style [base-ref]     default base: origin/master
 
@@ -23,11 +28,11 @@ UNIT_SRC="${UNIT_SRC:-$(cd "$(dirname "$0")/.." && pwd)/src}"
 BASE="${1:-origin/master}"
 status=0
 
-cd "$UNIT_SRC" 2>/dev/null || { echo "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
+cd "$UNIT_SRC" 2>/dev/null || { printf '%s\n' "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
 
 echo "==> whitespace gate: git log --check $BASE.."
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
-    echo "  ! base ref '$BASE' not found; skipping (pass one explicitly)" >&2
+    printf '%s\n' "  ! base ref '$BASE' not found; skipping (pass one explicitly)" >&2
 else
     # git log --check prints the offending lines and nothing when clean.
     # --pretty=format: keeps the per-commit header out of the output: with a
@@ -35,7 +40,7 @@ else
     # fails on a clean branch and passes on an empty range.
     out=$(git log --check --pretty=format: "$BASE"..)
     if [ -n "$out" ]; then
-        echo "$out"
+        printf '%s\n' "$out"
         echo "  commits checked:"
         git log --oneline "$BASE".. | sed 's/^/    /'
         echo "  ✗ whitespace errors above (trailing space, space-before-tab, blank EOF)"
@@ -46,16 +51,36 @@ else
 fi
 
 echo
+echo "==> shell gate: .github/scripts/lint-shell.sh"
+if [ ! -f .github/scripts/lint-shell.sh ]; then
+    echo "  - skipped (.github/scripts/lint-shell.sh not found)"
+elif command -v shellcheck >/dev/null 2>&1 && command -v dash >/dev/null 2>&1; then
+    shellcheck_version=$(shellcheck --version | awk '/^version:/ {print $2}')
+    if [ "$shellcheck_version" != "0.11.0" ]; then
+        printf '%s\n' "  ! shellcheck $shellcheck_version, CI uses 0.11.0" >&2
+    fi
+    if sh .github/scripts/lint-shell.sh; then
+        echo "  ✓ clean"
+    else
+        echo "  ✗ shellcheck or dash reported a finding"
+        status=1
+    fi
+else
+    echo "  - skipped (shellcheck or dash not found)"
+fi
+
+echo
 echo "==> clang-ast convention gate"
 if [ -n "${CLANG_AST:-}" ] && [ -f "${CLANG_AST}/ngx-ast.so" ]; then
-    echo "  using plugin ${CLANG_AST}/ngx-ast.so"
+    printf '%s\n' "  using plugin ${CLANG_AST}/ngx-ast.so"
+    jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     if ./configure --cc=clang \
         --cc-opt="-Xclang -load -Xclang ${CLANG_AST}/ngx-ast.so -Xclang -add-plugin -Xclang ngx-ast -Wno-default-const-init-field-unsafe" \
-        --openssl --debug --tests >/dev/null 2>&1 && make -j"$(nproc)" unitd >/dev/null; then
+        --openssl --debug --tests >/dev/null 2>&1 && make -j"$jobs" unitd >/dev/null; then
         echo "  ✓ clean"
     else
         echo "  ✗ clang-ast build failed — rerun without redirection to see the diagnostics:"
-        echo "      cd $UNIT_SRC && make unitd"
+        printf '%s\n' "      cd $UNIT_SRC && make unitd"
         status=1
     fi
 else
