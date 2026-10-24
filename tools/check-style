@@ -1,19 +1,27 @@
-#!/bin/bash
+#!/bin/sh
 # check-style — run the style gates CI runs, locally, before you push.
 #
 # FreeUnit has no .clang-format and no formatter that can be run over the tree;
-# style is enforced by review plus two mechanical gates in .github/workflows/:
+# style is enforced by review plus mechanical gates in .github/workflows/.
+# This script runs these three:
 #
 #   lint-whitespace.yml    `git log --check` over the commits in the PR
+#   lint-shell.yml         `.github/scripts/lint-shell.sh`: it picks each tracked
+#                          script by the interpreter on its #! line, and runs
+#                          dash -n or bash -n, then `shellcheck` -S warning at
+#                          the version the server pins. The other steps of the
+#                          workflow run test scripts; this script runs them too.
 #   analysis-clang-ast.yml a clang plugin (freeunitorg/clang-ast, branch `unit`)
 #                          that validates nginx/Unit-specific conventions the
 #                          compiler cannot — e.g. that nxt_sprintf format
 #                          specifiers use the Unit dialect (%02Xd, not %02X).
 #                          -Werror will NOT catch that class of mistake.
 #
-# This script runs the first gate always, and the second when a clang-ast build
-# is available (it is expensive to build, so it is opt-in via CLANG_AST=path or
-# `make ci-local`, which has it in the image).
+# This script runs the first gate always, the second when
+# .github/scripts/lint-shell.sh is in the tree and shellcheck, dash and bash
+# are installed, and the third when a clang-ast build is available (it is expensive
+# to build, so it is opt-in via CLANG_AST=path or `make ci-local`, which has it
+# in the image).
 #
 # Usage: check-style [base-ref]     default base: origin/master
 
@@ -23,11 +31,11 @@ UNIT_SRC="${UNIT_SRC:-$(cd "$(dirname "$0")/.." && pwd)/src}"
 BASE="${1:-origin/master}"
 status=0
 
-cd "$UNIT_SRC" 2>/dev/null || { echo "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
+cd "$UNIT_SRC" 2>/dev/null || { printf '%s\n' "no source tree at $UNIT_SRC; run 'make src'" >&2; exit 1; }
 
-echo "==> whitespace gate: git log --check $BASE.."
+printf '%s\n' "==> whitespace gate: git log --check $BASE.."
 if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
-    echo "  ! base ref '$BASE' not found; skipping (pass one explicitly)" >&2
+    printf '%s\n' "  ! base ref '$BASE' not found; skipping (pass one explicitly)" >&2
 else
     # git log --check prints the offending lines and nothing when clean.
     # --pretty=format: keeps the per-commit header out of the output: with a
@@ -35,7 +43,7 @@ else
     # fails on a clean branch and passes on an empty range.
     out=$(git log --check --pretty=format: "$BASE"..)
     if [ -n "$out" ]; then
-        echo "$out"
+        printf '%s\n' "$out"
         echo "  commits checked:"
         git log --oneline "$BASE".. | sed 's/^/    /'
         echo "  ✗ whitespace errors above (trailing space, space-before-tab, blank EOF)"
@@ -46,16 +54,111 @@ else
 fi
 
 echo
+echo "==> shell gate: .github/workflows/lint-shell.yml"
+# lint-shell.sh runs dash -n on the sh scripts and bash -n on the bash ones.
+missing=
+for tool in shellcheck dash bash; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+workflow=.github/workflows/lint-shell.yml
+if [ ! -f .github/scripts/lint-shell.sh ]; then
+    echo "  - skipped (.github/scripts/lint-shell.sh not found)"
+elif [ -n "$missing" ]; then
+    echo "  - skipped (not found:$missing)"
+else
+    # The workflow pins the image: SHELLCHECK_IMAGE: koalaman/shellcheck:vX.Y.Z@...
+    pin=$(sed -n 's/^[[:space:]]*SHELLCHECK_IMAGE:.*shellcheck:v\([0-9][0-9.]*\).*/\1/p' \
+        "$workflow" 2>/dev/null | sed -n 1p)
+    shellcheck_version=$(shellcheck --version | awk '/^version:/ {print $2}')
+    if [ -n "$pin" ] && [ "$shellcheck_version" != "$pin" ]; then
+        printf '%s\n' "  ! shellcheck $shellcheck_version, the server pins $pin" >&2
+    fi
+    if sh .github/scripts/lint-shell.sh; then
+        echo "  ✓ clean"
+    else
+        echo "  ✗ lint-shell.sh failed with exit code $?; see the lines above"
+        status=1
+    fi
+
+    # The other steps of the workflow.  A one-line "run:" that runs one
+    # script, as "sh <path>" or "./<path>", runs here.  They are read from
+    # the workflow, so a new step runs here without a change to this script.
+    # Any other step that names a script is listed, so that it is not
+    # skipped in silence: a "run:" with arguments or another interpreter, or
+    # a multi-line "run:" that names a script other than lint-shell.sh.
+    steps=$(awk '
+        function indent(s) { match(s, /^ */); return RLENGTH }
+        block && NF && indent($0) <= key { block = 0 }
+        block {
+            if ($0 ~ /[A-Za-z0-9_.\/-]+\.sh/ && $0 !~ /\.github\/scripts\/lint-shell\.sh/) {
+                line = $0; sub(/^ +/, "", line); print "NOTE " line
+            }
+            next
+        }
+        /^ *(- )?run:/ {
+            v = $0; sub(/^ *(- )?run: */, "", v); sub(/ +$/, "", v)
+            if (v ~ /^[|>]/) { block = 1; key = indent($0); next }
+            if (v ~ /^(sh )?(\.\/)?[A-Za-z0-9_.\/-]+\.sh$/) {
+                sub(/^\.\//, "", v); print "RUN " v
+            } else if (v ~ /\//) {
+                print "NOTE " v
+            }
+        }
+    ' "$workflow" 2>/dev/null)
+    while IFS= read -r step; do
+        case $step in
+        "NOTE "*)
+            printf '%s\n' "  ! not run here, run it by hand: ${step#NOTE }"
+            continue
+            ;;
+        esac
+        step=${step#RUN }
+        path=${step#sh }
+        if [ -z "$path" ] || [ "$path" = .github/scripts/lint-shell.sh ]; then
+            continue
+        fi
+        if [ ! -f "$path" ]; then
+            printf '%s\n' "  - $path: skipped (not found)"
+            continue
+        fi
+        # argv_test.sh runs unitc on a pseudo-terminal with "script -qec",
+        # which is the util-linux form of script(1).
+        if [ "$path" = test/unitc/argv_test.sh ] &&
+            ! script -qec true /dev/null </dev/null >/dev/null 2>&1; then
+            printf '%s\n' "  - $path: skipped (needs the util-linux script(1))"
+            continue
+        fi
+        # The loop reads the step list on stdin.  A step must not read it,
+        # or the steps after it do not run.
+        if [ "$step" = "$path" ]; then
+            out=$("./$path" </dev/null 2>&1); rc=$?
+        else
+            out=$(sh "$path" </dev/null 2>&1); rc=$?
+        fi
+        if [ "$rc" -eq 0 ]; then
+            printf '%s\n' "  ✓ $path"
+        else
+            [ -z "$out" ] || printf '%s\n' "$out"
+            printf '%s\n' "  ✗ $path failed with exit code $rc"
+            status=1
+        fi
+    done <<EOF
+$steps
+EOF
+fi
+
+echo
 echo "==> clang-ast convention gate"
 if [ -n "${CLANG_AST:-}" ] && [ -f "${CLANG_AST}/ngx-ast.so" ]; then
-    echo "  using plugin ${CLANG_AST}/ngx-ast.so"
+    printf '%s\n' "  using plugin ${CLANG_AST}/ngx-ast.so"
+    jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     if ./configure --cc=clang \
         --cc-opt="-Xclang -load -Xclang ${CLANG_AST}/ngx-ast.so -Xclang -add-plugin -Xclang ngx-ast -Wno-default-const-init-field-unsafe" \
-        --openssl --debug --tests >/dev/null 2>&1 && make -j"$(nproc)" unitd >/dev/null; then
+        --openssl --debug --tests >/dev/null 2>&1 && make -j"$jobs" unitd >/dev/null; then
         echo "  ✓ clean"
     else
         echo "  ✗ clang-ast build failed — rerun without redirection to see the diagnostics:"
-        echo "      cd $UNIT_SRC && make unitd"
+        printf '%s\n' "      cd $UNIT_SRC && make unitd"
         status=1
     fi
 else
