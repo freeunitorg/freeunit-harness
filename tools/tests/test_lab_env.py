@@ -80,9 +80,14 @@ class LabEnvTest(unittest.TestCase):
             self.assertNotIn("unknown key", r.stderr)
 
     def test_template_documents_every_loader_key(self):
+        # The old list equality failed in both directions too. One assertion per direction names the missing keys.
         r = self.loader('for k in $LAB_KEYS; do echo "$k"; done')
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(sorted(r.stdout.split()), sorted(lab_keys()))
+        loader, template = set(r.stdout.split()), set(lab_keys())
+        self.assertEqual(sorted(template - loader), [],
+                         "keys in lab.env.example that LAB_KEYS in tools/lib/env.sh lacks")
+        self.assertEqual(sorted(loader - template), [],
+                         "keys in LAB_KEYS in tools/lib/env.sh that lab.env.example does not document")
 
     # ---- parsing ----
 
@@ -154,7 +159,8 @@ class LabEnvTest(unittest.TestCase):
         r = self.unit_build("-t", "remote", "-H", "build", "config", env={"UNIT_SRC": src})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines(), ["TARGET=remote", "HOST=build-a", f"SRC={src}", "NAME=freeunit",
-                                                 "REMOTE_ROOT=/srv/lab", "REMOTE_CACHE=/srv/lab/cache", "IMAGE=img:1"])
+                                                 "REMOTE_ROOT=/srv/lab", "REMOTE_CACHE=/srv/lab/cache", "IMAGE=img:1",
+                                                 "M32=0"])
 
     def test_unit_build_never_syncs_onto_the_remote_root(self):
         src = self.make_src()
