@@ -61,6 +61,15 @@ it will read as a race for days.
 **Does the new test fail on the unpatched code?** Prove it in a worktree at the
 base commit ([test skill](../freeunit-test/SKILL.md)).
 
+**Does the PR touch a shell script?** `tools/check-style` runs the server gate
+(`sh .github/scripts/lint-shell.sh`: `dash -n` or `bash -n`, then shellcheck
+at the version the server pins) and the test scripts of `Lint (shell)`. A
+clean lint pass does not show that an option string is split and
+a URL is quoted. A script that builds a command line needs a stub argv test for
+each transport, as in [freeunit PR 763](https://github.com/freeunitorg/freeunit/pull/763).
+The pipeline, globbing, `echo` and `EXIT` trap cases are in `docs/shell.md`,
+section "What the lint cannot see".
+
 **If it touches process lifecycle, what happens when the runner is killed?**
 Anything that spawns must be reapable by process group, not by a single pid.
 

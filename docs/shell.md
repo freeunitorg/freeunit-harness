@@ -93,6 +93,72 @@ cmp gnu.out bb.out
 None of these tests Solaris or BSD `sh` directly. When a script is on the
 `configure` path, say in the PR which shells it was run under.
 
+## The server gate
+
+The server's `Lint (shell)` workflow runs `.github/scripts/lint-shell.sh`
+over every tracked shell script. It fails on shellcheck `warning`. The rules
+and the pinned image are in the "Shell scripts" section of the server's
+[CONTRIBUTING.md](https://github.com/freeunitorg/freeunit/blob/master/CONTRIBUTING.md#shell-scripts).
+The script itself is the reference: it picks each file by the interpreter on
+its `#!` line, also through `env`.
+
+`tools/check-style` (`make lint`) runs the gate in the server checkout. It
+needs `.github/scripts/lint-shell.sh` in that checkout, and `shellcheck`,
+`dash` and `bash` on the host. It runs the local shellcheck. It reads the
+version that the server pins from `.github/workflows/lint-shell.yml`, and
+warns when the local shellcheck has a different version.
+
+The workflow also runs test scripts, such as
+`.github/scripts/lint-shell-test.sh` and `test/unitc/argv_test.sh`.
+`tools/check-style` reads them from the workflow: each one-line `run:` that
+runs one script, as `sh <path>` or `./<path>`. It runs each of them that is
+in the checkout, with stdin closed. It lists, and does not run, any other
+step that names a script: a `run:` with arguments or another interpreter, or
+a multi-line `run:` that names a script other than `lint-shell.sh`. Run
+those by hand. `argv_test.sh` needs the util-linux `script(1)`; without it,
+that test is skipped.
+
+## The harness gate
+
+This repository's `shell` job runs `tools/check-shell.py`. It fails on
+shellcheck `error` only; [docs/ci.md](ci.md) describes the job. The server
+gate fails on `warning`, so a clean run of one gate does not mean that the
+other gate is clean.
+
+## What the lint cannot see
+
+The server gate checks syntax and the known bashisms. The failures below
+passed it. They come from the POSIX `sh` conversions in freeunit PRs
+[743](https://github.com/freeunitorg/freeunit/pull/743) to
+[748](https://github.com/freeunitorg/freeunit/pull/748) and from the signal
+fix in [756](https://github.com/freeunitorg/freeunit/pull/756).
+
+- **Quote a URL, not an option string.** For the local socket, and for the
+  `docker://` and `ssh://` targets, the `unitc` control target is
+  `--unix-socket <path> _`. `$UNIT_CTRL"$URI"` gives curl the option, the
+  path and the `_/config` URL as separate arguments. Quoting the whole
+  concatenation gives curl one argument, and curl fails with "is unknown".
+  ShellCheck accepts both forms. A script that builds a command line needs a
+  stub test that asserts the argv on every transport. `test/unitc/argv_test.sh`
+  from [freeunit PR 763](https://github.com/freeunitorg/freeunit/pull/763) is
+  the example.
+- **`producer | grep -q` under `pipefail`.** grep exits at the first match,
+  the producer takes SIGPIPE, and the pipeline status is 141, so the `if`
+  takes the false branch. Drop `-q`, use a here-document, or keep the data
+  off the pipe.
+- **`for x in $list` performs pathname expansion.** Store the list
+  newline-separated and read it with `IFS= read -r`, or disable globbing.
+- **`set -u` and `"$@"` with no positional parameters.** POSIX exempts `@`
+  and `*`; posh 0.14.3 treats them as unset. dash, ash, bash, ksh and yash
+  accept the idiom; do not add a workaround for posh unless it is a target.
+- **A signal does not run the EXIT trap in dash or ash.** Trap HUP, INT,
+  QUIT and TERM and exit 128 plus the signal number. After a hangup, stdout
+  is gone and `echo` fails; under `set -e` that aborts the trap before the
+  cleanup, so a log line must not fail.
+- **dash's `echo` expands backslashes in user text.** Use `printf '%s\n'`.
+- **A new `set -e` or `set -f` changes failure behaviour.** Say so in the
+  commit message, so that the reviewer tests the new behaviour.
+
 ## Status in this harness
 
 These tracked scripts use a bash shebang today and are **not yet compliant**.
@@ -101,7 +167,6 @@ logic to Python:
 
 - `tools/bench-engines.sh`, `tools/bench-release.sh`, `tools/bench-startup.sh`
 - `tools/capget-fallback-smoke.sh`
-- `tools/check-style`
 - `tools/ci-local`
 - `tools/doctor`
 - `tools/gates/run-gates`
@@ -115,8 +180,8 @@ logic to Python:
 - `tools/unitd-ctl`
 - `tools/watch-run.sh`
 
-`tools/check-public.sh`, `tools/perf-lab/scaling/run.sh` and `tools/perf-lab/scaling/build-tree.sh` are the
-tracked scripts with a `#!/bin/sh` shebang. `lib.sh`, `sweep.sh` and `profile.sh` in `tools/perf-lab/scaling/` use
+`tools/check-public.sh`, `tools/check-style`, `tools/perf-lab/scaling/run.sh` and `tools/perf-lab/scaling/build-tree.sh`
+are the tracked scripts with a `#!/bin/sh` shebang. `lib.sh`, `sweep.sh` and `profile.sh` in `tools/perf-lab/scaling/` use
 `#!/usr/bin/env bash` by design. `sweep.sh` and `profile.sh` run only in the lab container or on the perf box.
 `lib.sh` runs there too, and `tools/tests/test_perf_lab_scaling.py` also sources it under bash on the developer
 host, so `make tools-test` needs bash.
