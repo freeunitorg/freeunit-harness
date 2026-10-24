@@ -382,7 +382,7 @@ normal and swapped blocks and print one of five verdicts:
 - **[Startup and Scaling Benchmark (`skills/freeunit-benchmark/references/startup.md`)](startup.md)** —
   4-phase cold-start (`daemon_boot`, `put_empty`, `put_8_apps`, `first_200`)
   and `1 -> 8` worker scaling benchmark protocol.
-- **[FreeUnit Perf Lab (`docs/perf/perf-lab.md`)](../../../docs/perf/perf-lab.md)** —
+- **`docs/perf/perf-lab.md` — FreeUnit Perf Lab** —
   Automated job files (`tools/perf-job.sh`), box claim locking, CPU idle gates,
   `perf-compare.py` verdict rules, and regression bisection (`tools/perf-bisect.sh`).
 - **[FreeUnit PR #810 — `core: raise the soft RLIMIT_NOFILE in the router and controller`](https://github.com/freeunitorg/freeunit/pull/810)** —

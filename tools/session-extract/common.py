@@ -50,9 +50,12 @@ def new(agent, store, session):
 
 
 def cwd_class(path):
+    """unit, harness, scratch or other. A known server checkout is unit even under /tmp/ or a scratchpad,
+    unless a scratchpad directory lies inside it."""
     p = os.path.realpath(path) if path else ""
+    for u in UNITS:
+        if (p == u or p.startswith(u + "/")) and "scratchpad" not in p[len(u):].split("/"): return "unit"
     if "scratchpad" in p.split("/") or p.startswith(("/tmp/", os.path.expanduser("~/tmp/"))): return "scratch"
-    if any(p == u or p.startswith(u + "/") for u in UNITS): return "unit"
     if p.startswith(HARNESS): return "harness"
     return "other"
 

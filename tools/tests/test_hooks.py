@@ -10,6 +10,24 @@ sys.dont_write_bytecode = True
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASK, HOOKS = os.path.join(TOOLS, "task"), os.path.join(TOOLS, "hooks")
 
+# Runs a hook script with an audit hook installed first (python3 -c AUDIT_WRAPPER <script>).
+# It records each process start, socket call and time.sleep() and prints them on stderr when the script exits.
+AUDIT_WRAPPER = r"""
+import json, runpy, sys
+WATCH = ("subprocess.", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "socket.", "time.sleep")
+seen = []
+sys.addaudithook(lambda event, args: event.startswith(WATCH) and seen.append(event))
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+code = 0
+try:
+    runpy.run_path(script, run_name="__main__")
+except SystemExit as e:
+    code = e.code
+sys.stderr.write("audit events: " + json.dumps(sorted(set(seen))) + "\n")
+sys.exit(code)
+"""
+
 
 class HookTest(unittest.TestCase):
     def setUp(self):
@@ -142,14 +160,71 @@ class HookTest(unittest.TestCase):
 
     # ---- pre-bash ----
 
+    def audited(self, script, payload):
+        """Run script under AUDIT_WRAPPER with payload on stdin. Return the watched audit events that it raised."""
+        stdin = json.dumps({"session_id": "s1", "cwd": self.tmp, **payload})
+        r = subprocess.run(["/usr/bin/env", "python3", "-c", AUDIT_WRAPPER, script], input=stdin, capture_output=True,
+                           text=True, env=self.env, cwd=self.tmp)
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        lines = [line for line in r.stderr.splitlines() if line.startswith("audit events: ")]
+        self.assertEqual(len(lines), 1, r.stderr)
+        return json.loads(lines[0].split(": ", 1)[1])
+
     def test_pre_bash_fast_path(self):
+        # The fast path must return before it imports _ledger or anything that can start a process.
+        # That is checked from the import list, so machine load cannot change the result.
+        # A module that the bare interpreter imports at startup (site, sitecustomize) does not count.
         payload = self.bash("ls -la && echo done")
-        times = []
+        env = dict(self.env, PYTHONPROFILEIMPORTTIME="1")
+
+        def imports(argv, stdin):
+            r = subprocess.run(argv, input=stdin, capture_output=True, text=True, env=env, cwd=self.tmp)
+            self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+            return {line.rsplit("|", 1)[-1].strip() for line in r.stderr.splitlines() if line.startswith("import time:")}
+
+        imported = imports([os.path.join(HOOKS, "pre-bash")], json.dumps({"session_id": "s1", "cwd": self.tmp, **payload}))
+        self.assertTrue("json" in imported, "PYTHONPROFILEIMPORTTIME gave no import list")
+        imported -= imports(["/usr/bin/env", "python3", "-c", "pass"], "")
+        for module in ("_ledger", "subprocess"):
+            self.assertFalse(module in imported, f"the fast path imports {module}")
+        # An audit hook sees each process start, socket call and time.sleep() of the fast path.
+        # test_pre_bash_fast_path_audit_catches_mutants shows that it does.
+        self.assertEqual(self.audited(os.path.join(HOOKS, "pre-bash"), payload), [])
+        # Time: a smoke check only. It catches a fast path that takes hundreds of milliseconds, not
+        # a 30 ms delay. The limit is 10 times the start of the same interpreter plus 200 ms, both
+        # measured in turn 5 times, the minimum counts. A slow or loaded machine slows both.
+        base, hook = [], []
         for _ in range(5):
             start = time.perf_counter()
+            subprocess.run(["/usr/bin/env", "python3", "-c", "pass"], env=self.env, cwd=self.tmp, check=True)
+            base.append(time.perf_counter() - start)
+            start = time.perf_counter()
             self.assertEqual(self.hook("pre-bash", payload), "")
-            times.append(time.perf_counter() - start)
-        self.assertLess(min(times), 0.060, f"fast path took {min(times) * 1000:.1f} ms at best")
+            hook.append(time.perf_counter() - start)
+        self.assertLess(min(hook), 10 * min(base) + 0.200,
+                        f"fast path took {min(hook) * 1000:.1f} ms at best; python3 -c pass took {min(base) * 1000:.1f} ms")
+
+    def test_pre_bash_fast_path_audit_catches_mutants(self):
+        # Negative controls for the audit check: a copy of pre-bash with one line added to the fast path.
+        # Python before 3.13 raises no time.sleep audit event; there only the time smoke check sees a sleep.
+        probe = subprocess.run(["/usr/bin/env", "python3", "-c", "import sys; print(sys.version_info >= (3, 13))"],
+                               capture_output=True, text=True, check=True).stdout.strip() == "True"
+        with open(os.path.join(HOOKS, "pre-bash")) as f:
+            source = f.read()
+        anchor = "\nH = None"
+        self.assertEqual(source.count(anchor), 1)
+        payload = self.bash("ls -la && echo done")
+        for line, event in (("import time; time.sleep(0.030)", "time.sleep"), ("import time; time.sleep(0.050)", "time.sleep"),
+                            ("os.system('true')", "os.system"),
+                            ("import subprocess; subprocess.run(['true'])", "subprocess.Popen"),
+                            ("import socket; socket.socket().connect_ex(('127.0.0.1', 9))", "socket.connect")):
+            with self.subTest(line=line):
+                if event == "time.sleep" and not probe:
+                    self.skipTest("Python before 3.13 raises no time.sleep audit event")
+                mutant = os.path.join(self.tmp, "pre-bash-mutant")
+                with open(mutant, "w") as f:
+                    f.write(source.replace(anchor, f"\n{line}{anchor}"))
+                self.assertIn(event, self.audited(mutant, payload))
 
     def test_pre_bash_denies_git_state_changes_in_a_shared_checkout(self):
         self.git("init", "-q", "-b", "main", self.shared)
