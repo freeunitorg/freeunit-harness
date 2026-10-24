@@ -72,6 +72,11 @@ nearly went into a release report before anyone checked — see
 
 ## References
 
+- [`references/guide.md`](references/guide.md) — end-to-end guide to
+  `freeunit-harness` and benchmarking: overview, cell architecture, preflight
+  (`tools/doctor`) and benchmark commands, reading JSONL / `epx-fit.py` /
+  `perf-compare.py` results, and references to host `sysctl` tuning, PR #810,
+  and PR #809.
 - `docs/perf/perf-lab.md` (from the repository root): the perf lab:
   `tools/perf-job.sh <job>` runs a claimed, idle-gated A/B with its own null
   phase on the perf box, and `tools/perf-compare.py` prints the verdict.
