@@ -1,5 +1,5 @@
 # Canonical model names for commit and comment trailers (Co-Authored-By, Reviewed-by).
-# One model per line: canonical name, TAB, "addr" if the name takes <noreply@anthropic.com>,
+# One model or agent account per line: canonical name, TAB, "addr" if the name takes <noreply@anthropic.com>,
 # TAB, comma-separated aliases seen in the wild (case-insensitive). Lines starting with # are comments.
 # tools/check-trailers.py reads this file. Add a model here before its first trailer.
 Claude Fable 5.1	addr	claude-fable-5-1,fable
@@ -20,3 +20,4 @@ Gemini 3.8 Flash	-	gemini-3.8-flash,google/gemini-3.8-flash,Gemini
 Gemini 3.1 Pro	-	gemini-3.1-pro,google/gemini-3.1-pro
 Gemini 4 Argon	-	gemini-4-argon,gemini-4-argon-high,gemini-4-argon-medium,gemini-4-argon-low,google/gemini-4-argon
 Space Bunny Free	-	space-bunny-free
+tuzelko-familiar	-	Frost's Familiar
