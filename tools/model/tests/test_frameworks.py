@@ -2,7 +2,7 @@
 
 Tests the state reset guarantees and background schedule handling for:
 - WordPress
-- Drupal (Issue #321 visitor hijacking & detached completion)
+- Drupal (detached completion via nxt_port_detached_t)
 - Symfony (ResetInterface & Doctrine entity clear)
 - Laravel (Octane sandbox clone & auth/cookie purge)
 - Yii3 (StateResetter)

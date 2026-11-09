@@ -27,10 +27,12 @@ jobs:
         with:
           python-version: "3.13"
       # PyYAML is for the one test in tools/tests/test_task.py that reads a task file with it.
-      - name: Install pytest and PyYAML
+      # tree-sitter and tree-sitter-c run the schema extractor test that
+      # guards the ctypes layout compare. Hypothesis stays optional.
+      - name: Install pytest, PyYAML and tree-sitter
         run: |
           python3 -m pip install --disable-pip-version-check --only-binary=:all: \
-            pytest==9.0.2 PyYAML==6.0.3
+            pytest==9.0.2 PyYAML==6.0.3 tree-sitter==0.26.1 tree-sitter-c==0.24.2
       - name: make tools-test
         run: make tools-test
 

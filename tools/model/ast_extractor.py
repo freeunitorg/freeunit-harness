@@ -17,9 +17,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# The server checkout: $UNIT_SRC when set, else the harness clone at <harness>/src.
-HARNESS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_SRC = os.environ.get("UNIT_SRC") or os.path.join(HARNESS, "src")
+def _find_default_src() -> str:
+    if "UNIT_SRC" in os.environ:
+        return os.environ["UNIT_SRC"]
+    root = Path(__file__).resolve().parents[2]
+    candidates = [
+        root.parent / "unit",
+        root.parent / "freeunit",
+        root / "src",
+        Path.cwd() / "src",
+        Path.cwd().parent / "unit",
+    ]
+    for cand in candidates:
+        if (cand / "src" / "nxt_main.c").is_file():
+            return str(cand)
+        if (cand / "nxt_main.c").is_file():
+            return str(cand.parent if cand.name == "src" else cand)
+    return str(root)
+
+DEFAULT_SRC = _find_default_src()
 
 import tree_sitter as ts
 import tree_sitter_c as tsc
@@ -147,6 +163,8 @@ class CField:
     is_pointer: bool = False
     is_array: bool = False
     array_len: int = 1
+    is_flexible: bool = False
+    unresolved_array: Optional[str] = None
     is_bitfield: bool = False
     bit_width: int = 0
     bit_offset: int = 0
@@ -350,6 +368,8 @@ class SchemaExtractor:
                 is_pointer = "*" in field_name or "*" in type_str
                 is_array = "[" in field_name
                 array_len = 1
+                is_flexible = False
+                unresolved_array = None
                 is_bitfield = False
                 bit_width = 0
 
@@ -366,9 +386,16 @@ class SchemaExtractor:
                         dim_expr = arr_match.group(1).strip()
                         if dim_expr:
                             dim_val = self._eval_expr(dim_expr)
-                            array_len = dim_val if dim_val is not None else 0
+                            if dim_val is not None:
+                                array_len = dim_val
+                            else:
+                                # Not a flexible array. Leave size unknown and
+                                # report the unresolved dimension in compare.
+                                array_len = 0
+                                unresolved_array = dim_expr
                         else:
-                            array_len = 0  # Flexible array member: fields[]
+                            array_len = 0
+                            is_flexible = True  # true [] only, e.g. fields[]
                     field_name = re.sub(r"\[.*?\]", "", field_name).strip()
 
                 field_name = field_name.replace("*", "").strip()
@@ -386,6 +413,8 @@ class SchemaExtractor:
                     is_pointer=is_pointer,
                     is_array=is_array,
                     array_len=array_len,
+                    is_flexible=is_flexible,
+                    unresolved_array=unresolved_array,
                     is_bitfield=is_bitfield,
                     bit_width=bit_width,
                 )
@@ -545,7 +574,7 @@ def main() -> int:
     parser.add_argument(
         "--src",
         default=DEFAULT_SRC,
-        help="Path to FreeUnit C source directory (default: $UNIT_SRC, else <harness>/src)",
+        help="Path to FreeUnit C source directory (default: $UNIT_SRC, else ../unit, ../freeunit, then <harness>/src)",
     )
     parser.add_argument("--summary", action="store_true", help="Print schema summary")
     args = parser.parse_args()

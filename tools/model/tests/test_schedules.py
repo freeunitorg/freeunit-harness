@@ -1,4 +1,4 @@
-"""Verification Test: Schedule Subsystem (PR #452 & plan-cron.md).
+"""Verification Test: Schedule Subsystem (https://github.com/freeunitorg/freeunit/pull/452 & plan-cron.md).
 
 Tests:
 - Synthetic HTTP request generation using DEVNULL protocol table.

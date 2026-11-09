@@ -31,6 +31,27 @@ NXT_APP_QUEUE_MSG_SIZE = 31
 
 NXT_UNIT_NONE_FIELD = 0xFFFFFFFF
 
+# nxt_unit_field_t.name_length is a uint8_t (nxt_unit_field.h), so a header
+# name can be at most 255 bytes on either side of the port boundary.  The HTTP
+# parser caps a request name at NXT_HTTP_MAX_FIELD_NAME (0xFF,
+# nxt_http_parse.h).  On the response side the modules used to pass a size_t
+# into the uint8_t parameter, so the name was cut to len % 256;
+# https://github.com/freeunitorg/freeunit/pull/926 makes each module refuse
+# such a name before the call.  The model refuses it in serialize() instead
+# of wrapping like ctypes would (a c_uint8 field set to 300 reads back 44).
+NXT_UNIT_FIELD_NAME_MAX = 0xFF
+NXT_UNIT_MAX_PLAIN_SIZE = 1024
+# Model-only piggyback body budget for the K2 proposal. The server has no
+# constant with this name.
+PHP_RESPONSE_ROOM = 8192
+NXT_HAVE_SIGNALFD = 1
+
+NXT_OK = 0
+NXT_ERROR = -1
+NXT_EAGAIN = 11
+NXT_AGAIN = NXT_EAGAIN
+NXT_EINTR = 4
+
 
 # --- Port Message Types & Flags ---
 
@@ -194,6 +215,34 @@ class CNxtUnitResponse(ctypes.Structure):
     ]
 
 
+class CSignalfdSiginfo(ctypes.Structure):
+    """Linux kernel struct signalfd_siginfo layout (128 bytes)."""
+    _fields_ = [
+        ("ssi_signo", ctypes.c_uint32),
+        ("ssi_errno", ctypes.c_int32),
+        ("ssi_code", ctypes.c_int32),
+        ("ssi_pid", ctypes.c_uint32),
+        ("ssi_uid", ctypes.c_uint32),
+        ("ssi_fd", ctypes.c_int32),
+        ("ssi_tid", ctypes.c_uint32),
+        ("ssi_band", ctypes.c_uint32),
+        ("ssi_overrun", ctypes.c_uint32),
+        ("ssi_trapno", ctypes.c_uint32),
+        ("ssi_status", ctypes.c_int32),
+        ("ssi_int", ctypes.c_int32),
+        ("ssi_ptr", ctypes.c_uint64),
+        ("ssi_utime", ctypes.c_uint64),
+        ("ssi_stime", ctypes.c_uint64),
+        ("ssi_addr", ctypes.c_uint64),
+        ("ssi_addr_lsb", ctypes.c_uint16),
+        ("_pad2", ctypes.c_uint16),
+        ("ssi_syscall", ctypes.c_int32),
+        ("ssi_call_addr", ctypes.c_uint64),
+        ("ssi_arch", ctypes.c_uint32),
+        ("_pad", ctypes.c_uint8 * 28),
+    ]
+
+
 # --- High-Level Python Dataclasses with Serialization ---
 
 @dataclass
@@ -284,6 +333,10 @@ class QueueItem:
         )
 
 
+class FieldNameTooLong(ValueError):
+    """A header name longer than NXT_UNIT_FIELD_NAME_MAX bytes."""
+
+
 @dataclass
 class HttpHeaderField:
     name: str
@@ -293,26 +346,37 @@ class HttpHeaderField:
     hopbyhop: bool = False
 
 
+def check_field_names(headers: List["HttpHeaderField"], side: str) -> None:
+    """Refuse a header name that does not fit uint8_t name_length."""
+    for h in headers:
+        n = len(h.name.encode("utf-8"))
+        if n > NXT_UNIT_FIELD_NAME_MAX:
+            raise FieldNameTooLong(
+                f"{side} header name of {n} bytes exceeds "
+                f"{NXT_UNIT_FIELD_NAME_MAX} (uint8_t name_length)")
+
+
 @dataclass
 class UnitRequest:
-    method: str
-    version: str
-    remote: str
-    local_addr: str
-    local_port: str
-    tls: bool
-    websocket_handshake: bool
-    app_target: int
-    server_name: str
-    target: str
-    path: str
-    query: str
+    method: str = "GET"
+    version: str = "HTTP/1.1"
+    remote: str = "127.0.0.1"
+    local_addr: str = "127.0.0.1"
+    local_port: str = "8080"
+    tls: bool = False
+    websocket_handshake: bool = False
+    app_target: int = 0
+    server_name: str = "localhost"
+    target: str = "/"
+    path: str = "/"
+    query: str = ""
     headers: List[HttpHeaderField] = field(default_factory=list)
     preread_content: bytes = b""
     content_length: int = 0
 
     def serialize(self) -> bytes:
         """Serializes request into an exact nxt_unit_request_t byte buffer."""
+        check_field_names(self.headers, "request")
         # Calculate offsets
         req_hdr_size = ctypes.sizeof(CNxtUnitRequest)
         fields_size = len(self.headers) * ctypes.sizeof(CNxtUnitField)
@@ -397,6 +461,78 @@ class UnitRequest:
 
         return bytes(buf)
 
+    @classmethod
+    def deserialize(cls, data: bytes) -> UnitRequest:
+        """Deserializes a byte buffer containing CNxtUnitRequest into a UnitRequest."""
+        req_hdr_size = ctypes.sizeof(CNxtUnitRequest)
+        if len(data) < req_hdr_size:
+            return cls(method="GET", path="/")
+
+        creq = CNxtUnitRequest.from_buffer_copy(data[:req_hdr_size])
+
+        def get_str(length: int, sptr_offset: int, field_def_offset: int) -> str:
+            if length == 0:
+                return ""
+            abs_off = field_def_offset + sptr_offset
+            if abs_off + length > len(data):
+                return ""
+            return data[abs_off : abs_off + length].decode("utf-8", errors="replace")
+
+        method = get_str(creq.method_length, creq.method_offset, CNxtUnitRequest.method_offset.offset) or "GET"
+        version = get_str(creq.version_length, creq.version_offset, CNxtUnitRequest.version_offset.offset) or "HTTP/1.1"
+        remote = get_str(creq.remote_length, creq.remote_offset, CNxtUnitRequest.remote_offset.offset) or "127.0.0.1"
+        local_addr = get_str(creq.local_addr_length, creq.local_addr_offset, CNxtUnitRequest.local_addr_offset.offset) or "127.0.0.1"
+        local_port = get_str(creq.local_port_length, creq.local_port_offset, CNxtUnitRequest.local_port_offset.offset) or "8080"
+        server_name = get_str(creq.server_name_length, creq.server_name_offset, CNxtUnitRequest.server_name_offset.offset) or "localhost"
+        target = get_str(creq.target_length, creq.target_offset, CNxtUnitRequest.target_offset.offset) or "/"
+        path = get_str(creq.path_length, creq.path_offset, CNxtUnitRequest.path_offset.offset) or "/"
+        query = get_str(creq.query_length, creq.query_offset, CNxtUnitRequest.query_offset.offset)
+
+        preread = b""
+        if creq.preread_content_offset:
+            abs_pc = CNxtUnitRequest.preread_content_offset.offset + creq.preread_content_offset
+            content_len = creq.content_length or 0
+            if abs_pc + content_len <= len(data):
+                preread = data[abs_pc : abs_pc + content_len]
+
+        fields: List[HttpHeaderField] = []
+        field_size = ctypes.sizeof(CNxtUnitField)
+        offset = req_hdr_size
+        for _ in range(creq.fields_count):
+            if offset + field_size > len(data):
+                break
+            cf = CNxtUnitField.from_buffer_copy(data[offset : offset + field_size])
+            name_abs = offset + CNxtUnitField.name_offset.offset + cf.name_offset
+            val_abs = offset + CNxtUnitField.value_offset.offset + cf.value_offset
+            name = data[name_abs : name_abs + cf.name_length].decode("utf-8", errors="replace") if name_abs + cf.name_length <= len(data) else ""
+            val = data[val_abs : val_abs + cf.value_length].decode("utf-8", errors="replace") if val_abs + cf.value_length <= len(data) else ""
+            fields.append(HttpHeaderField(
+                name=name,
+                value=val,
+                hash=cf.hash,
+                skip=bool(cf.skip),
+                hopbyhop=bool(cf.hopbyhop),
+            ))
+            offset += field_size
+
+        return cls(
+            method=method,
+            version=version,
+            remote=remote,
+            local_addr=local_addr,
+            local_port=local_port,
+            tls=bool(creq.tls),
+            websocket_handshake=bool(creq.websocket_handshake),
+            app_target=creq.app_target,
+            server_name=server_name,
+            target=target,
+            path=path,
+            query=query,
+            headers=fields,
+            preread_content=preread,
+            content_length=creq.content_length,
+        )
+
 
 @dataclass
 class UnitResponse:
@@ -407,6 +543,7 @@ class UnitResponse:
 
     def serialize(self) -> bytes:
         """Serializes response into an exact nxt_unit_response_t byte buffer."""
+        check_field_names(self.headers, "response")
         resp_hdr_size = ctypes.sizeof(CNxtUnitResponse)
         fields_size = len(self.headers) * ctypes.sizeof(CNxtUnitField)
         payload_start = resp_hdr_size + fields_size
@@ -455,17 +592,179 @@ class UnitResponse:
 
         return bytes(buf)
 
+    @classmethod
+    def deserialize(cls, data: bytes) -> UnitResponse:
+        """Deserializes a byte buffer containing CNxtUnitResponse into a UnitResponse."""
+        resp_hdr_size = ctypes.sizeof(CNxtUnitResponse)
+        if len(data) < resp_hdr_size:
+            return cls(status=200, content=data)
 
-# --- Self-Validation against Linux x86_64 ABI ---
+        cresp = CNxtUnitResponse.from_buffer_copy(data[:resp_hdr_size])
+        fields: List[HttpHeaderField] = []
+        field_size = ctypes.sizeof(CNxtUnitField)
+        offset = resp_hdr_size
+
+        for _ in range(cresp.fields_count):
+            if offset + field_size > len(data):
+                break
+            cf = CNxtUnitField.from_buffer_copy(data[offset : offset + field_size])
+            name_abs = offset + CNxtUnitField.name_offset.offset + cf.name_offset
+            val_abs = offset + CNxtUnitField.value_offset.offset + cf.value_offset
+            name = data[name_abs : name_abs + cf.name_length].decode("utf-8", errors="replace") if name_abs + cf.name_length <= len(data) else ""
+            val = data[val_abs : val_abs + cf.value_length].decode("utf-8", errors="replace") if val_abs + cf.value_length <= len(data) else ""
+            fields.append(HttpHeaderField(
+                name=name,
+                value=val,
+                hash=cf.hash,
+                skip=bool(cf.skip),
+                hopbyhop=bool(cf.hopbyhop),
+            ))
+            offset += field_size
+
+        content = b""
+        if cresp.piggyback_content_length > 0 and cresp.piggyback_content_offset:
+            pc_abs = CNxtUnitResponse.piggyback_content_offset.offset + cresp.piggyback_content_offset
+            if pc_abs + cresp.piggyback_content_length <= len(data):
+                content = data[pc_abs : pc_abs + cresp.piggyback_content_length]
+        elif offset < len(data):
+            content = data[offset:]
+
+        return cls(
+            status=cresp.status,
+            headers=fields,
+            content=content,
+            content_length=cresp.content_length,
+        )
+
+
+# ctypes mirrors compared by `schema` against extracted C headers.
+# Keys are the struct/typedef names in the FreeUnit headers.
+CTYPES_MIRRORS = {
+    "nxt_port_msg_t": CNxtPortMsg,
+    "nxt_port_mmap_msg_s": CNxtPortMmapMsg,
+    "nxt_app_queue_item_t": CNxtAppQueueItem,
+    "nxt_unit_field_s": CNxtUnitField,
+    "nxt_unit_request_s": CNxtUnitRequest,
+    "nxt_unit_response_s": CNxtUnitResponse,
+}
+
+
+def _header_field_name(ctypes_name: str) -> str:
+    """Map a ctypes field name to the name in the FreeUnit header.
+
+    The mirrors store an nxt_unit_sptr_t as an integer called X_offset;
+    the header calls that field X.
+    """
+    if ctypes_name.endswith("_offset"):
+        return ctypes_name[: -len("_offset")]
+    return ctypes_name
+
+
+def _without_trailing_flexible(fields) -> list:
+    """Drop a trailing flexible array such as fields[], which ctypes omits.
+
+    Only a true `[]` (`is_flexible`) is skipped. An array whose dimension
+    could not be resolved is kept and reported as a difference.
+    """
+    fields = [f for f in fields if not getattr(f, "name", "").startswith("_")]
+    if fields and getattr(fields[-1], "is_flexible", False):
+        return fields[:-1]
+    return fields
+
+
+def compare_ctypes_to_schema(structs) -> list:
+    """Compare ctypes mirrors with extracted structs.
+
+    `structs` maps a C struct or typedef name to an object with `.size` and
+    `.fields` (each field has `.name`, `.offset`, and optionally `.size`).
+    Returns a list of difference strings. An empty list means every mirror
+    matched. This compares the extracted tree-sitter layout, not a C
+    compiler run. ctypes names ending in `_offset` are matched to the
+    header name without that suffix. A trailing flexible array (`[]`) in
+    the header is skipped. Field sizes are compared for non-bitfield
+    members. An unresolved array dimension is reported as a difference.
+    """
+    diffs = []
+    aliases = {
+        "nxt_port_mmap_msg_t": "nxt_port_mmap_msg_s",
+        "nxt_unit_field_t": "nxt_unit_field_s",
+        "nxt_unit_request_t": "nxt_unit_request_s",
+        "nxt_unit_response_t": "nxt_unit_response_s",
+    }
+    for name, typ in CTYPES_MIRRORS.items():
+        extracted = structs.get(name)
+        if extracted is None:
+            for alias, canonical in aliases.items():
+                if canonical == name and alias in structs:
+                    extracted = structs[alias]
+                    break
+        if extracted is None:
+            diffs.append("%s: not found in the extracted schema" % name)
+            continue
+        csize = ctypes.sizeof(typ)
+        if csize != extracted.size:
+            diffs.append(
+                "%s: ctypes size %d != extracted size %d" % (name, csize, extracted.size)
+            )
+        for f in extracted.fields:
+            dim = getattr(f, "unresolved_array", None)
+            if dim:
+                diffs.append(
+                    "%s.%s: unresolved array dimension %s" % (name, f.name, dim)
+                )
+        extracted_by_name = {
+            f.name: f for f in _without_trailing_flexible(extracted.fields)
+        }
+        ctypes_header_names = set()
+        for field_desc in typ._fields_:
+            field_name = field_desc[0]
+            if field_name.startswith("_"):
+                continue
+            header_name = _header_field_name(field_name)
+            ctypes_header_names.add(header_name)
+            off = getattr(typ, field_name).offset
+            extracted_field = extracted_by_name.get(header_name)
+            if extracted_field is None:
+                diffs.append(
+                    "%s.%s: in ctypes at offset %d, missing from the extracted schema"
+                    % (name, field_name, off)
+                )
+                continue
+            if extracted_field.offset != off:
+                diffs.append(
+                    "%s.%s: ctypes offset %d != extracted offset %d"
+                    % (name, field_name, off, extracted_field.offset)
+                )
+            # ctypes bitfield `.size` is not a byte width; skip those.
+            is_bitfield = len(field_desc) > 2
+            extracted_size = getattr(extracted_field, "size", None)
+            if not is_bitfield and extracted_size is not None:
+                c_field_size = ctypes.sizeof(field_desc[1])
+                if c_field_size != extracted_size:
+                    diffs.append(
+                        "%s.%s: ctypes size %d != extracted size %d"
+                        % (name, field_name, c_field_size, extracted_size)
+                    )
+        for fname, fld in extracted_by_name.items():
+            if fname not in ctypes_header_names:
+                diffs.append(
+                    "%s.%s: in the extracted schema at offset %d, missing from ctypes"
+                    % (name, fname, fld.offset)
+                )
+    return diffs
+
+
+# --- Self-check of ctypes packing (sizes written here, not from a compiler) ---
 
 def validate_layouts() -> None:
-    """Ensure ctypes struct sizes match the FreeUnit C compiler layouts."""
+    """Ensure the ctypes mirrors have the expected packed sizes."""
     assert ctypes.sizeof(CNxtPortMsg) == 16, f"CNxtPortMsg size mismatch: {ctypes.sizeof(CNxtPortMsg)} != 16"
     assert ctypes.sizeof(CNxtPortMmapMsg) == 12, f"CNxtPortMmapMsg size mismatch: {ctypes.sizeof(CNxtPortMmapMsg)} != 12"
     assert ctypes.sizeof(CNxtAppQueueItem) == 36, f"CNxtAppQueueItem size mismatch: {ctypes.sizeof(CNxtAppQueueItem)} != 36"
     assert ctypes.sizeof(CNxtUnitField) == 16, f"CNxtUnitField size mismatch: {ctypes.sizeof(CNxtUnitField)} != 16"
     assert ctypes.sizeof(CNxtUnitRequest) == 96, f"CNxtUnitRequest size mismatch: {ctypes.sizeof(CNxtUnitRequest)} != 96"
     assert ctypes.sizeof(CNxtUnitResponse) == 24, f"CNxtUnitResponse size mismatch: {ctypes.sizeof(CNxtUnitResponse)} != 24"
+    assert ctypes.sizeof(CSignalfdSiginfo) == 128, f"CSignalfdSiginfo size mismatch: {ctypes.sizeof(CSignalfdSiginfo)} != 128"
 
 
 

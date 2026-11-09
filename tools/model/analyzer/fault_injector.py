@@ -1,7 +1,7 @@
 """Adversarial Chaos Fault Injector (Model B).
 
 Injects real-world failure modes:
-1. Asynchronous worker crashes (SIGKILL / SIGCHLD) mid-transfer (issue #195).
+1. Asynchronous worker crashes (SIGKILL / SIGCHLD) mid-transfer (https://github.com/freeunitorg/freeunit/issues/195).
 2. Shared memory starvation (OOSM) under peak load.
 3. Abrupt client disconnections (TCP RST) during active response writing.
 4. Process churn and rapid restarts.
