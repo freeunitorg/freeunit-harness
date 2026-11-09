@@ -74,7 +74,7 @@ class LabEnvTest(unittest.TestCase):
         shutil.copy(TEMPLATE, self.lab)
         self.assertTrue(JOBS)
         for job in JOBS:
-            r = self.run_cmd("bash", PERF_JOB, job, env={"PERF_JOB_CHECK": "1"})
+            r = self.run_cmd("sh", PERF_JOB, job, env={"PERF_JOB_CHECK": "1"})
             self.assertEqual(r.returncode, 0, f"{job}: {r.stderr}")
             self.assertTrue(r.stdout.startswith("CHECK "), r.stdout)
             self.assertNotIn("unknown key", r.stderr)
@@ -115,7 +115,7 @@ class LabEnvTest(unittest.TestCase):
         r = self.loader("lab_env_load --export; printf '%s\\n' \"$LAB_IMAGE\"; lab_env_get BUILD_HOST")
         self.assertEqual(r.stdout, f"$(touch {marker})\n`touch {marker}`\n")
         self.assertEqual(self.hosts("ssh", "bot").stdout, f"$(touch {marker})\n")
-        r = self.run_cmd("bash", PERF_JOB, JOBS[0], env={"PERF_JOB_CHECK": "1"})
+        r = self.run_cmd("sh", PERF_JOB, JOBS[0], env={"PERF_JOB_CHECK": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(os.path.exists(marker))
 
@@ -127,7 +127,7 @@ class LabEnvTest(unittest.TestCase):
         shutil.copy(TEMPLATE, self.lab)
         with open(self.lab, "a") as f:
             f.write("SERVR_CPUS=0\n")
-        r = self.run_cmd("bash", PERF_JOB, JOBS[0], env={"PERF_JOB_CHECK": "1"})
+        r = self.run_cmd("sh", PERF_JOB, JOBS[0], env={"PERF_JOB_CHECK": "1"})
         self.assertEqual(r.returncode, 2)
         self.assertIn("unknown key SERVR_CPUS", r.stderr)
 

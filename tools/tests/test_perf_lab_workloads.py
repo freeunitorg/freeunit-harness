@@ -1,5 +1,5 @@
-"""Tests of the router-only perf lab workloads (rx0, rx1, rx32, drupal-ci) and of the
-per-side configure keys CONFIGURE_ARGS_A and CONFIGURE_ARGS_B in tools/perf-job.sh.
+"""Tests of the router-only perf lab workloads (rx0, rx1, rx32, drupal-ci), of the
+Python workloads (py-*) and of the per-side configure keys CONFIGURE_ARGS_A and CONFIGURE_ARGS_B in tools/perf-job.sh.
 
 Nothing touches the network: ssh, rsync and docker are stubs on PATH that record the call
 and fail. Run: python3 -m unittest discover -s tools/tests -v
@@ -14,6 +14,8 @@ TEMPLATE = os.path.join(LAB, "lab.env.example")
 CONF = os.path.join(LAB, "conf")
 RX_WORKLOADS = ("rx0", "rx1", "rx32", "drupal-ci")
 JIT_JOBS = sorted(glob.glob(os.path.join(LAB, "jobs", "23-pcre2-jit-*.job")))
+PY_WORKLOADS = ("py-wsgi-len", "py-wsgi-stream", "py-wsgi-threads", "py-asgi-len", "py-asgi-stream", "py-fastapi")
+PY_JOBS = sorted(glob.glob(os.path.join(LAB, "jobs", "py1-*.job")))
 
 
 def uri_patterns(conf):
@@ -64,7 +66,7 @@ class PerfLabWorkloadTest(unittest.TestCase):
 
     def check(self, path, check=True):
         env = dict(self.env, PERF_JOB_CHECK="1" if check else "0")
-        return subprocess.run(["bash", PERF_JOB, path], capture_output=True, text=True, env=env,
+        return subprocess.run(["sh", PERF_JOB, path], capture_output=True, text=True, env=env,
                               cwd=self.tmp, timeout=30, stdin=subprocess.DEVNULL)
 
     BASE = "JOB=t\nREV_A=abc\nREV_B=abc\nWORKLOAD=rx32\n"
@@ -103,10 +105,47 @@ class PerfLabWorkloadTest(unittest.TestCase):
         self.assertIn("CONFIGURE_ARGS_A=''", text)
         self.assertIn("CONFIGURE_ARGS_B=--regex-jit", text)
 
+    def test_job_env_round_trips_shell_characters(self):
+        # job.env is sourced by remote.sh.  A value with blanks, quotes, $, \
+        # and * must read back unchanged under every shell that runs it.
+        funcs = """a  b 'q' "d" $x \\y * `z` ; e"""
+        r = self.check(self.job(self.BASE + f"CONNS=1 32\nFUNCS={funcs}\n"), check=False)
+        self.assertEqual(r.returncode, 1, r.stderr)   # the ssh stub fails after job.env is written
+        envs = glob.glob(os.path.join(self.results, "t-*", "job.env"))
+        self.assertEqual(len(envs), 1)
+        for sh in ("sh", "dash", "busybox sh", "bash --posix"):
+            if not shutil.which(sh.split()[0]):
+                continue
+            with self.subTest(shell=sh):
+                out = subprocess.run(sh.split() + ["-c", '. "$1"; printf "%s|%s" "$FUNCS" "$CONNS"', "sh", envs[0]],
+                                     capture_output=True, text=True, timeout=30)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertEqual(out.stdout, f"{funcs}|1 32")
+
     def test_every_rx_workload_passes_check(self):
         for w in RX_WORKLOADS:
             r = self.check(self.job(f"JOB=t\nREV_A=a\nREV_B=b\nWORKLOAD={w}\n"))
             self.assertEqual(r.returncode, 0, f"{w}: {r.stderr}")
+
+    def test_every_py_workload_passes_check(self):
+        for w in PY_WORKLOADS:
+            r = self.check(self.job(f"JOB=t\nREV_A=a\nREV_B=b\nWORKLOAD={w}\n"))
+            self.assertEqual(r.returncode, 0, f"{w}: {r.stderr}")
+
+    def test_py1_jobs(self):
+        self.assertEqual([os.path.basename(j)[4:-4] for j in PY_JOBS],
+                         sorted(w[3:] for w in PY_WORKLOADS))
+        for j in PY_JOBS:
+            r = self.check(j)
+            self.assertEqual(r.returncode, 0, f"{j}: {r.stderr}")
+            self.assertIn("phases 2", r.stdout)
+            with open(j) as f:
+                text = f.read()
+            for k in ("REV_A", "REV_B"):
+                self.assertRegex(re.search(rf"^{k}=(\S+)$", text, re.M).group(1), r"^[0-9a-f]{40}$",
+                                 "pin the full SHA")
+            for k in ("EXPECT=", "FALSIFY=", "PRIMARY=r_instructions", "PERF=1"):
+                self.assertIn(k, text)
 
     def test_unknown_workload_is_refused(self):
         r = self.check(self.job("JOB=t\nREV_A=a\nREV_B=b\nWORKLOAD=rx2\n"))
@@ -191,10 +230,50 @@ class PerfLabWorkloadTest(unittest.TestCase):
         self.assertIn('prepare "$SHA_B" "$PB" "${CONFIGURE_ARGS_B:-}"', remote)
         self.assertIn("regex_jit_b=", remote)
 
+    def test_cells_and_remote_know_the_py_workloads(self):
+        with open(os.path.join(LAB, "cells.sh")) as f:
+            cells = f.read()
+        for w in PY_WORKLOADS:
+            m = re.search(rf"^    {w}\) py_conf \w+ (\w+) ", cells, re.M)
+            self.assertIsNotNone(m, w)
+            self.assertTrue(os.path.isfile(os.path.join(LAB, "www", "py", m.group(1) + ".py")), w)
+        self.assertIn("py-*-stream) echo chunked", cells)
+        self.assertIn('check_body "$1"', cells)
+        with open(os.path.join(LAB, "remote.sh")) as f:
+            remote = f.read()
+        self.assertIn("./configure python --config=python3-config --module=python3", remote)
+        self.assertIn("pyvenv=$PY_PKGS", remote)
+
+    def test_remote_checks_py_image_before_build(self):
+        # A py-* job must stop before any build when the image lacks Python,
+        # and the message must name both images to rebuild.
+        with open(os.path.join(LAB, "remote.sh")) as f:
+            remote = f.read()
+        build = remote.index("prepare() {")
+        for probe in ('fail "no python3-config in $LAB_IMAGE; $PY_IMAGE_FIX"',
+                      'fail "no /opt/pyvenv in $LAB_IMAGE; $PY_IMAGE_FIX"'):
+            self.assertIn(probe, remote)
+            self.assertLess(remote.index(probe), build, probe)
+        fix = re.search(r'^PY_IMAGE_FIX="([^"]*)"', remote, re.M)
+        self.assertIsNotNone(fix)
+        self.assertIn("tools/perf-lab/Dockerfile.base", fix.group(1))
+        self.assertIn("tools/perf-lab/Dockerfile)", fix.group(1))
+        self.assertLess(fix.start(), build)
+
     def test_scripts_parse(self):
+        # POSIX sh (docs/shell.md): parse with sh, and with dash, busybox ash and bash --posix when present.
+        shells = [["sh", "-n"]]
+        for name, cmd in (("dash", ["dash", "-n"]), ("busybox", ["busybox", "sh", "-n"]),
+                          ("bash", ["bash", "--posix", "-n"])):
+            if shutil.which(name):
+                shells.append(cmd)
         for s in ("perf-job.sh", "perf-lab/cells.sh", "perf-lab/remote.sh"):
-            r = subprocess.run(["bash", "-n", os.path.join(TOOLS, s)], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            path = os.path.join(TOOLS, s)
+            with open(path) as f:
+                self.assertEqual(f.readline(), "#!/bin/sh\n", s)
+            for cmd in shells:
+                r = subprocess.run(cmd + [path], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, f"{' '.join(cmd)} {s}: {r.stderr}")
 
 
 if __name__ == "__main__":

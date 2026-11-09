@@ -1,0 +1,18 @@
+# PY-1: 1.37.1 vs master on py-asgi-len.
+# A = 1.37.1 (9c034c47), B = master ed75ffa14, which has 0daef33c
+# "http: compress application responses of unknown length".
+# One app process; counts only, on a 2-CPU box with a PMU.
+JOB=py1-asgi-len
+REV_A=9c034c47765fc448ba0ae3787285b48644b65e4d
+REV_B=ed75ffa14f2a2fe5281fbe0eb132f88e50a117a2
+WORKLOAD=py-asgi-len
+CONNS=1 32
+WARM=2
+DUR=8
+REPS=2
+APP_PROCS=1
+PERF=1
+STRACE=1
+PRIMARY=r_instructions
+EXPECT=A and B level (NO CLAIM) on r_instructions: a response with a Content-Length returns before the 0daef33c path; this job is the control for py-asgi-stream
+FALSIFY=null band over 5 percent; or a CLAIM on r_instructions (then something other than 0daef33c moved the router between 1.37.1 and master)
