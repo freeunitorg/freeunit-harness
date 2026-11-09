@@ -28,7 +28,7 @@ overrides the path). `tools/perf-job.sh` refuses to start and names each missing
 | `LAB_DOCKER_HOST` | the image-build and cross-arch box. Not `DOCKER_HOST`: the docker CLI reads that name |
 | `REMOTE_WORKDIR` | large disk on the perf box: bare mirror `freeunit.git`, `trees/`, `runs/` |
 | `CLAIM_DIR` | directory of box claims, shared with the older `CLAIMED-<session>-<purpose>` convention |
-| `LAB_IMAGE` | image from `tools/perf-lab/Dockerfile` (a PHP embed image plus perf, strace) on the perf box |
+| `LAB_IMAGE` | image from `tools/perf-lab/Dockerfile` (the base from `Dockerfile.base` plus perf, strace) on the perf box |
 | `OHA`, `REPO_URL` | oha binary on the perf box (mounted into the container); FreeUnit git URL |
 | `SERVER_CPUS`, `LOAD_CPUS` | unitd and oha CPU sets; the SMT siblings of `SERVER_CPUS` stay idle |
 | `PERF_WINDOW`, `SHORT_JOB_MIN` | box local time window for jobs longer than `SHORT_JOB_MIN` (15) minutes |
@@ -98,11 +98,11 @@ A job is a `KEY=VALUE` file in `tools/perf-lab/jobs/`. Unknown keys are refused.
 | `JOB`, `ISSUE`, `EXPECT`, `FALSIFY` | | name; the tracker item; the expected delta; the number that falsifies it |
 | `REV_A`, `REV_B` | | `origin/<branch>`, `pr/<number>`, a tag or a SHA; equal revs, no patch and equal per-side configure arguments make a null-only job |
 | `PATCH_A`, `PATCH_B` | | a mutation patch applied on top of the rev (path relative to the job file) |
-| `WORKLOAD` | hello | `hello` (hello.php, root-only PHP target, opcache on), `server`, `static1k` (1 KiB share), `static1k-hdrs`, `capp` (C floor), and the router-only route tables `rx0`, `rx1`, `rx32`, `drupal-ci` (below) |
+| `WORKLOAD` | hello | `hello` (hello.php, root-only PHP target, opcache on), `server`, `static1k` (1 KiB share), `static1k-hdrs`, `capp` (C floor), the router-only route tables `rx0`, `rx1`, `rx32`, `drupal-ci`, and the Python workloads `py-wsgi-len`, `py-wsgi-stream`, `py-wsgi-threads`, `py-asgi-len`, `py-asgi-stream`, `py-fastapi` (below) |
 | `CONNS` | 6 | concurrency cells, for example `6 32`; each is its own cell name, `hello-c6` |
 | `WARM`, `DUR` | 2, 8 | seconds of warm-up and of measurement per cell |
 | `REPS` | 2 | blocks; even, because each normal block needs its swapped twin |
-| `RATE`, `APP_PROCS` | none, 4 | oha `-q` (open-loop-like, for latency claims); PHP or external processes |
+| `RATE`, `APP_PROCS` | none, 4 | oha `-q` (open-loop-like, for latency claims); application processes (PHP, Python, external) |
 | `PERF`, `STRACE` | 0, 0 | collect perf counters; run strace probe cells (`STRACE_SEC` 3 s at `STRACE_RATE` 2000 req/s) |
 | `NULL_GATE`, `NULL_LIMIT_PCT` | 1, 5 | run the null phase; the largest null band that still allows a claim |
 | `PRIMARY` | server_us | the metric in the one-line verdict |
@@ -114,6 +114,15 @@ counts one "aborted due to deadline" per connection, which the first smoke recor
 cells, `X Y Y X Y X X Y`; odd blocks run `Y X X Y X Y Y X`. The null phase (A against a copy of A) and the A/B
 phase alternate block by block in the same window. Builds run in `LAB_IMAGE` on the perf box (release, no
 `--debug`), from `git archive` of the resolved SHA, cached by SHA, patch, image and arguments.
+
+**Image.** Two steps on the perf box, from the harness root. The base is Debian 13 with PHP 8.5 and its embed
+SAPI from packages.sury.org, the FreeUnit build dependencies, python3 with python3-dev, and the pinned venv
+`/opt/pyvenv`. The lab image adds perf and strace.
+
+```sh
+docker build -f tools/perf-lab/Dockerfile.base -t <base image> tools/perf-lab
+docker build --build-arg BASE=<base image> -t "$LAB_IMAGE" tools/perf-lab
+```
 
 **Router-only workloads.** No application; the route table is a file in `tools/perf-lab/conf/<workload>.json`
 that `cells.sh` PUTs after replacing `@PORT@`. They measure the router and the main process only. No
@@ -131,6 +140,16 @@ INVALID. Every cell also records `xmaps`, the count of anonymous executable mapp
 code lives there. `meta.txt` records `configure_a`, `configure_b`, `regex_jit_a`, `regex_jit_b` (does the tree's
 `nxt_auto_config.h` define `NXT_REGEX_JIT`) and `pcre2_jit` (does the image's libpcre2-8 report JIT). The
 build log `build-<tree>.log` keeps the `./configure` output.
+
+**Python workloads.** The apps are in `www/py/`; the job builds the `python3` module
+(`./configure python --config=python3-config --module=python3`). `py-wsgi-len` and `py-asgi-len` send
+`hello\n` with a Content-Length. `py-wsgi-stream` and `py-asgi-stream` send it in two parts with no
+Content-Length, so the response goes out chunked. `py-wsgi-threads` is `py-wsgi-len` with 4 threads per process.
+`py-fastapi` is one `async def` FastAPI route that returns `{"message":"hello"}`; it runs from the venv
+`/opt/pyvenv` in the image (`Dockerfile.base`, every package pinned). `APP_PROCS` sets the processes. Each fresh
+unitd must give the exact body and the expected framing (chunked, or Content-Length), or the cell dies.
+A lab image built before the Python workloads has no python3-config and no `/opt/pyvenv`. A `py-*` job stops before any build and names the missing part; rebuild the base, or point `LAB_IMAGE` at an image that has them. meta.txt records `python` (python3 --version) and `pyvenv` (the pip freeze). The jobs `jobs/py1-*.job` compare
+1.37.1 with master on each workload; the `-len` twins are the controls for the `-stream` pair.
 
 Workload `capp` is `src/test/nxt_unit_app_test.c` linked against the plain `build/lib/libunit.a` as
 `build/lab_capp`. `build/unit_app_test` is not used: it links `libunit-tests.a`, the test-hook archive. `capp` is
@@ -295,7 +314,7 @@ start lab jobs on the perf box.
 ## Files and hard-coded hosts
 
 `tools/perf-job.sh` (local entry), `tools/perf-bisect.sh` (commit bisect over lab jobs), `tools/perf-compare.py` (math), `tools/perf-lab/remote.sh` (claim, gate,
-build, release), `cells.sh` (in-container cells), `Dockerfile`, `lab.env.example`, `jobs/`, `www/`,
+build, release), `cells.sh` (in-container cells), `Dockerfile`, `Dockerfile.base`, `lab.env.example`, `jobs/`, `www/`,
 `test_perf_compare.py` with `testdata/fixture.tsv`. Results: `run/perf-lab/<run-id>/` locally and
 `$REMOTE_WORKDIR/runs/<run-id>/` on the box, each with its own copy of the lab scripts.
 

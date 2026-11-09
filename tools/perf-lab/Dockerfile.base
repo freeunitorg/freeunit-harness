@@ -1,0 +1,36 @@
+# Perf lab base image: the BASE that tools/perf-lab/Dockerfile expects.
+# Debian 13 with PHP 8.5 and its embed SAPI from packages.sury.org (Debian 13
+# has no PHP 8.5), the FreeUnit build dependencies, python3, curl and procps.
+# sury has no php8.5-opcache package: opcache is built into php8.5-cli and
+# libphp8.5.so. The build fails if "php -m" does not list it.
+# Build from the harness root:
+#   docker build -f tools/perf-lab/Dockerfile.base -t <base image> tools/perf-lab
+#   docker build --build-arg BASE=<base image> -t "$LAB_IMAGE" tools/perf-lab
+#
+# Python workloads (py-*): python3-dev gives python3-config and libpython3 for
+# the Unit python3 module. /opt/pyvenv is the venv of py-fastapi ("home" in the
+# app config). Every package in it is pinned, so two boxes build the same venv.
+# remote.sh records python3 --version and the pip freeze in meta.txt.
+FROM debian:trixie
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && . /etc/os-release \
+ && curl -fsSL https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury-php.gpg \
+ && printf 'deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ %s main\n' \
+        "$VERSION_CODENAME" > /etc/apt/sources.list.d/sury-php.list \
+ && apt-get update -qq \
+ && apt-get install -y --no-install-recommends \
+        php8.5-cli php8.5-dev libphp8.5-embed \
+        build-essential libssl-dev libpcre2-dev zlib1g-dev \
+        python3 python3-dev python3-venv procps git make \
+ && rm -rf /var/lib/apt/lists/* \
+ && php-config --version \
+ && find /usr/lib -name libphp.so | grep -q . \
+ && php -m | grep -qix 'zend opcache'
+RUN python3 -m venv /opt/pyvenv \
+ && /opt/pyvenv/bin/pip install --no-cache-dir --disable-pip-version-check \
+        fastapi==0.162.0 starlette==1.10.0 pydantic==2.14.2 pydantic_core==2.50.2 \
+        anyio==4.16.0 idna==3.20 typing_extensions==4.16.0 typing-inspection==0.4.4 \
+        annotated-types==0.8.0 annotated-doc==0.0.5 opentelemetry-api==1.45.2 \
+ && /opt/pyvenv/bin/pip freeze > /opt/pyvenv/freeze.txt

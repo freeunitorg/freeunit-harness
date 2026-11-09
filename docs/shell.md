@@ -173,15 +173,17 @@ logic to Python:
 - `tools/hosts`
 - `tools/mirror-check.sh`
 - `tools/new-failures.sh`
-- `tools/perf-bisect.sh`, `tools/perf-job.sh`
-- `tools/perf-lab/cells.sh`, `tools/perf-lab/remote.sh`
+- `tools/perf-bisect.sh`
 - `tools/test-isolated`
 - `tools/unit-build`
 - `tools/unitd-ctl`
 - `tools/watch-run.sh`
 
-`tools/check-public.sh`, `tools/check-style`, `tools/perf-lab/scaling/run.sh` and `tools/perf-lab/scaling/build-tree.sh`
-are the tracked scripts with a `#!/bin/sh` shebang. `lib.sh`, `sweep.sh` and `profile.sh` in `tools/perf-lab/scaling/` use
+`tools/check-public.sh`, `tools/check-style`, `tools/perf-job.sh`, `tools/perf-lab/remote.sh`,
+`tools/perf-lab/cells.sh`, `tools/perf-lab/scaling/run.sh` and `tools/perf-lab/scaling/build-tree.sh` are the
+tracked scripts with a `#!/bin/sh` shebang. `tools/tests/test_perf_lab_workloads.py` parses the perf lab three
+with `sh -n`, and with dash, busybox ash and `bash --posix` when they are installed. `lib.sh`, `sweep.sh` and
+`profile.sh` in `tools/perf-lab/scaling/` use
 `#!/usr/bin/env bash` by design. `sweep.sh` and `profile.sh` run only in the lab container or on the perf box.
 `lib.sh` runs there too, and `tools/tests/test_perf_lab_scaling.py` also sources it under bash on the developer
 host, so `make tools-test` needs bash.

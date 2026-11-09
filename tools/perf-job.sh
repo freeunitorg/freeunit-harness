@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # perf-job.sh -- run one perf lab job on the perf box and compare A with B.
 #
 # USAGE
@@ -24,7 +24,7 @@
 # Docs: docs/perf/perf-lab.md
 set -u
 HARNESS=$(cd "$(dirname "$0")/.." && pwd)
-say() { echo "perf-job: $*" >&2; }
+say() { printf 'perf-job: %s\n' "$*" >&2; }
 usage_die() { say "$*"; exit 2; }
 
 [ $# -eq 1 ] || usage_die "usage: tools/perf-job.sh JOBFILE   (or a run directory, to resume)"
@@ -34,6 +34,7 @@ if [ -d "$JOBFILE" ] && [ -f "$JOBFILE/job.env" ]; then RESUME=1
 elif [ ! -f "$JOBFILE" ]; then usage_die "no job file $JOBFILE"; fi
 
 # ---- lab.env --------------------------------------------------------------
+# shellcheck disable=SC2034  # read by tools/lib/env.sh
 LAB_HARNESS=$HARNESS
 # shellcheck source=lib/env.sh
 . "$HARNESS/tools/lib/env.sh"
@@ -43,22 +44,47 @@ LAB_HARNESS=$HARNESS
 # result would show it. Every key the template documents is accepted.
 lab_env_load --strict --export \
     || usage_die "$LAB_ENV has errors (see above); the keys are in tools/perf-lab/lab.env.example"
-read_kv() {  # file allowed-keys-regex -> exports KEY=VALUE pairs; refuses anything else
-    local file=$1 allow=$2 line k v n=0
-    while IFS= read -r line || [ -n "$line" ]; do
-        n=$((n + 1))
-        line=${line%%#*}; line=${line%"${line##*[![:space:]]}"}
-        [ -z "$line" ] && continue
-        [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]] || usage_die "$file:$n: not KEY=VALUE: $line"
-        k=${BASH_REMATCH[1]}; v=${BASH_REMATCH[2]}
-        [[ "$k" =~ ^($allow)$ ]] || usage_die "$file:$n: unknown key $k"
-        v=${v#\"}; v=${v%\"}; v=${v#\'}; v=${v%\'}
-        printf -v "$k" '%s' "$v"; export "${k?}"
-    done < "$file"
+# ASCII classes spelt out: a range such as [A-Z] follows the locale in some shells.
+UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+ALNUM=${UPPER}abcdefghijklmnopqrstuvwxyz0123456789
+read_kv() {  # file allowed-keys (KEY|KEY|...) -> exports KEY=VALUE pairs; refuses anything else
+    rk_file=$1 rk_allow=$2 rk_n=0
+    while IFS= read -r rk_line || [ -n "$rk_line" ]; do
+        rk_n=$((rk_n + 1))
+        rk_line=${rk_line%%#*}; rk_line=${rk_line%"${rk_line##*[![:space:]]}"}
+        [ -z "$rk_line" ] && continue
+        rk_k=${rk_line%%=*}
+        case "$rk_line" in *=*) ;; *) rk_k="" ;; esac
+        case "$rk_k" in
+        ""|[!${UPPER}_]*|*[!${UPPER}0123456789_]*) usage_die "$rk_file:$rk_n: not KEY=VALUE: $rk_line" ;;
+        esac
+        case "|$rk_allow|" in *"|$rk_k|"*) ;; *) usage_die "$rk_file:$rk_n: unknown key $rk_k" ;; esac
+        rk_v=${rk_line#*=}
+        rk_v=${rk_v#\"}; rk_v=${rk_v%\"}; rk_v=${rk_v#\'}; rk_v=${rk_v%\'}
+        eval "$rk_k=\$rk_v"; export "${rk_k?}"   # rk_k is a checked name
+    done < "$rk_file"
+}
+getv() {  # name -> the value of that variable, empty when unset
+    eval "printf '%s' \"\${$1:-}\""
+}
+shq() {  # value -> one shell word that "." reads back as that value
+    case "$1" in
+    "") printf "''" ;;
+    *[!${ALNUM}_./:@%+=-]*)
+        sq_r="" sq_s=$1
+        while :; do
+            case "$sq_s" in
+            *\'*) sq_r="$sq_r${sq_s%%\'*}'\\''"; sq_s=${sq_s#*\'} ;;
+            *) break ;;
+            esac
+        done
+        printf "'%s'" "$sq_r$sq_s" ;;
+    *) printf '%s' "$1" ;;
+    esac
 }
 missing=""
 for k in PERF_HOST REMOTE_WORKDIR CLAIM_DIR LAB_IMAGE OHA REPO_URL SERVER_CPUS LOAD_CPUS PERF_WINDOW GOVERNOR; do
-    [ -n "${!k:-}" ] || missing="$missing $k"
+    [ -n "$(getv "$k")" ] || missing="$missing $k"
 done
 [ -z "$missing" ] || usage_die "$LAB_ENV is missing:$missing (see tools/perf-lab/lab.env.example)"
 case "$GOVERNOR" in record|require-performance) ;; *) usage_die "GOVERNOR must be record or require-performance" ;; esac
@@ -76,36 +102,47 @@ if [ "$RESUME" = 1 ]; then
 else
 # ---- job file -------------------------------------------------------------
 JOB_KEYS='JOB|REV_A|REV_B|PATCH_A|PATCH_B|WORKLOAD|CONNS|DUR|WARM|REPS|RATE|APP_PROCS|PERF|STRACE|STRACE_SEC|STRACE_RATE|NULL_GATE|NULL_LIMIT_PCT|PRIMARY|FUNCS|CONFIGURE_ARGS|CONFIGURE_ARGS_A|CONFIGURE_ARGS_B|ISSUE|EXPECT|FALSIFY|AE'
+# shellcheck disable=SC2034  # written to job.env through getv below
 WORKLOAD=hello CONNS=6 DUR=8 WARM=2 REPS=2 RATE="" APP_PROCS=4 PERF=0 STRACE=0
+# shellcheck disable=SC2034  # as above
 STRACE_SEC=3 STRACE_RATE=2000 NULL_GATE=1 NULL_LIMIT_PCT=5 PRIMARY=server_us FUNCS=""
 CONFIGURE_ARGS="" CONFIGURE_ARGS_A="" CONFIGURE_ARGS_B="" PATCH_A="" PATCH_B="" JOB="" REV_A="" REV_B="" AE=""
 read_kv "$JOBFILE" "$JOB_KEYS"
 [ -n "$JOB" ] && [ -n "$REV_A" ] && [ -n "$REV_B" ] || usage_die "$JOBFILE needs JOB, REV_A and REV_B"
-[[ "$JOB" =~ ^[A-Za-z0-9._-]+$ ]] || usage_die "JOB may hold only letters, digits, dot, dash, underscore"
+case "$JOB" in *[!${ALNUM}._-]*) usage_die "JOB may hold only letters, digits, dot, dash, underscore" ;; esac
 case "$WORKLOAD" in
 hello|server|static1k|static1k-hdrs|capp) ;;
+py-wsgi-len|py-wsgi-stream|py-wsgi-threads|py-asgi-len|py-asgi-stream|py-fastapi)
+    # Python apps in tools/perf-lab/www/py; the image needs python3-dev and /opt/pyvenv
+    # (tools/perf-lab/Dockerfile.base). py-wsgi-threads runs 4 threads per process.
+    [ -d "$HARNESS/tools/perf-lab/www/py" ] || usage_die "WORKLOAD $WORKLOAD: tools/perf-lab/www/py is missing" ;;
 rx0|rx1|rx32|drupal-ci)
     # Router-only workloads: the config is a file that cells.sh PUTs.
     conf=$HARNESS/tools/perf-lab/conf/$WORKLOAD.json
     python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$conf" 2>/dev/null \
         || usage_die "WORKLOAD $WORKLOAD: $conf is missing or not valid JSON" ;;
-*) usage_die "WORKLOAD $WORKLOAD is not built yet (hello, server, static1k, static1k-hdrs, capp, rx0, rx1, rx32, drupal-ci)" ;;
+*) usage_die "WORKLOAD $WORKLOAD is not built yet (hello, server, static1k, static1k-hdrs, capp, rx0, rx1, rx32, drupal-ci, py-wsgi-len, py-wsgi-stream, py-wsgi-threads, py-asgi-len, py-asgi-stream, py-fastapi)" ;;
 esac
 for v in CONFIGURE_ARGS CONFIGURE_ARGS_A CONFIGURE_ARGS_B; do
-    [[ "${!v}" =~ ^[A-Za-z0-9\ ,.=/_+-]*$ ]] || usage_die "$v may hold only letters, digits, blanks and , . = / _ + -"
+    case "$(getv "$v")" in
+    *[!${ALNUM}\ ,.=/_+-]*) usage_die "$v may hold only letters, digits, blanks and , . = / _ + -" ;;
+    esac
 done
-[[ "$AE" =~ ^[A-Za-z0-9\ ,.\;=*-]*$ ]] || usage_die "AE may hold only token characters, blanks, commas, dots, semicolons, = and *"
-[[ "$REPS" =~ ^[0-9]+$ ]] && [ "$REPS" -ge 2 ] && [ $((REPS % 2)) = 0 ] \
+case "$AE" in
+*[!${ALNUM}\ ,.\;=*-]*) usage_die "AE may hold only token characters, blanks, commas, dots, semicolons, = and *" ;;
+esac
+case "$REPS" in ""|*[!0123456789]*) REPS_OK=0 ;; *) REPS_OK=1 ;; esac
+[ "$REPS_OK" = 1 ] && [ "$REPS" -ge 2 ] && [ $((REPS % 2)) = 0 ] \
     || usage_die "REPS must be even and at least 2: each normal block needs its swapped twin"
 JOBDIR=$(cd "$(dirname "$JOBFILE")" && pwd)
 for p in PATCH_A PATCH_B; do
-    v=${!p}; [ -z "$v" ] && continue
+    v=$(getv "$p"); [ -z "$v" ] && continue
     case "$v" in /*) ;; *) v=$JOBDIR/$v ;; esac
     [ -f "$v" ] || usage_die "$p file $v not found"
-    printf -v "$p" '%s' "$v"
+    eval "$p=\$v"   # p is PATCH_A or PATCH_B
 done
 
-ncells=$(echo $CONNS | wc -w)
+ncells=$(printf '%s\n' "$CONNS" | wc -w)
 # One phase (null only) when A and B would be the same build.
 nph=2
 [ "$REV_A" = "$REV_B" ] && [ -z "$PATCH_A$PATCH_B" ] && [ "$CONFIGURE_ARGS_A" = "$CONFIGURE_ARGS_B" ] && nph=1
@@ -118,8 +155,8 @@ LOCAL=${LAB_RESULTS:-$HARNESS/run/perf-lab}/$RUN_ID
 say "job $JOB, run $RUN_ID, about $EST_MIN min of cells on $PERF_HOST"
 say "if this command is interrupted, resume with: tools/perf-job.sh $LOCAL"
 if [ "${PERF_JOB_CHECK:-0}" = 1 ]; then
-    echo "CHECK $JOB: ok, phases $nph, cells '$CONNS', $REPS blocks, about $EST_MIN min of cells," \
-        "configure A '$(echo $CONFIGURE_ARGS $CONFIGURE_ARGS_A)' B '$(echo $CONFIGURE_ARGS $CONFIGURE_ARGS_B)'"; exit 0
+    printf '%s\n' "CHECK $JOB: ok, phases $nph, cells '$CONNS', $REPS blocks, about $EST_MIN min of cells, \
+configure A '$(echo $CONFIGURE_ARGS $CONFIGURE_ARGS_A)' B '$(echo $CONFIGURE_ARGS $CONFIGURE_ARGS_B)'"; exit 0
 fi
 
 mkdir -p "$LOCAL" || usage_die "cannot create $LOCAL"
@@ -131,9 +168,9 @@ mkdir -p "$LOCAL" || usage_die "cannot create $LOCAL"
              PERF STRACE STRACE_SEC STRACE_RATE NULL_GATE NULL_LIMIT_PCT PRIMARY FUNCS CONFIGURE_ARGS CONFIGURE_ARGS_A CONFIGURE_ARGS_B AE \
              REMOTE_WORKDIR CLAIM_DIR LAB_IMAGE OHA REPO_URL SERVER_CPUS LOAD_CPUS PERF_WINDOW \
              GOVERNOR SHORT_JOB_MIN IDLE_MAX_PCT WAIT_MAX_MIN LEGACY_CLAIM_MAX_H BUILD_JOBS; do
-        printf '%s=%q\n' "$k" "${!k:-}"
+        printf '%s=%s\n' "$k" "$(shq "$(getv "$k")")"
     done
-    printf 'PATCH_A=%q\nPATCH_B=%q\n' "${PATCH_A:+patch-A.diff}" "${PATCH_B:+patch-B.diff}"
+    printf 'PATCH_A=%s\nPATCH_B=%s\n' "$(shq "${PATCH_A:+patch-A.diff}")" "$(shq "${PATCH_B:+patch-B.diff}")"
 } > "$LOCAL/job.env"
 cp "$JOBFILE" "$LOCAL/job.txt"
 [ -n "$PATCH_A" ] && cp "$PATCH_A" "$LOCAL/patch-A.diff"
@@ -146,7 +183,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=15 "$SSH_TARGET" "mkdir -p '$RDIR/lab'" \
 rsync -a "$LOCAL/" "$SSH_TARGET:$RDIR/" \
     && rsync -a --exclude testdata --exclude jobs "$HARNESS/tools/perf-lab/" "$SSH_TARGET:$RDIR/lab/" || { say "rsync to the box failed"; exit 1; }
 ssh -o BatchMode=yes "$SSH_TARGET" \
-    "cd '$RDIR' && setsid nohup bash '$RDIR/lab/remote.sh' '$RDIR' > remote.log 2>&1 < /dev/null &" \
+    "cd '$RDIR' && setsid nohup sh '$RDIR/lab/remote.sh' '$RDIR' > remote.log 2>&1 < /dev/null &" \
     || { say "cannot start remote.sh"; exit 1; }
 fi
 
@@ -157,7 +194,7 @@ while :; do
     sleep 20
     st=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$SSH_TARGET" \
         "cat '$RDIR/exit' 2>/dev/null; echo; tail -n 1 '$RDIR/remote.log' 2>/dev/null" 2>/dev/null) || continue
-    code=$(echo "$st" | head -1); msg=$(echo "$st" | tail -n 1)
+    code=$(printf '%s\n' "$st" | head -1); msg=$(printf '%s\n' "$st" | tail -n 1)
     [ "$msg" != "$last" ] && say "$msg" && last=$msg
     [ -n "$code" ] && break
     [ "$(date +%s)" -gt "$deadline" ] && { say "no result by the deadline; the run may still be going: $SSH_TARGET:$RDIR"; exit 1; }
@@ -165,13 +202,13 @@ done
 rsync -a "$SSH_TARGET:$RDIR/" "$LOCAL/" || say "warning: copying the run back failed"
 
 case "$code" in
-75) echo "PERF $JOB $RUN_ID: BUSY, nothing measured: $(cat "$LOCAL/busy" 2>/dev/null) | log $LOCAL/remote.log"; exit 75 ;;
+75) printf '%s\n' "PERF $JOB $RUN_ID: BUSY, nothing measured: $(cat "$LOCAL/busy" 2>/dev/null) | log $LOCAL/remote.log"; exit 75 ;;
 0) ;;
-*) echo "PERF $JOB $RUN_ID: ERROR: $(cat "$LOCAL/error" 2>/dev/null) | log $LOCAL/remote.log"; exit 1 ;;
+*) printf '%s\n' "PERF $JOB $RUN_ID: ERROR: $(cat "$LOCAL/error" 2>/dev/null) | log $LOCAL/remote.log"; exit 1 ;;
 esac
 
 python3 "$HARNESS/tools/perf-compare.py" "$LOCAL/results.tsv" --meta "$LOCAL/meta.txt" \
     --json "$LOCAL/summary.json" --primary "$PRIMARY" --null-limit "$NULL_LIMIT_PCT" > "$LOCAL/compare.txt" \
-    || { echo "PERF $JOB $RUN_ID: ERROR: perf-compare failed | $LOCAL"; exit 1; }
+    || { printf '%s\n' "PERF $JOB $RUN_ID: ERROR: perf-compare failed | $LOCAL"; exit 1; }
 cat "$LOCAL/compare.txt" >&2
-echo "PERF $JOB $RUN_ID: $(head -1 "$LOCAL/compare.txt") | report $LOCAL/compare.txt | json $LOCAL/summary.json"
+printf '%s\n' "PERF $JOB $RUN_ID: $(head -1 "$LOCAL/compare.txt") | report $LOCAL/compare.txt | json $LOCAL/summary.json"

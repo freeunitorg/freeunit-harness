@@ -1,7 +1,8 @@
 # Perf lab image: the PHP embed build image plus perf and strace.
-# Build on the perf box:
+# Build on the perf box, after the base (Dockerfile.base):
 #   docker build --build-arg BASE=<php embed image> -t "$LAB_IMAGE" tools/perf-lab
-# BASE must have gcc, make, php-config (embed SAPI), python3, curl, procps.
+# BASE must have gcc, make, php-config (embed SAPI), python3, curl, procps;
+# the py-* workloads also need python3-config and the /opt/pyvenv venv.
 ARG BASE
 FROM ${BASE}
 USER root

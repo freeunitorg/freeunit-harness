@@ -1,0 +1,18 @@
+# PY-1: 1.37.1 vs master on py-asgi-stream.
+# A = 1.37.1 (9c034c47), B = master ed75ffa14, which has 0daef33c
+# "http: compress application responses of unknown length".
+# One app process; counts only, on a 2-CPU box with a PMU.
+JOB=py1-asgi-stream
+REV_A=9c034c47765fc448ba0ae3787285b48644b65e4d
+REV_B=ed75ffa14f2a2fe5281fbe0eb132f88e50a117a2
+WORKLOAD=py-asgi-stream
+CONNS=1 32
+WARM=2
+DUR=8
+REPS=2
+APP_PROCS=1
+PERF=1
+STRACE=1
+PRIMARY=r_instructions
+EXPECT=B (master) has higher r_instructions than A (1.37.1): the unknown-length response takes the compression check that 0daef33c added in nxt_http_compression.c; direction up, exact syscalls level. Not a claim at REPS=2: the recorded run gave +0.37 percent at c1 (null band 0.40) and +0.12 percent at c32 (null band 1.15); a claim needs more blocks
+FALSIFY=null band over 5 percent; or r_instructions level or down at every cell; or rsys_*/asys_* counts that differ between A and B (then the change is not the compression check alone)
