@@ -11,6 +11,10 @@ Claude Opus 4.8	addr	claude-opus-4-8
 DeepSeek V4.1 Flash	-	DeepSeek,DeepSeek (deepseek-flash),deepseek/deepseek-v4.1-flash,deepseek-flash
 Codex	-	OpenAI Codex,codex
 GPT-6.1-Sol	-	gpt-6.1-sol
+GPT-6-Astra low	-	gpt-6-astra-low
+GPT-6-Astra medium	-	gpt-6-astra-medium
+GPT-6-Astra high	-	gpt-6-astra-high
+GPT-6-Astra xhigh	-	gpt-6-astra-xhigh
 Grok Bot	-	Grok,grok
 Kimi K3	-	moonshotai/kimi-k3
 Qwen3.8 Max	-	qwen/qwen3.8-max-0902
