@@ -1,4 +1,4 @@
-"""Verification Test: Dual-Channel Message Ordering (Issues #573, #597).
+"""Verification Test: Dual-Channel Message Ordering.
 
 Asserts that FreeUnit's dual-channel IPC preserves FIFO delivery order
 between the shared-memory App Queue and Unix socket datagram channel.

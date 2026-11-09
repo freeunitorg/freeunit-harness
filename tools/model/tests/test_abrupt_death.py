@@ -1,4 +1,4 @@
-"""Verification Test: Abrupt Worker Teardown & SIGKILL (Issue #195, Commit 4d81e916).
+"""Verification Test: Abrupt Worker Teardown & SIGKILL (https://github.com/freeunitorg/freeunit/issues/195, Commit 4d81e916).
 
 Asserts that abrupt worker termination (SIGKILL) during in-flight shared memory
 transfer does not crash router engines, deadlock connections, or leak memory.

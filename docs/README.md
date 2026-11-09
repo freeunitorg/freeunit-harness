@@ -39,6 +39,25 @@ How FreeUnit works, written against the source tree, and how this harness is run
 | [context-priming.md](context-priming.md) | when to load router + libunit + port whole into one 1M subagent, which pack level for which task, how to brief it; built by `tools/build-pack.py` |
 | [public-harness-plan.md](public-harness-plan.md) | plan to publish this harness: scrub inventory, `check-public.sh` spec, agent survey, contribution recipes with token budgets, repository shape, phases. Plan, 2026-10-07. |
 
+## Behavioural model (`model/`)
+
+| Document | What it covers |
+|---|---|
+| [model/index.md](model/index.md) | the discrete-event model: Model A (simulation) and Model B (adversarial verification) |
+| [model/models/model-a-simulation.md](model/models/model-a-simulation.md) | Model A: event loop, router, workers, shared memory, schedules |
+| [model/models/model-b-verification.md](model/models/model-b-verification.md) | Model B: interleaver, fault injection, invariants |
+| [model/architecture/overview.md](model/architecture/overview.md) | modelled architecture and how it maps to FreeUnit |
+| [model/architecture/dual-channel-ipc.md](model/architecture/dual-channel-ipc.md) | dual-channel IPC (app queue and socket) and the ordering invariants |
+| [model/architecture/c-schema.md](model/architecture/c-schema.md) | ctypes mirrors of the C headers the model keeps in lockstep |
+| [model/verification/conformance.md](model/verification/conformance.md) | wire comparator and tandem runs against a live unitd |
+| [model/verification/replay.md](model/verification/replay.md) | telemetry replay and root-cause hints |
+| [model/verification/request-path-limits.md](model/verification/request-path-limits.md) | request-path limits modelled after https://github.com/freeunitorg/freeunit/issues/923 |
+| [model/benchmarks/optimizations.md](model/benchmarks/optimizations.md) | modelled doorbell counts for K1, and the K2 response-framing proposal |
+| [model/benchmarks/lockfree-shm.md](model/benchmarks/lockfree-shm.md) | modelled per-engine shared-memory slabs (a proposal, not in the server) |
+
+The Python package is [`tools/model`](../tools/model/). Run it with
+`python3 -m tools.model.cli` and `python3 -m pytest -q tools/model/tests`.
+
 ## Performance (`perf/`)
 
 | Document | What it covers |

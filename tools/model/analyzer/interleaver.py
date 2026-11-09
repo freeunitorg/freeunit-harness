@@ -5,7 +5,7 @@ Actively explores non-deterministic timing interleavings between:
 2. Socket datagram notifications (READ_QUEUE doorbells, direct socket messages).
 3. Concurrent router engine thread scheduling turns.
 
-Reproduces and asserts immunity against dual-channel message inversions (issues #573, #597).
+Reproduces and asserts immunity against dual-channel message inversions.
 """
 
 from __future__ import annotations

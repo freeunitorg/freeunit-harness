@@ -2,7 +2,7 @@
 
 Models:
 - Classic & persistent worker mode (DrupalRuntime).
-- Issue #321 visitor request hijacking: solved via detached request completion (unit_finish_request).
+- Detached request completion via nxt_port_detached_t start and finish messages.
 - Service container resets between requests.
 - Render cache cleanup and PDO connection verification.
 - Dedicated jobs_app schedule isolation for /cron/KEY.

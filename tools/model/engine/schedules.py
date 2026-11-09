@@ -1,4 +1,4 @@
-"""FreeUnit Schedule Subsystem Simulation (PR #452 & plan-cron.md).
+"""FreeUnit Schedule Subsystem Simulation (https://github.com/freeunitorg/freeunit/pull/452 & plan-cron.md).
 
 Models:
 - Main router engine schedule timer firing and in_flight concurrency tracking.
@@ -41,7 +41,7 @@ class ScheduleRunContext:
 
 
 class ScheduleRunner:
-    """Simulated FreeUnit PR 452 schedule execution engine."""
+    """Simulated schedule execution engine (https://github.com/freeunitorg/freeunit/pull/452)."""
 
     def __init__(self, loop: SimEventLoop, router: Router):
         self.loop = loop

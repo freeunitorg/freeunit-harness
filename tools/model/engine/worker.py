@@ -2,10 +2,11 @@
 
 Faithfully models:
 - Worker event loop with poll() on private socket fd and shared App Queue fd.
-- Orderly draining of App Queue before socket fallback (fix for issues #573, #597).
+- Drain the app queue before a new socket read. The server also uses a
+  READ_SOCKET marker in the queue, which this model does not yet model.
 - Request unpacking from shared memory chunks.
 - Pluggable framework handler invocation.
-- Detached response completion (nxt_port_detached_t / unit_finish_request).
+- Detached response completion (nxt_port_detached_t start and finish messages).
 - Request limits (max_requests) and execution timeouts.
 - Abrupt worker crashes (SIGKILL / SIGCHLD) and graceful shutdowns.
 """
@@ -18,7 +19,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tools.model.c_types import (
     DetachedMode,
+    FieldNameTooLong,
+    HttpHeaderField,
     MmapMsg,
+    PHP_RESPONSE_ROOM,
+    NXT_UNIT_MAX_PLAIN_SIZE,
     PortMsg,
     PortMsgFlag,
     PortMsgType,
@@ -53,6 +58,8 @@ class AppWorker:
         shm_pool: SharedMemoryPool,
         max_requests: int = 1000,
         request_timeout_ms: int = 30_000,
+        static_script: bool = False,
+        script_exists: bool = True,
     ):
         self.loop = loop
         self.worker_id = worker_id
@@ -62,9 +69,13 @@ class AppWorker:
         self.shm_pool = shm_pool
         self.max_requests = max_requests
         self.request_timeout_ms = request_timeout_ms
+        self.static_script = static_script
+        self.script_exists = script_exists
 
         self.state: WorkerState = WorkerState.IDLE
         self.requests_handled: int = 0
+        self.total_single_buffer_responses: int = 0
+        self.total_multi_buffer_responses: int = 0
         self.current_stream: Optional[int] = None
         self.current_reply_port: Optional[int] = None
 
@@ -78,6 +89,10 @@ class AppWorker:
         self.on_send_response_to_router: Optional[
             Callable[[int, PortMsg, bytes, int], None]
         ] = None
+
+    @property
+    def is_alive(self) -> bool:
+        return self.state != WorkerState.DEAD
 
     def on_socket_readable(self) -> None:
         """Called when datagram arrives on worker socket."""
@@ -163,16 +178,37 @@ class AppWorker:
 
         # Retrieve request payload from shared memory
         raw_req = self.shm_pool.get_data(mmsg.mmap_id, mmsg.chunk_id, mmsg.size)
+        parsed_req = UnitRequest.deserialize(raw_req) if raw_req else None
 
         # Simulate execution latency & handler dispatch
         def execute_handler():
             if self.state == WorkerState.DEAD:
                 return
 
+            if self.static_script:
+                # Fixed target (https://github.com/freeunitorg/freeunit/pull/751): per-request stat() is skipped.
+                # If script does not exist, 404 is emitted after php_request_startup(),
+                # retaining PHP startup headers (e.g. X-Powered-By: PHP/8.5.0-dev).
+                if not self.script_exists:
+                    resp = UnitResponse(
+                        status=404,
+                        headers=[HttpHeaderField(name="X-Powered-By", value="PHP/8.5.0-dev")],
+                        content=b"",
+                    )
+                    self._send_response(resp)
+                    return
+            else:
+                # Dynamic target: stat() runs before php_request_startup().
+                # If script does not exist, 404 is emitted with no PHP headers.
+                if not self.script_exists:
+                    resp = UnitResponse(status=404, headers=[], content=b"")
+                    self._send_response(resp)
+                    return
+
             resp = UnitResponse(status=200, content=b"Simulated Response")
             if self.handler:
                 # Call framework handler
-                resp = self.handler(None)  # Pass parsed request
+                resp = self.handler(parsed_req)
 
             self._send_response(resp)
 
@@ -184,11 +220,45 @@ class AppWorker:
         )
 
     def _send_response(self, resp: UnitResponse) -> None:
-        """Write response back to router via shared memory and socket."""
+        """Write response back to router via shared memory and socket.
+
+        Model a proposed single-buffer response framing (K2). K2 is a
+        proposal that is not in the server. When the body length is at most
+        PHP_RESPONSE_ROOM (8192 bytes, a model-only budget) the body is
+        packed as piggyback content in the response header buffer.
+        """
         if self.state == WorkerState.DEAD:
             return
 
-        resp_bytes = resp.serialize()
+        is_single_buffer = len(resp.content) <= PHP_RESPONSE_ROOM
+        if is_single_buffer:
+            self.total_single_buffer_responses += 1
+            self.loop.record_trace(
+                f"worker_{self.worker_id}",
+                "response_single_buffer_piggybacked",
+                stream=self.current_stream,
+                body_size=len(resp.content),
+            )
+        else:
+            self.total_multi_buffer_responses += 1
+            self.loop.record_trace(
+                f"worker_{self.worker_id}",
+                "response_multi_buffer_chunked",
+                stream=self.current_stream,
+                body_size=len(resp.content),
+            )
+
+        try:
+            resp_bytes = resp.serialize()
+        except FieldNameTooLong as e:
+            # A module refuses a response header name over 255 bytes before
+            # nxt_unit_response_add_field() (https://github.com/freeunitorg/freeunit/pull/926): the Python,
+            # Perl and Node modules fail the response with 503, PHP with 500.
+            # The model takes the 503 path for every app type.
+            self.loop.record_trace(f"worker_{self.worker_id}",
+                                   "response_header_name_too_long", reason=str(e))
+            resp = UnitResponse(status=503, content=b"")
+            resp_bytes = resp.serialize()
 
         # Allocate shared memory for response
         alloc = self.shm_pool.allocate(len(resp_bytes), resp_bytes)
@@ -233,7 +303,7 @@ class AppWorker:
         self.loop.schedule(0, f"worker_{self.worker_id}", "check_next_work", self._check_next_work)
 
     def trigger_detached_start(self) -> None:
-        """fastcgi_finish_request / unit_finish_request detached execution start."""
+        """Start detached work with a nxt_port_detached_t start message."""
         self.state = WorkerState.DETACHED
         detached_msg = PortMsg(
             stream=self.current_stream or 0,

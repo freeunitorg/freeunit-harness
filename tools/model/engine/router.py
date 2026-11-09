@@ -78,6 +78,15 @@ class Router:
         # Worker registrations: app_id -> List[(worker_id, app_queue, socket_pair)]
         self.workers: Dict[str, List[Tuple[int, AppQueue, UnixSocketPair]]] = {}
         self.worker_rr_index: Dict[str, int] = {}
+        # app_id -> number of configured targets (app->targets_count; an app
+        # without "targets" has one implicit target).  req.app_target must be
+        # below it, else the pass is declined and the request gets 404, as
+        # https://github.com/freeunitorg/freeunit/pull/925 does for a pass that names a missing target.
+        self.app_targets: Dict[str, int] = {}
+
+    def set_app_targets(self, app_id: str, count: int) -> None:
+        """Set how many targets an application has (default 1)."""
+        self.app_targets[app_id] = count
 
     def register_worker(
         self,
@@ -131,6 +140,24 @@ class Router:
             return
 
         if action == RouteAction.PASS:
+            if req.app_target >= self.app_targets.get(app_id, 1):
+                # Missing target: declined pass, 404 (https://github.com/freeunitorg/freeunit/pull/925).
+                self.loop.record_trace(
+                    f"engine_{engine_id}",
+                    "target_not_found_404",
+                    stream=stream_id,
+                    app_id=app_id,
+                    app_target=req.app_target,
+                )
+                resp = UnitResponse(status=404, content=b"")
+                self.listener.send_http_response(conn, resp)
+                del engine.active_streams[stream_id]
+                self.loop.record_trace(
+                    f"engine_{engine_id}",
+                    "stream_completed",
+                    stream=stream_id,
+                )
+                return
             self._dispatch_to_app(rpc)
 
     def _dispatch_to_app(self, rpc: RpcStream) -> None:
@@ -251,16 +278,23 @@ class Router:
             # Parse response payload from shared memory or inline
             resp_content = b"OK"
             resp_status = 200
+            resp_headers: List[HttpHeaderField] = []
             if pmsg.mmap and len(payload) >= 12:
                 mmsg = MmapMsg.from_bytes(payload[:12])
                 shm_bytes = self.shm_pool.get_data(mmsg.mmap_id, mmsg.chunk_id, mmsg.size)
                 if shm_bytes:
-                    resp_content = shm_bytes
+                    try:
+                        parsed_resp = UnitResponse.deserialize(shm_bytes)
+                        resp_content = parsed_resp.content
+                        resp_status = parsed_resp.status
+                        resp_headers = parsed_resp.headers
+                    except Exception:
+                        resp_content = shm_bytes
                 # Free response chunk in shared memory
                 needed_chunks = (mmsg.size + 16383) // 16384
                 self.shm_pool.free(mmsg.mmap_id, mmsg.chunk_id, needed_chunks)
 
-            resp = UnitResponse(status=resp_status, content=resp_content)
+            resp = UnitResponse(status=resp_status, headers=resp_headers, content=resp_content)
             self.listener.send_http_response(rpc.conn, resp)
 
             # Release request shared memory chunks

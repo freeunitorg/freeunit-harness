@@ -1,8 +1,8 @@
 """FreeUnit Invariant Verification Engine (Model B).
 
 Asserts the 6 Core Safety & Liveness Invariants:
-1. FIFO Stream Ordering (No body-overtaking-header inversions, issue #573).
-2. Process Refcount & Memory Safety (No UAF on worker teardown, issue #195).
+1. FIFO Stream Ordering (no body-overtaking-header inversions).
+2. Process Refcount & Memory Safety (no UAF on worker teardown, https://github.com/freeunitorg/freeunit/issues/195).
 3. Zero Shared-Memory Leaks (All 16 KiB chunks accounted for).
 4. Deadlock Freedom (Progress guarantee under OOSM and full queues).
 5. Connection FSM Integrity (No operations on closed/closing connections).
@@ -54,6 +54,7 @@ class InvariantChecker:
 
     def verify_trace(self, trace: List[TraceRecord]) -> List[InvariantViolation]:
         """Analyzes execution trace for safety violations."""
+        self.violations.clear()
         active_streams: Set[int] = set()
         completed_streams: Set[int] = set()
         closed_conns: Set[int] = set()

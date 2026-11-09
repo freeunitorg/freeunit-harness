@@ -177,6 +177,20 @@ and the perf lab need it. The `build` role never falls back to the bench host. P
 the tree to `tools/unit-build` with `-s src`. Set `LAB_ENV=/path/to/file` to use another file. The roles are described in
 [docs/host-roles.md](docs/host-roles.md).
 
+## Behavioural model
+
+`tools/model` is a Python model of the FreeUnit data path: router engines, the
+port protocol, the shared-memory app queue, and application workers. Model A
+replays requests; Model B interleaves the two message channels, injects faults,
+and checks invariants. A violation is a claim about the C code, not a finding
+by itself. Docs: [docs/model/](docs/model/).
+
+```bash
+python3 -m tools.model.cli simulate --requests 50 --workers 2
+python3 -m tools.model.cli verify --chaos --seed 1
+python3 -m pytest -q tools/model/tests
+```
+
 ## Agents
 
 `AGENTS.md` is read directly by Codex CLI, OpenCode, dsh, agy, Kilo Code, Cursor, Pi and
