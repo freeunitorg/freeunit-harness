@@ -121,9 +121,9 @@ that test is skipped.
 ## The harness gate
 
 This repository's `shell` job runs `tools/check-shell.py`. It fails on
-shellcheck `error` only; [docs/ci.md](ci.md) describes the job. The server
-gate fails on `warning`, so a clean run of one gate does not mean that the
-other gate is clean.
+shellcheck `warning`, like the server gate; [docs/ci.md](ci.md) describes
+the job. The two gates pick files and pin shellcheck differently, so a clean
+run of one gate does not mean that the other gate is clean.
 
 ## What the lint cannot see
 
@@ -151,8 +151,10 @@ fix in [756](https://github.com/freeunitorg/freeunit/pull/756).
 - **`set -u` and `"$@"` with no positional parameters.** POSIX exempts `@`
   and `*`; posh 0.14.3 treats them as unset. dash, ash, bash, ksh and yash
   accept the idiom; do not add a workaround for posh unless it is a target.
-- **A signal does not run the EXIT trap in dash or ash.** Trap HUP, INT,
-  QUIT and TERM and exit 128 plus the signal number. After a hangup, stdout
+- **A signal does not run the EXIT trap in dash or ash.** Trap HUP, INT
+  and TERM and exit 128 plus the signal number. QUIT needs a choice: bash
+  ignores it in a script, so the harness scripts leave it alone (see
+  "Traps found while porting"). After a hangup, stdout
   is gone and `echo` fails; under `set -e` that aborts the trap before the
   cleanup, so a log line must not fail.
 - **dash's `echo` expands backslashes in user text.** Use `printf '%s\n'`.
@@ -161,29 +163,74 @@ fix in [756](https://github.com/freeunitorg/freeunit/pull/756).
 
 ## Status in this harness
 
-These tracked scripts use a bash shebang today and are **not yet compliant**.
-They are listed, not rewritten; convert one when you touch it, or move its
-logic to Python:
+Every tracked shell script that runs on its own has a `#!/bin/sh` shebang and is written to run under dash,
+busybox ash and `bash --posix`, with busybox applets in place of procps. The tests below run some of them; the
+others are only parsed. `tools/lib/env.sh` has no shebang because it is only sourced (`. tools/lib/env.sh`) by
+such scripts; it follows the same rules, but neither the parse test nor `tools/check-shell.py` picks it on
+its own.
 
-- `tools/bench-engines.sh`, `tools/bench-release.sh`, `tools/bench-startup.sh`
-- `tools/capget-fallback-smoke.sh`
-- `tools/ci-local`
-- `tools/doctor`
-- `tools/gates/run-gates`
-- `tools/hosts`
-- `tools/mirror-check.sh`
-- `tools/new-failures.sh`
-- `tools/perf-bisect.sh`
-- `tools/test-isolated`
-- `tools/unit-build`
-- `tools/unitd-ctl`
-- `tools/watch-run.sh`
+Exceptions and needs outside busybox:
 
-`tools/check-public.sh`, `tools/check-style`, `tools/perf-job.sh`, `tools/perf-lab/remote.sh`,
-`tools/perf-lab/cells.sh`, `tools/perf-lab/scaling/run.sh` and `tools/perf-lab/scaling/build-tree.sh` are the
-tracked scripts with a `#!/bin/sh` shebang. `tools/tests/test_perf_lab_workloads.py` parses the perf lab three
-with `sh -n`, and with dash, busybox ash and `bash --posix` when they are installed. `lib.sh`, `sweep.sh` and
-`profile.sh` in `tools/perf-lab/scaling/` use
-`#!/usr/bin/env bash` by design. `sweep.sh` and `profile.sh` run only in the lab container or on the perf box.
-`lib.sh` runs there too, and `tools/tests/test_perf_lab_scaling.py` also sources it under bash on the developer
-host, so `make tools-test` needs bash.
+- `tools/perf-lab/cells.sh` runs only inside the Debian lab image, which installs procps. It still calls
+  `ps -eo pid=,ppid=`, `pgrep -x unitd` and `pkill -9 -x unitd`. Under busybox the last two would match
+  nothing, because busybox compares `argv[0]` and unit rewrites it.
+- `tools/bench-engines.sh` and `tools/bench-release.sh` need `taskset` and `getconf`. Neither is a busybox
+  applet on Alpine: `taskset` is in util-linux-misc and `getconf` in musl-utils (Alpine 3.22). bench-engines.sh
+  names a missing `taskset`, `flock`, `setsid` or `getconf` and stops.
+- `tools/bench-startup.sh` uses `#!/usr/bin/env bash` by design. It times with `EPOCHREALTIME`, `/dev/tcp`
+  and `read -t`, so no fork falls inside a measured interval; a fork costs about 5 ms and the script reports
+  to 1 ms. Moving it to Python is the way to drop bash there.
+
+The `shell` CI job runs shellcheck at the `warning` level (see "The harness gate"), because its portability
+checks (SC3xxx) are warnings.
+
+`test_entry_points_parse_as_posix_sh` in `tools/tests/test_cli_tools.py` parses every tracked `#!/bin/sh` script with
+`sh -n`, and with dash, busybox ash and `bash --posix` when they are installed; a missing shell shows as a skipped
+subtest. `UnitdCtlTest` in the same file starts and stops `tools/unitd-ctl` under each of these shells against a
+fake unitd in its own process group. `BenchEnginesRunTest` runs one round of `tools/bench-engines.sh` against two
+fake unitd builds, with stubs for `oha`, `ss`, `curl` and `taskset`. It runs under `sh`, dash, `bash --posix` and
+busybox ash. For busybox, PATH holds only the stubs and a directory of busybox applets, so procps `ps` and `pgrep`
+cannot leak in. When the busybox lacks `flock`, `comm`, `getconf`, `setsid` or `seq`, the test takes that tool from
+the host. Ubuntu's busybox lacks `flock`, `comm` and `getconf`; Alpine's lacks only `getconf`, which is in
+musl-utils there. Set `HARNESS_BUSYBOX` to test
+another busybox binary, such as Alpine's `busybox.static`. The test checks the exit code, the result rows, and
+that no fake unitd and no process group is left. A second test in the class runs the `/proc` helpers of
+bench-engines.sh directly, under the same shells, against a process whose command name holds a newline and
+against a fake unitd. The crash recovery paths of bench-engines.sh (an orphaned group found by its session, a
+run dir found by its command line) are not run; only their helpers are. CI runs all four shells: the
+ubuntu-latest image has dash and busybox. `tools/tests/test_perf_lab_scaling.py` runs the scaling kit under
+`sh` (set `SCALING_SH` to pick another shell).
+
+## Traps found while porting
+
+- dash and busybox ash skip the EXIT trap when a signal ends the shell. Trap HUP, INT and TERM too (see
+  `exit_traps` in `tools/perf-lab/scaling/lib.sh`). dash prints nothing for `$(trap)`, and `trap -p` is a fatal
+  error in dash and busybox.
+- `exec 9>file 2>/dev/null` with no command makes both redirections permanent: stderr is lost from then on.
+  Write `{ command exec 9>file; } 2>/dev/null`. Without `command`, a failed open ends dash, busybox ash and
+  `bash --posix`; only plain bash goes on.
+- `${x:?msg}` exits 1 in bash but 2 in dash and ash. Where the exit code matters, test and exit explicitly.
+- `shift 2` with one argument left fails, and an option loop around it never ends in bash. Check `$#` first.
+- `kill -TERM -- -PGID`: the `kill` builtin of dash rejects the `--` ("Illegal number: -", exit 2) and sends no
+  signal. busybox ash prints "invalid number '--'" and exits 1, but signals the group. Write `kill -TERM -PGID`
+  after checking that PGID is a number.
+- busybox has its own `ps`, `pgrep`, `ls`, `df`, `awk` and `grep`: no `ps -p`, no `pgrep -g`, no `grep --include`,
+  no `ls --time-style`, and its `awk` may lack math functions such as `sqrt`, depending on the build (Alpine's
+  has them, Ubuntu's does not). `pgrep -x` compares `argv[0]` as given, not the command name, so it misses a
+  process started by its full path, such as the `cc1` that gcc starts. Some builds have no `pgrep` at all
+  (Ubuntu's). The `grep` of Ubuntu's busybox stops reading a line at its first NUL, so `grep -aF TEXT
+  /proc/PID/cmdline` sees only `argv[0]` there; convert the NULs first with `tr '\0' '\n'`. Prefer
+  `find ... -exec grep` and read `/proc`.
+- Read process ids from `/proc/PID/stat`. The command name in field 2 can hold spaces, `)` and a newline, so
+  one record can take two lines. Take the fields after the last `) `: the state, then the parent (field 4),
+  the process group (field 5) and the session (field 6). A zombie still has a stat file, with state `Z`.
+  `proc_records` in `tools/bench-engines.sh` does this for many files at once: `cat /proc/[0-9]*/stat` skips a
+  process that has exited, and one `awk` joins the lines of a record until the part after the last `) ` holds
+  all its fields. Do not scan with the `read` builtin: dash and busybox ash read one byte per system call, and
+  a scan of about 570 processes took 140 ms to 160 ms against about 25 ms for `cat` and `awk`. `group_pids`,
+  `child_pids`, `proc_pgid`, `proc_sid` and `proc_state` in bench-engines.sh are built on it.
+  `tools/unitd-ctl` still reads the first line with `read`, so a process whose command name holds a newline
+  is invisible to it; unit's own processes are named `unitd`. Read the exact command name from
+  `/proc/PID/comm`, as `tools/bench-release.sh` does.
+- bash ignores SIGQUIT in a script; dash dies on it. Leave QUIT alone rather than trap or ignore it: an ignored
+  QUIT passes to the children.

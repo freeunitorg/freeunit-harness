@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # unitd-ctl — lifecycle for the harness's dev unitd.
 #
 # Why this is a script and not three lines of Makefile: a unitd that is started
@@ -20,8 +20,12 @@
 
 set -u
 
-RUN_DIR="${RUN_DIR:?RUN_DIR not set}"
-BUILD_DIR="${BUILD_DIR:?BUILD_DIR not set}"
+die() { printf 'unitd-ctl: %s\n' "$*" >&2; exit 1; }
+
+# Not ${RUN_DIR:?}: its exit status is 1 in bash and 2 in dash and ash.
+[ -n "${RUN_DIR:-}" ] || die "RUN_DIR not set"
+[ -n "${BUILD_DIR:-}" ] || die "BUILD_DIR not set"
+
 PORT="${PORT:-8080}"
 
 UNITD="$BUILD_DIR/sbin/unitd"
@@ -34,26 +38,51 @@ STATEDIR="$RUN_DIR/state"
 STOP_GRACE="${STOP_GRACE:-10}"     # seconds before escalating TERM -> KILL
 START_TIMEOUT="${START_TIMEOUT:-15}"
 
-die() { echo "unitd-ctl: $*" >&2; exit 1; }
 
 # --- ownership guards --------------------------------------------------------
 
 proc_is_unitd() {   # pid -> 0 if the process image really is our unitd
-    local pid="$1" exe
-    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
-    case "$exe" in
+    pu_pid="$1"
+    pu_exe=$(readlink "/proc/$pu_pid/exe" 2>/dev/null) || return 1
+    case "$pu_exe" in
         "$UNITD"|"$UNITD "*|*"/unitd"|*"/unitd (deleted)") return 0 ;;
         *) return 1 ;;
     esac
 }
 
+# The process group comes from /proc/<pid>/stat, not from ps or pgrep: busybox
+# has no "ps -p" and its pgrep has no -g, so on Alpine without procps they
+# print nothing. Field 5 of the stat line is the group. The command name in
+# field 2 can hold spaces and ")", so the fields are counted after the last ")".
+proc_pgid() {       # pid -> its process group id on stdout; 1 if it is gone
+    { read -r pp_stat < "/proc/$1/stat"; } 2>/dev/null || return 1
+    pp_rest=${pp_stat##*) }
+    # shellcheck disable=SC2086  # split into state, ppid, pgrp, ...
+    set -- $pp_rest
+    [ -n "${3:-}" ] || return 1
+    printf '%s\n' "$3"
+}
+
+# group_pids PGID: the pids in group PGID, one per line.
+group_pids() {
+    gp_want="$1"
+    for gp_d in /proc/[0-9]*; do
+        { read -r gp_stat < "$gp_d/stat"; } 2>/dev/null || continue
+        gp_rest=${gp_stat##*) }
+        # shellcheck disable=SC2086  # split into state, ppid, pgrp, ...
+        set -- $gp_rest
+        [ "${3:-}" = "$gp_want" ] && printf '%s\n' "${gp_d#/proc/}"
+    done
+    return 0
+}
+
 # A recorded pgid is only a kill target if some process in it is a live unitd.
 # Otherwise the id has been recycled and belongs to someone else entirely.
 group_is_ours() {   # pgid -> 0 if safe to signal
-    local pgid="$1" p
-    [ -n "$pgid" ] || return 1
-    for p in $(pgrep -g "$pgid" 2>/dev/null); do
-        proc_is_unitd "$p" && return 0
+    go_pgid="$1"
+    case $go_pgid in ''|*[!0-9]*) return 1 ;; esac
+    for go_p in $(group_pids "$go_pgid"); do
+        proc_is_unitd "$go_p" && return 0
     done
     return 1
 }
@@ -69,7 +98,7 @@ cmd_start() {
     [ -x "$UNITD" ] || die "no $UNITD — run 'make build' first"
 
     if cmd_status >/dev/null 2>&1; then
-        echo "already running (pgid $(read_pgid)); use 'make restart'"
+        printf '%s\n' "already running (pgid $(read_pgid)); use 'make restart'"
         return 0
     fi
 
@@ -83,7 +112,7 @@ cmd_start() {
     fi
 
     rm -f "$PIDFILE"
-    echo "==> starting $UNITD"
+    printf '%s\n' "==> starting $UNITD"
 
     # setsid gives unitd its own session/process group so cleanup has a single
     # kill target covering router + controller + workers.
@@ -94,31 +123,32 @@ cmd_start() {
         --statedir "$STATEDIR" \
         --tmpdir "$RUN_DIR" \
         >>"$LOGFILE" 2>&1 &
-    local spawn_pid=$!
+    st_spawn_pid=$!
 
     # Record a kill target NOW. setsid makes the child the leader of its new
     # group, so its pid IS the pgid. If start fails past this point the stop
     # path can still reap the group; without this an early failure leaks it.
-    echo "$spawn_pid" > "$PGIDFILE"
+    printf '%s\n' "$st_spawn_pid" > "$PGIDFILE"
 
     # Integer ticks of 0.2s — no bc, no float arithmetic in a wait loop.
-    local ticks=0 max_ticks=$(( START_TIMEOUT * 5 ))
-    while [ "$ticks" -lt "$max_ticks" ]; do
+    st_ticks=0 st_max_ticks=$(( START_TIMEOUT * 5 ))
+    while [ "$st_ticks" -lt "$st_max_ticks" ]; do
         if [ -s "$PIDFILE" ]; then
-            local main
-            main=$(tr -d ' \t\r\n' < "$PIDFILE")
+            st_main=$(tr -d ' \t\r\n' < "$PIDFILE")
             # Prefer the authoritative pid unitd reports over the spawn pid.
-            if [ -n "$main" ] && kill -0 "$main" 2>/dev/null; then
-                ps -o pgid= -p "$main" 2>/dev/null | tr -d ' ' > "$PGIDFILE"
-                echo "==> unitd running (pid $main, pgid $(read_pgid))"
-                echo "    log     $LOGFILE"
-                echo "    control $CONTROL"
+            if [ -n "$st_main" ] && kill -0 "$st_main" 2>/dev/null; then
+                # Keep the spawn pid when the group cannot be read: an
+                # empty file is no kill target at all.
+                st_pgid=$(proc_pgid "$st_main") && printf '%s\n' "$st_pgid" > "$PGIDFILE"
+                printf '%s\n' "==> unitd running (pid $st_main, pgid $(read_pgid))"
+                printf '%s\n' "    log     $LOGFILE"
+                printf '%s\n' "    control $CONTROL"
                 return 0
             fi
         fi
-        kill -0 "$spawn_pid" 2>/dev/null || break
+        kill -0 "$st_spawn_pid" 2>/dev/null || break
         sleep 0.2
-        ticks=$(( ticks + 1 ))
+        st_ticks=$(( st_ticks + 1 ))
     done
 
     echo "unitd failed to start within ${START_TIMEOUT}s; last log lines:" >&2
@@ -128,47 +158,51 @@ cmd_start() {
 }
 
 cmd_stop() {
-    local pgid
-    pgid=$(read_pgid) || { echo "not running (no $PGIDFILE)"; return 0; }
+    sp_pgid=$(read_pgid) || { printf '%s\n' "not running (no $PGIDFILE)"; return 0; }
 
-    if ! group_is_ours "$pgid"; then
-        echo "not running (pgid $pgid holds no unitd; stale file)"
+    if ! group_is_ours "$sp_pgid"; then
+        printf '%s\n' "not running (pgid $sp_pgid holds no unitd; stale file)"
         rm -f "$PGIDFILE" "$PIDFILE"
         return 0
     fi
 
-    echo "==> stopping unitd group $pgid"
-    kill -TERM -- "-$pgid" 2>/dev/null || true
+    echo "==> stopping unitd group $sp_pgid"
+    # No "--": the kill builtin of dash rejects it and sends no signal.
+    # group_is_ours has checked that the pgid is a number.
+    kill -TERM "-$sp_pgid" 2>/dev/null || true
 
-    local ticks=0 max_ticks=$(( STOP_GRACE * 5 ))
-    while [ "$ticks" -lt "$max_ticks" ]; do
-        group_is_ours "$pgid" || { echo "==> stopped"; rm -f "$PGIDFILE" "$PIDFILE"; return 0; }
+    sp_ticks=0 sp_max_ticks=$(( STOP_GRACE * 5 ))
+    while [ "$sp_ticks" -lt "$sp_max_ticks" ]; do
+        group_is_ours "$sp_pgid" || { echo "==> stopped"; rm -f "$PGIDFILE" "$PIDFILE"; return 0; }
         sleep 0.2
-        ticks=$(( ticks + 1 ))
+        sp_ticks=$(( sp_ticks + 1 ))
     done
 
-    echo "==> grace period expired, SIGKILL to group $pgid"
-    kill -KILL -- "-$pgid" 2>/dev/null || true
+    echo "==> grace period expired, SIGKILL to group $sp_pgid"
+    kill -KILL "-$sp_pgid" 2>/dev/null || true
     sleep 0.5
 
-    if group_is_ours "$pgid"; then
-        die "group $pgid survived SIGKILL — investigate before rerunning"
+    if group_is_ours "$sp_pgid"; then
+        die "group $sp_pgid survived SIGKILL — investigate before rerunning"
     fi
     echo "==> stopped (killed)"
     rm -f "$PGIDFILE" "$PIDFILE"
 }
 
 cmd_status() {
-    local pgid
-    pgid=$(read_pgid) || { echo "stopped"; return 1; }
-    if group_is_ours "$pgid"; then
-        local main=""
-        [ -f "$PIDFILE" ] && main=$(tr -d ' \t\r\n' < "$PIDFILE")
-        echo "running (pid ${main:-?}, pgid $pgid)"
-        pgrep -g "$pgid" -a 2>/dev/null | sed 's/^/    /'
+    ss_pgid=$(read_pgid) || { echo "stopped"; return 1; }
+    if group_is_ours "$ss_pgid"; then
+        ss_main=""
+        [ -f "$PIDFILE" ] && ss_main=$(tr -d ' \t\r\n' < "$PIDFILE")
+        printf '%s\n' "running (pid ${ss_main:-?}, pgid $ss_pgid)"
+        # As "pgrep -g PGID -a": the pid and the command line.
+        for ss_p in $(group_pids "$ss_pgid"); do
+            ss_cmd=$(tr '\0' ' ' < "/proc/$ss_p/cmdline" 2>/dev/null) || continue
+            printf '    %s %s\n' "$ss_p" "${ss_cmd% }"
+        done
         return 0
     fi
-    echo "stopped (stale pgid file: $pgid)"
+    printf '%s\n' "stopped (stale pgid file: $ss_pgid)"
     return 1
 }
 
@@ -182,8 +216,7 @@ cmd_logs() {
 # A minimal known-good config so `make dev` ends at something you can curl.
 cmd_config() {
     [ -S "$CONTROL" ] || die "no control socket at $CONTROL — is unitd running?"
-    local out
-    out=$(curl -s --max-time 10 --unix-socket "$CONTROL" -X PUT -d '{
+    cf_out=$(curl -s --max-time 10 --unix-socket "$CONTROL" -X PUT -d '{
       "listeners": {
         "*:'"$PORT"'": { "pass": "routes" }
       },
@@ -192,9 +225,9 @@ cmd_config() {
       ]
     }' http://localhost/config 2>&1)
 
-    case "$out" in
+    case "$cf_out" in
         *'"success"'*) echo "==> configured: http://localhost:$PORT/ returns 200" ;;
-        *) echo "config PUT failed:" >&2; echo "$out" >&2; return 1 ;;
+        *) echo "config PUT failed:" >&2; printf '%s\n' "$cf_out" >&2; return 1 ;;
     esac
 }
 

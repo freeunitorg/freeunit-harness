@@ -168,9 +168,9 @@ appears, and exits 3.
 | file | does |
 |---|---|
 | `run.sh` | POSIX sh driver on your machine: claim, build, shim, sweep, locks, profile, watch, stop, fetch, release |
-| `lib.sh` | topology, pinning, start and stop of unitd, oha (bash, sourced) |
-| `sweep.sh` | the sweep; `LOCKS=1` for lock counts (bash, on the box) |
-| `profile.sh` | perf record, futex count, perf c2c at one point (bash, on the box) |
+| `lib.sh` | topology, pinning, start and stop of unitd, oha (POSIX sh, sourced) |
+| `sweep.sh` | the sweep; `LOCKS=1` for lock counts (POSIX sh, on the box) |
+| `profile.sh` | perf record, futex count, perf c2c at one point (POSIX sh, on the box) |
 | `build-tree.sh`, `capp.c` | the release build (-O2, frame pointers) and the libunit test application |
 | `mutexshim.c`, `locks.py` | the lock counter and the snapshot diff |
 | `analyze.py`, `freq.py` | medians, ratios and verdicts; clock per run |

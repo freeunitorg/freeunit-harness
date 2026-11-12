@@ -52,5 +52,42 @@ class RepoTest(unittest.TestCase):
             self.assertEqual(cs.shell_files(d), ["a.sh", "b"])
 
 
+class SeverityTest(unittest.TestCase):
+    def run_check(self, *args, stub_rc=0):
+        # A stub shellcheck records its arguments and exits with stub_rc, so the test needs no real shellcheck.
+        # shellcheck exits 1 when it reports a finding at the selected severity.
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "a.sh"), "w") as f:
+                f.write("#!/bin/sh\n:\n")
+            subprocess.run(["git", "init", "-q", d], check=True)
+            subprocess.run(["git", "-C", d, "add", "a.sh"], check=True)
+            stub, log = os.path.join(d, "bin", "shellcheck"), os.path.join(d, "argv.log")
+            os.mkdir(os.path.dirname(stub))
+            with open(stub, "w") as f:
+                f.write('#!/bin/sh\n[ "$1" = --version ] && { printf \'ShellCheck\\nversion: stub\\n\'; exit 0; }\n'
+                        'printf \'%s\\n\' "$*" >> "$ARGV_LOG"\nexit "$STUB_RC"\n')
+            os.chmod(stub, 0o755)
+            env = dict(os.environ, PATH=os.path.dirname(stub) + os.pathsep + os.environ["PATH"], ARGV_LOG=log,
+                       STUB_RC=str(stub_rc))
+            r = subprocess.run([sys.executable, SCRIPT] + list(args), cwd=d, env=env, capture_output=True, text=True)
+            with open(log) as f:
+                return r, f.read().split()
+
+    def test_default_fails_on_warnings(self):
+        # SC3xxx (bashisms in a #!/bin/sh script) are warnings: the default, which CI uses, must catch them.
+        r, argv = self.run_check()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--severity=warning", argv)
+        # A finding (shellcheck exit 1) must fail the gate, not only reach shellcheck as an argument.
+        r, argv = self.run_check(stub_rc=1)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("check-shell: FAILED", r.stdout)
+
+    def test_severity_option_is_passed_on(self):
+        r, argv = self.run_check("--severity", "error")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--severity=error", argv)
+
+
 if __name__ == "__main__":
     unittest.main()

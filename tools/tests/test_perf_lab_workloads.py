@@ -267,7 +267,7 @@ class PerfLabWorkloadTest(unittest.TestCase):
                           ("bash", ["bash", "--posix", "-n"])):
             if shutil.which(name):
                 shells.append(cmd)
-        for s in ("perf-job.sh", "perf-lab/cells.sh", "perf-lab/remote.sh"):
+        for s in ("perf-job.sh", "perf-lab/cells.sh", "perf-lab/remote.sh", "bench-engines.sh", "bench-release.sh"):
             path = os.path.join(TOOLS, s)
             with open(path) as f:
                 self.assertEqual(f.readline(), "#!/bin/sh\n", s)

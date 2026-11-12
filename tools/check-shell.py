@@ -2,7 +2,10 @@
 """Run shellcheck over the tracked shell scripts.
 
 Usage: tools/check-shell.py [--severity error|warning|info|style] [--list]
-  --severity  the lowest level that fails (default: error). CI uses the default.
+  --severity  the lowest level that fails (default: warning). CI uses the default.
+              The portability checks of shellcheck (SC3xxx: [[ ]], local,
+              echo -e in a #!/bin/sh script) are warnings, so error alone
+              lets bashisms through.
   --list      print the files that would be checked, and exit.
 
 A file is a shell script when it is tracked, is a regular file, and its first
@@ -59,7 +62,7 @@ def shell_part(data):
 
 
 def main(argv):
-    severity, listing = "error", False
+    severity, listing = "warning", False
     args = argv[1:]
     while args:
         a = args.pop(0)

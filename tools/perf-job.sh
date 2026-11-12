@@ -156,7 +156,7 @@ say "job $JOB, run $RUN_ID, about $EST_MIN min of cells on $PERF_HOST"
 say "if this command is interrupted, resume with: tools/perf-job.sh $LOCAL"
 if [ "${PERF_JOB_CHECK:-0}" = 1 ]; then
     printf '%s\n' "CHECK $JOB: ok, phases $nph, cells '$CONNS', $REPS blocks, about $EST_MIN min of cells, \
-configure A '$(echo $CONFIGURE_ARGS $CONFIGURE_ARGS_A)' B '$(echo $CONFIGURE_ARGS $CONFIGURE_ARGS_B)'"; exit 0
+configure A '$(set -- $CONFIGURE_ARGS $CONFIGURE_ARGS_A; printf '%s' "$*")' B '$(set -- $CONFIGURE_ARGS $CONFIGURE_ARGS_B; printf '%s' "$*")'"; exit 0
 fi
 
 mkdir -p "$LOCAL" || usage_die "cannot create $LOCAL"

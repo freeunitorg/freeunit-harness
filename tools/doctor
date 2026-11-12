@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # doctor — report what this box can and cannot do. Changes nothing, installs
 # nothing, exits 0 unless something required for `make build` is missing.
 #
@@ -17,9 +17,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Probe for a C header the way configure will, without a full configure run.
 has_header() {
-    local hdr="$1"; shift
-    echo "#include <$hdr>
-int main(void){return 0;}" | ${CC:-cc} -x c - -o /dev/null "$@" 2>/dev/null
+    hh_hdr="$1"; shift
+    printf '#include <%s>\nint main(void){return 0;}\n' "$hh_hdr" | ${CC:-cc} -x c - -o /dev/null "$@" 2>/dev/null
 }
 
 echo
@@ -65,6 +64,7 @@ if have python3-config; then
 else
     say_warn "python3 — python3-config not found (Debian: python3-dev)"
 fi
+# shellcheck disable=SC2046  # perl ccopts is a list of words on purpose
 for m in perl ruby go node java; do
     case "$m" in
         perl) have perl && has_header EXTERN.h $(perl -MExtUtils::Embed -e ccopts 2>/dev/null) \
@@ -88,7 +88,11 @@ if have taskset; then say_ok "taskset — CPU pinning"; else say_fail "taskset n
 
 echo
 echo "Kernel & descriptor limits (recommended with PR #810 RLIMIT_NOFILE raise):"
+# ulimit -S and -H are not POSIX, but bash, dash and busybox ash have them;
+# a shell without them falls back to 0 and the check warns.
+# shellcheck disable=SC3045
 nofile_soft=$(ulimit -Sn 2>/dev/null || echo 0)
+# shellcheck disable=SC3045
 nofile_hard=$(ulimit -Hn 2>/dev/null || echo 0)
 if [ "$nofile_hard" = "unlimited" ] || [ "${nofile_hard:-0}" -ge 65535 ] 2>/dev/null; then
     say_ok "RLIMIT_NOFILE (ulimit -n) — soft=$nofile_soft hard=$nofile_hard (unitd router/controller raise soft to min(hard, 1048576))"

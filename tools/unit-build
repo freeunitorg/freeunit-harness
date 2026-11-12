@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # unit-build — build, test and debug FreeUnit locally or on a remote host.
 #
 # THE PROBLEM
@@ -169,7 +169,10 @@
 #   cargo fork one rustc per host CPU, and -j alone does not constrain cargo
 #   at all.
 
-set -euo pipefail
+set -eu
+# pipefail is not in every POSIX shell. The pipelines on this host only
+# format df for the screen; every pipeline that judges a build runs on the
+# remote side, inside the command strings below.
 
 HARNESS=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=local
@@ -190,6 +193,7 @@ die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
 
 # The lab env file is read by tools/lib/env.sh, one key at a time: nothing
 # from it is exported to the build. A value set in the environment wins.
+# shellcheck disable=SC2034  # read by tools/lib/env.sh
 LAB_HARNESS=$HARNESS
 # shellcheck source=lib/env.sh
 . "$HARNESS/tools/lib/env.sh"
@@ -204,12 +208,14 @@ IMAGE=$(lab_env_get ALPINE_BUILD_IMAGE)
 REMOTE_ROOT=$(lab_build_root)
 REMOTE_CACHE=$(lab_build_cache)
 
+# need2 COUNT OPTION: an option that takes a value must have one.
+need2() { [ "$1" -ge 2 ] || die "option $2 needs a value"; }
 while [ $# -gt 0 ]; do
     case $1 in
-        -t) TARGET=$2; shift 2 ;;
-        -H) HOST=$2; shift 2 ;;
-        -s) SRC=$2; shift 2 ;;
-        -j) JOBS=$2; shift 2 ;;
+        -t) need2 $# "$1"; TARGET=$2; shift 2 ;;
+        -H) need2 $# "$1"; HOST=$2; shift 2 ;;
+        -s) need2 $# "$1"; SRC=$2; shift 2 ;;
+        -j) need2 $# "$1"; JOBS=$2; shift 2 ;;
         --otel) OTEL=--otel; shift ;;
         --debug) DEBUG=--debug; shift ;;
         # A bare --hardening is an error to ./configure (auto/options matches
@@ -297,7 +303,7 @@ fi
 # tmux turns "." and ":" in a session name into "_", and `-t` without a
 # leading "=" matches by prefix: `has-session -t unitbuild` succeeds while
 # only unitbuild-foo exists. Sanitize here, and always look it up as =NAME.
-SESSION=unitbuild-${NAME//[.:]/_}
+SESSION=unitbuild-$(printf '%s' "$NAME" | tr '.:' '__')
 
 CONF="--openssl $OTEL $DEBUG $HARDENING $TESTS"
 PLATFORM=linux/amd64
@@ -307,6 +313,7 @@ if [ -n "$M32" ]; then
     # target's sh -c '...', and the backslash survives every hop to the
     # shell that finally runs configure. -t local splits $CONF itself, where
     # the escape means nothing, hence the refusal below.
+    # shellcheck disable=SC2089  # the backslash is for the remote shell, see above
     M32_OPT="--cc-opt=-m32\\ -D_FILE_OFFSET_BITS=64 --ld-opt=-m32"
     [ "$TARGET" != local ] || die "--m32 needs -t alpine (preferred) or -t remote"
     if [ "$TARGET" = alpine ]; then
@@ -345,6 +352,7 @@ run_local() {
 
     cd "$SRC"
     echo "disk before:"; df -h / "$TMPDIR" 2>/dev/null | sed 's/^/  /'
+    # shellcheck disable=SC2086,SC2090  # CONF is a word list; it has no backslash here (no --m32)
     [ -f build/Makefile ] || ./configure $CONF
     nice -n 10 make -j"$JOBS"
     echo "disk after:";  df -h / "$TMPDIR" 2>/dev/null | sed 's/^/  /'
@@ -377,14 +385,14 @@ sync_to() {
     # -- but --info=progress2 to a pipe emits a line per file, and the first
     # run of this flooded 118 KB into a captured log. Interactive gets the
     # meter; non-interactive gets one summary line.
-    local prog=--info=stats1
-    [ -t 1 ] && prog=--info=progress2
+    st_prog=--info=stats1
+    [ -t 1 ] && st_prog=--info=progress2
 
     ssh "$1" "mkdir -p $REMOTE_ROOT/$2"
     # Explicit, not left to set -e: a partial sync followed by a build is a
     # build of a tree nobody wrote, and set -e is off in any caller that
     # tests this function's status.
-    rsync -a --delete "$prog" \
+    rsync -a --delete "$st_prog" \
         --exclude '/build' --exclude '/src/otel/target' --exclude '/.git' \
         --exclude '__pycache__' \
         "$SRC"/ "$1:$REMOTE_ROOT/$2/" \
@@ -426,11 +434,11 @@ df_remote() {
 # to the crate, so redirecting the target dir does not move libotel.a.
 
 verify_otel() {
-    local d=$REMOTE_ROOT/$2
-    ssh "$1" "test -f $d/build/lib/libotel.a && \
+    vo_d=$REMOTE_ROOT/$2
+    ssh "$1" "test -f $vo_d/build/lib/libotel.a && \
         printf 'libotel.a %s bytes, %s nxt_otel_rs symbols in unitd\n' \
-            \"\$(stat -c%s $d/build/lib/libotel.a)\" \
-            \"\$(nm -D $d/build/sbin/unitd 2>/dev/null | grep -c nxt_otel_rs)\" \
+            \"\$(stat -c%s $vo_d/build/lib/libotel.a)\" \
+            \"\$(nm -D $vo_d/build/sbin/unitd 2>/dev/null | grep -c nxt_otel_rs)\" \
         || echo 'NO libotel.a -- otel did NOT get through'"
 }
 
@@ -443,12 +451,12 @@ verify_otel() {
 # exit code now is a fact about the binary on disk, which is what is judged.
 
 verify_run() {
-    local d=$REMOTE_ROOT/$2 logs=$REMOTE_CACHE/logs
+    vr_d=$REMOTE_ROOT/$2 vr_logs=$REMOTE_CACHE/logs
     if ssh "$1" "tmux has-session -t =$SESSION 2>/dev/null"; then
         die "$SESSION is still running on $1; verify reads the finished" \
             "artifacts, so wait until it ends"
     fi
-    ssh "$1" sh -s -- "$d" "$logs/$SESSION.log" "$logs/$SESSION.start" \
+    ssh "$1" sh -s -- "$vr_d" "$vr_logs/$SESSION.log" "$vr_logs/$SESSION.start" \
         "$GATE" <<'EOF'
 cd "$1" || exit 1
 if [ ! -f build/tests ]; then
@@ -456,32 +464,35 @@ if [ ! -f build/tests ]; then
 else
     stale=
     [ build/tests -nt "$3" ] || stale="   <- STALE: older than the run start"
-    echo "$(ls -la --time-style=+%F_%T build/tests)$stale"
+    # busybox ls (Alpine build boxes) has no --time-style; it has --full-time.
+    lsl=$(ls -la --time-style=+%F_%T build/tests 2>/dev/null) \
+        || lsl=$(ls -la --full-time build/tests)
+    printf '%s\n' "$lsl$stale"
     ./build/tests >/dev/null 2>&1
     echo "./build/tests exit: $?"
     if [ -f "$4" ]; then
         out=$(sh "$4" 2>&1)
-        echo "hook gate exit $?: $(printf '%s\n' "$out" | tail -n 1)"
+        printf '%s\n' "hook gate exit $?: $(printf '%s\n' "$out" | tail -n 1)"
     else
         echo "hook gate: none in this tree"
     fi
 fi
-echo "warning: lines in $2: $(grep -c warning: "$2")"
+printf '%s\n' "warning: lines in $2: $(grep -c warning: "$2")"
 grep 'unit-build: .* \(PASSED\|FAILED\)$' "$2" | tail -n 1
 EOF
 }
 
 run_remote() {
-    local name=$NAME
-    local log=$REMOTE_CACHE/logs/$SESSION.log
+    rr_name=$NAME
+    rr_log=$REMOTE_CACHE/logs/$SESSION.log
 
     claim_session "$HOST"
-    echo "disk on $HOST before:"; df_remote "$HOST"
+    printf '%s\n' "disk on $HOST before:"; df_remote "$HOST"
 
     # The rsync runs HERE, before tmux, in this shell. A failed sync must stop
     # the run before anything builds, and only a sync outside the session can
     # do that; a dropped link means running the tool again, nothing worse.
-    sync_to "$HOST" "$name"
+    sync_to "$HOST" "$rr_name"
 
     # Take the cache locations from the host environment when it sets them
     # (the build host's ~/.bashrc does), and fall back to $REMOTE_CACHE otherwise.
@@ -493,31 +504,31 @@ run_remote() {
     # The mkdir names the default literally rather than $TMPDIR for that same
     # reason: $TMPDIR would be expanded one hop too early, by a shell that has
     # not run the export yet, and silently become the empty string.
-    local rtmp=$REMOTE_CACHE/tmp
-    local env="export CARGO_HOME=\${CARGO_HOME:-$REMOTE_CACHE/cargo} \
+    rr_rtmp=$REMOTE_CACHE/tmp
+    rr_env="export CARGO_HOME=\${CARGO_HOME:-$REMOTE_CACHE/cargo} \
         RUSTUP_HOME=\${RUSTUP_HOME:-$REMOTE_CACHE/rustup} \
         CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-$REMOTE_CACHE/cargo-target} \
-        TMPDIR=\${TMPDIR:-$rtmp}; \
-        mkdir -p $rtmp $REMOTE_CACHE/logs"
+        TMPDIR=\${TMPDIR:-$rr_rtmp}; \
+        mkdir -p $rr_rtmp $REMOTE_CACHE/logs"
 
-    local cmd="cd $REMOTE_ROOT/$name || exit 1; \
-        . \$HOME/.cargo/env 2>/dev/null; $env; \
+    rr_cmd="cd $REMOTE_ROOT/$rr_name || exit 1; \
+        . \$HOME/.cargo/env 2>/dev/null; $rr_env; \
         ./configure $CONF 2>&1 && make -j$JOBS"
 
     case $VERB in
-        tests)  cmd="$cmd && $TESTS_CMD" ;;
-        pytest) cmd="$cmd && ${PYTEST_SHIFT}~/venv-unit/bin/pytest test/ -x -q $PORT_ARG" ;;
-        shell)  exec ssh -t "$HOST" "cd $REMOTE_ROOT/$name && exec \$SHELL" ;;
+        tests)  rr_cmd="$rr_cmd && $TESTS_CMD" ;;
+        pytest) rr_cmd="$rr_cmd && ${PYTEST_SHIFT}~/venv-unit/bin/pytest test/ -x -q $PORT_ARG" ;;
+        shell)  exec ssh -t "$HOST" "cd $REMOTE_ROOT/$rr_name && exec \$SHELL" ;;
     esac
 
     # The verdict goes into the log as a line of its own. The trailing df
     # always succeeds, so the session's exit status says nothing.
-    cmd="{ $cmd; } && echo 'unit-build: $VERB PASSED' \
+    rr_cmd="{ $rr_cmd; } && echo 'unit-build: $VERB PASSED' \
         || echo 'unit-build: $VERB FAILED'"
 
     # The closing df is part of the tmux command, not run here: the build is
     # detached, so "after" has to be recorded by the thing that finishes.
-    cmd="$cmd; echo; echo 'disk after:'; df -h / $REMOTE_ROOT | sed 's/^/  /'"
+    rr_cmd="$rr_cmd; echo; echo 'disk after:'; df -h / $REMOTE_ROOT | sed 's/^/  /'"
 
     # The subshell is load-bearing. `a; b | tee log` pipes only b, so without
     # it the tee captured just the trailing df and threw the entire build away
@@ -527,13 +538,13 @@ run_remote() {
     # older than it was not built by this run.
     ssh "$HOST" "mkdir -p $REMOTE_CACHE/logs && \
         touch $REMOTE_CACHE/logs/$SESSION.start && \
-        tmux new-session -d -s $SESSION \"( $cmd ) 2>&1 | tee $log\"" \
+        tmux new-session -d -s $SESSION \"( $rr_cmd ) 2>&1 | tee $rr_log\"" \
         || die "could not start tmux session $SESSION on $HOST"
-    echo "started tmux session $SESSION on $HOST; poll with:"
-    echo "  ssh $HOST 'tmux has-session -t =$SESSION 2>/dev/null" \
-         "&& echo running || echo done'"
-    echo "  ssh $HOST 'tail -40 $log'"
-    echo "verify when done:  $0 -t remote -H $HOST -s $SRC $OTEL verify"
+    printf '%s\n' "started tmux session $SESSION on $HOST; poll with:"
+    printf '%s\n' "  ssh $HOST 'tmux has-session -t =$SESSION 2>/dev/null \
+&& echo running || echo done'"
+    printf '%s\n' "  ssh $HOST 'tail -40 $rr_log'"
+    printf '%s\n' "verify when done:  $0 -t remote -H $HOST -s $SRC $OTEL verify"
 }
 
 # --------------------------------------------------------------- alpine ----
@@ -565,29 +576,29 @@ APK_DEPS="build-base linux-headers openssl-dev pcre2-dev pkgconf rust cargo \
 gdb python3 py3-pytest py3-openssl procps-ng"
 
 run_alpine() {
-    local name=$NAME c=$SESSION-$$
-    local log=$REMOTE_CACHE/logs/$c.log
+    ra_name=$NAME ra_c=$SESSION-$$
+    ra_log=$REMOTE_CACHE/logs/$ra_c.log
 
     claim_session "$HOST"
-    echo "disk on $HOST before:"; df_remote "$HOST"
-    sync_to "$HOST" "$name"
+    printf '%s\n' "disk on $HOST before:"; df_remote "$HOST"
+    sync_to "$HOST" "$ra_name"
 
-    local caps=
-    [ "$VERB" = debug ] && caps="--cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
+    ra_caps=
+    [ "$VERB" = debug ] && ra_caps="--cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
 
     # These three mounts used to point into $HOME, i.e. the 40 G root
     # filesystem; a musl registry and a 420 MB apk cache do not belong there.
     ssh "$HOST" "mkdir -p $REMOTE_CACHE/cargo-musl $REMOTE_CACHE/apk $REMOTE_CACHE/logs"
-    ssh "$HOST" "docker run -d --name $c --platform $PLATFORM --cpus=$JOBS $caps \
+    ssh "$HOST" "docker run -d --name $ra_c --platform $PLATFORM --cpus=$JOBS $ra_caps \
         -e CARGO_HOME=/cargo -e CARGO_BUILD_JOBS=$JOBS \
         -v $REMOTE_CACHE/cargo-musl:/cargo -v $REMOTE_CACHE/apk:/var/cache/apk \
-        -v $REMOTE_ROOT/$name:/mnt --user root -w /mnt $IMAGE sleep infinity" >/dev/null
+        -v $REMOTE_ROOT/$ra_name:/mnt --user root -w /mnt $IMAGE sleep infinity" >/dev/null
 
-    ssh "$HOST" "docker exec $c apk add --no-progress $APK_DEPS >/dev/null"
+    ssh "$HOST" "docker exec $ra_c apk add --no-progress $APK_DEPS >/dev/null"
 
-    local cmd="./configure $CONF && make -j$JOBS"
+    ra_cmd="./configure $CONF && make -j$JOBS"
     case $VERB in
-        tests)  cmd="$cmd && $TESTS_CMD" ;;
+        tests)  ra_cmd="$ra_cmd && $TESTS_CMD" ;;
         # fake_otlp or 24 of 36 otel cases skip and the run still looks green.
         #
         # The in-tree target/ path is correct HERE and only here. A plain
@@ -603,28 +614,28 @@ run_alpine() {
         # $REMOTE_CACHE/cargo-target/... -- a path that does not exist
         # inside it. The cp then fails and two thirds of the otel suite skips,
         # which is exactly the green-but-empty run this verb exists to prevent.
-        pytest) cmd="$cmd && cargo build --release --manifest-path test/fake_otlp/Cargo.toml \
+        pytest) ra_cmd="$ra_cmd && cargo build --release --manifest-path test/fake_otlp/Cargo.toml \
                      && cp test/fake_otlp/target/release/fake_otlp /usr/local/bin/ \
                      && ${PYTEST_SHIFT}pytest test/ -x -q $PORT_ARG" ;;
-        debug)  cmd="$cmd && gdb build/sbin/unitd" ;;
-        shell)  ssh -t "$HOST" "docker exec -it $c sh"; return ;;
+        debug)  ra_cmd="$ra_cmd && gdb build/sbin/unitd" ;;
+        shell)  ssh -t "$HOST" "docker exec -it $ra_c sh"; return ;;
     esac
 
     ssh "$HOST" "tmux new-session -d -s $SESSION \
-        \"docker exec $c sh -c '$cmd' 2>&1 | tee $log\"" \
+        \"docker exec $ra_c sh -c '$ra_cmd' 2>&1 | tee $ra_log\"" \
         || die "could not start tmux session $SESSION on $HOST"
-    echo "container $c started in tmux session $SESSION on $HOST"
+    printf '%s\n' "container $ra_c started in tmux session $SESSION on $HOST"
     if [ "$VERB" = debug ]; then
         # gdb is sitting in that session waiting for input. Tailing the log
         # tells you nothing; you have to attach to interact with it.
-        echo "  ssh -t $HOST 'tmux attach -t =$SESSION'    # <- gdb is here"
+        printf '%s\n' "  ssh -t $HOST 'tmux attach -t =$SESSION'    # <- gdb is here"
         echo "  (C code has full debug info; the Rust crate is built release"
         echo "   even under --debug, so nxt_otel_rs_* are address-only symbols)"
     else
-        echo "  ssh $HOST 'tail -40 $log'"
+        printf '%s\n' "  ssh $HOST 'tail -40 $ra_log'"
     fi
-    echo "  ssh $HOST 'docker rm -f $c'   # when finished"
-    echo "disk on $HOST after container start:"; df_remote "$HOST"
+    printf '%s\n' "  ssh $HOST 'docker rm -f $ra_c'   # when finished"
+    printf '%s\n' "disk on $HOST after container start:"; df_remote "$HOST"
 }
 
 if [ "$VERB" = verify ]; then

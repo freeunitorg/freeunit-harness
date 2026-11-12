@@ -16,7 +16,7 @@ machine, so you can run the same check before you push.
 | `public-text` | `tools/check-public.sh --all`, then `tools/check-public.sh --history` | a tracked file, or any line ever added in the history of the checked-out commit, matches a rule in `tools/public-deny.txt` |
 | `agents` | `make agents-check` | the `.claude`/`.opencode` agent files or the skills links differ from a fresh `tools/gen-agents.py` run |
 | `trailers` | `tools/check-trailers.py <commit>` for each new commit | a `Co-Authored-By` or `Reviewed-by` trailer breaks the rules in AGENTS.md, or a commit has a `Claude-Session` trailer |
-| `shell` | `tools/check-shell.py` | shellcheck reports an error in a tracked shell script |
+| `shell` | `tools/check-shell.py` | shellcheck reports a warning or an error in a tracked shell script |
 
 Notes:
 
@@ -36,8 +36,10 @@ Notes:
   commits, for example for a bad SHA. It also fails when a pull request has
   no commits in its range.
 - `shell` picks every tracked file whose first line is a `sh`, `bash`, `dash`,
-  `ksh` or `ash` shebang. It fails on the `error` level only. Run
-  `tools/check-shell.py --severity warning` to see more. CI installs
+  `ksh` or `ash` shebang. It fails on the `warning` level, because the
+  portability checks of shellcheck (SC3xxx, such as `[[ ]]` or `local` in a
+  `#!/bin/sh` script) are warnings. Run `tools/check-shell.py --severity info`
+  to see more. CI installs
   shellcheck 0.11.0 from its GitHub release and checks the sha256 first.
   Portability rules are in [shell.md](shell.md).
 

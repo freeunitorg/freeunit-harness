@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # test-isolated — run the pytest suite without colliding with another agent's
 # unitd, so several worktrees can be tested at once.
 #
@@ -99,7 +99,9 @@
 #   tools/test-isolated --distro debian test/test_php_application.py
 #   tools/test-isolated --platform linux/arm/v7 test/test_static.py
 
-set -euo pipefail
+# pipefail is not in every POSIX shell. No pipeline here needs it: each one
+# ends in grep -q or tr, whose status is the one that counts.
+set -eu
 
 HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${UNIT_SRC:-$HARNESS/src}"
@@ -121,28 +123,48 @@ BAND_HIGH=8443
 
 # The tests --port does not isolate, because they name a resource that is not
 # a port. Verified against FreeUnit 2149f582.
-PORT_UNSAFE=(
-    test/test_unix_abstract.py              # binds "unix:@sock"
-    test/test_asgi_application_unix_abstract.py  # binds "unix:@sock"
-)
+# Both bind "unix:@sock". One path per word; the paths hold no blanks.
+PORT_UNSAFE="test/test_unix_abstract.py test/test_asgi_application_unix_abstract.py"
 
+# shq VALUE: one shell word that eval reads back as VALUE.
+# ASCII classes spelt out: a range such as [a-z] follows the locale in some shells.
+SAFE=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+shq() {
+    case "$1" in
+    "") printf "''" ;;
+    *[!${SAFE}_./:@%+=-]*)
+        sq_r="" sq_s=$1
+        while :; do
+            case "$sq_s" in
+            *\'*) sq_r="$sq_r${sq_s%%\'*}'\\''"; sq_s=${sq_s#*\'} ;;
+            *) break ;;
+            esac
+        done
+        printf "'%s'" "$sq_r$sq_s" ;;
+    *) printf '%s' "$1" ;;
+    esac
+}
+
+# The pytest arguments, as one string of shq words: eval "set -- $ARGS"
+# gives them back as "$@".
 mode_given=0
 port_given=0
-args=()
+ARGS=""
+need2() { [ "$1" -ge 2 ] || { echo "test-isolated: $2 needs a value" >&2; exit 1; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
-        -s|--src)   SRC="$2"; shift 2 ;;
-        --port)     PORT="$2"; port_given=1; shift 2 ;;
-        --mode)     MODE="$2"; mode_given=1; shift 2 ;;
-        --distro)   DISTRO="$2"; shift 2 ;;
-        --platform) PLATFORM="$2"; shift 2 ;;
+        -s|--src)   need2 $# "$1"; SRC="$2"; shift 2 ;;
+        --port)     need2 $# "$1"; PORT="$2"; port_given=1; shift 2 ;;
+        --mode)     need2 $# "$1"; MODE="$2"; mode_given=1; shift 2 ;;
+        --distro)   need2 $# "$1"; DISTRO="$2"; shift 2 ;;
+        --platform) need2 $# "$1"; PLATFORM="$2"; shift 2 ;;
         --help|-h)  sed -n '2,100p' "$0"; exit 0 ;;
-        *)          args+=("$1"); shift ;;
+        *)          ARGS="$ARGS $(shq "$1")"; shift ;;
     esac
 done
-[ ${#args[@]} -gt 0 ] || args=(test)
+[ -n "$ARGS" ] || ARGS=" test"
 
-[ -f "$SRC/configure" ] || { echo "not a FreeUnit checkout: $SRC" >&2; exit 1; }
+[ -f "$SRC/configure" ] || { printf '%s\n' "not a FreeUnit checkout: $SRC" >&2; exit 1; }
 
 SRC="$(cd "$SRC" && pwd)"
 
@@ -153,7 +175,8 @@ in_container() {
         return 0
     fi
     # pid 1 being an init system is good evidence we are NOT containerized.
-    case "$(ps -o comm= -p 1 2>/dev/null)" in
+    # /proc/1/comm, not "ps -o comm= -p 1": busybox ps has no -p.
+    case "$(cat /proc/1/comm 2>/dev/null)" in
         systemd|init|launchd) return 1 ;;
     esac
     grep -qE '(docker|libpod|kubepods|containerd)' /proc/1/cgroup 2>/dev/null
@@ -173,9 +196,9 @@ port_supported() { [ -f "$SRC/test/unit/port.py" ]; }
 # Is any port of the band of this base already listening? The band is the
 # mapped range of the whole literal set, so one free band is one free suite.
 band_is_held() {
-    local base=$1 low=$((BAND_LOW + $1 - MIN_BASE)) high=$((BAND_HIGH + $1 - MIN_BASE))
+    bh_low=$((BAND_LOW + $1 - MIN_BASE)) bh_high=$((BAND_HIGH + $1 - MIN_BASE))
     command -v ss >/dev/null || return 1
-    ss -lntH "sport >= :$low and sport <= :$high" 2>/dev/null | grep -q .
+    ss -lntH "sport >= :$bh_low and sport <= :$bh_high" 2>/dev/null | grep -q .
 }
 
 base_is_valid() {
@@ -186,11 +209,13 @@ base_is_valid() {
 
 # Take the lock of a base, and keep it for the run. Two scripts that check the
 # same free band in the same second would otherwise both pick it.
-LOCKFD=
+# The lock is fd 9. A later call reopens fd 9, which drops nothing: pick_base
+# calls again only after flock failed on the previous file. "command" keeps a
+# failed open from ending the shell, as it would for a plain exec in POSIX sh.
 take_base_lock() {
     command -v flock >/dev/null || return 0
-    exec {LOCKFD}>"/tmp/freeunit-test-port-$1.lock" || return 0
-    flock -n "$LOCKFD"
+    command exec 9>"/tmp/freeunit-test-port-$1.lock" || return 0
+    flock -n 9
 }
 
 # The first base whose band is free and whose lock is free, into PICKED_BASE.
@@ -198,12 +223,13 @@ take_base_lock() {
 # runs in a subshell, and the subshell would exit and drop the lock.
 PICKED_BASE=
 pick_base() {
-    local base
-    for ((base = MIN_BASE; base <= MAX_BASE; base += STEP)); do
-        band_is_held "$base" && continue
-        take_base_lock "$base" || continue
-        PICKED_BASE=$base
-        return 0
+    pb_base=$MIN_BASE
+    while [ "$pb_base" -le "$MAX_BASE" ]; do
+        if ! band_is_held "$pb_base" && take_base_lock "$pb_base"; then
+            PICKED_BASE=$pb_base
+            return 0
+        fi
+        pb_base=$((pb_base + STEP))
     done
     return 1
 }
@@ -212,33 +238,34 @@ pick_base() {
 # A positional argument is a path or a node id; anything starting with "-" is
 # an option. With no positional argument pytest walks the whole rootdir, so
 # the answer is yes.
+# shellcheck disable=SC2120  # "$@" is set from ARGS inside
 selection_is_port_unsafe() {
-    local arg path file positional=0
+    su_positional=0
+    eval "set -- $ARGS"
 
-    for arg in "${args[@]}"; do
-        case "$arg" in -*) continue ;; esac
-        path="${arg%%::*}"
-        [ -e "$SRC/$path" ] || [ -e "$path" ] || continue
-        positional=1
+    for su_arg in "$@"; do
+        case "$su_arg" in -*) continue ;; esac
+        su_path="${su_arg%%::*}"
+        [ -e "$SRC/$su_path" ] || [ -e "$su_path" ] || continue
+        su_positional=1
 
-        for file in "${PORT_UNSAFE[@]}"; do
+        for su_file in $PORT_UNSAFE; do
             # The selection reaches the file when it IS the file, or when it
             # is a directory above it.
-            case "$file" in
-                "$path"|"${path%/}"/*) return 0 ;;
+            case "$su_file" in
+                "$su_path"|"${su_path%/}"/*) return 0 ;;
             esac
         done
     done
 
-    [ "$positional" -eq 1 ] && return 1
+    [ "$su_positional" -eq 1 ] && return 1
     return 0
 }
 
 unsafe_reason() {
-    local file
     echo "     the selection reaches a test that --port does not isolate:" >&2
-    for file in "${PORT_UNSAFE[@]}"; do
-        echo "       $file" >&2
+    for ur_file in $PORT_UNSAFE; do
+        printf '%s\n' "       $ur_file" >&2
     done
     echo "     Those bind the abstract socket \"unix:@sock\" by that fixed" >&2
     echo "     name, which is per network namespace, not per port." >&2
@@ -255,7 +282,7 @@ if [ "$MODE" = auto ]; then
             echo "     Use --mode container, or deselect those files." >&2
         fi
     elif ! port_supported; then
-        echo "==> $SRC/test/unit/port.py is absent: this checkout predates"
+        printf '%s\n' "==> $SRC/test/unit/port.py is absent: this checkout predates"
         echo "    FreeUnit 2149f582, so --port does not exist. Isolating the"
         echo "    namespace instead."
     elif selection_is_port_unsafe; then
@@ -281,14 +308,14 @@ fi
 # that mode. Nothing changes for a caller that passes only --mode.
 if [ "$mode_given" -eq 1 ] && [ "$port_given" -eq 1 ] && [ "$MODE" != port ]; then
     base_is_valid "$PORT" || { echo "--port must be $MIN_BASE, $((MIN_BASE + STEP)), ... $MAX_BASE" >&2; exit 2; }
-    args=(--port "$PORT" "${args[@]}")
+    ARGS=" --port $(shq "$PORT")$ARGS"
 fi
 
 # --- port --------------------------------------------------------------------
 
 if [ "$MODE" = port ]; then
     port_supported || {
-        echo "ERROR: $SRC/test/unit/port.py is absent, so this checkout has no" >&2
+        printf '%s\n' "ERROR: $SRC/test/unit/port.py is absent, so this checkout has no" >&2
         echo "       --port option. It predates FreeUnit 2149f582. Use" >&2
         echo "       --mode direct, --mode container or --mode serialize." >&2
         exit 1
@@ -314,7 +341,8 @@ if [ "$MODE" = port ]; then
 
     cd "$SRC"
     status=0
-    python3 -m pytest --print-log --port "$PORT" "${args[@]}" || status=$?
+    eval "set -- $ARGS"
+    python3 -m pytest --print-log --port "$PORT" "$@" || status=$?
     exit "$status"
 fi
 
@@ -327,19 +355,21 @@ if [ "$MODE" = direct ]; then
         echo "         Stop it, or use --port, --mode container or --mode serialize." >&2
     fi
     cd "$SRC"
-    exec python3 -m pytest --print-log "${args[@]}"
+    eval "set -- $ARGS"
+    exec python3 -m pytest --print-log "$@"
 fi
 
 # --- serialize ---------------------------------------------------------------
 
 if [ "$MODE" = serialize ]; then
     command -v flock >/dev/null || { echo "flock not found; try --mode container" >&2; exit 1; }
-    echo "==> waiting for the suite lock ($LOCKFILE)"
-    exec flock "$LOCKFILE" bash -c '
+    printf '%s\n' "==> waiting for the suite lock ($LOCKFILE)"
+    eval "set -- $ARGS"
+    exec flock "$LOCKFILE" sh -c '
         cd "$1"; shift
-        echo "==> got the lock; running pytest $*"
+        printf "%s\n" "==> got the lock; running pytest $*"
         python3 -m pytest --print-log "$@"
-    ' _ "$SRC" "${args[@]}"
+    ' _ "$SRC" "$@"
 fi
 
 # --- container ---------------------------------------------------------------
@@ -349,16 +379,17 @@ docker_usable || { echo "docker not usable; try --mode serialize" >&2; exit 1; }
 case "$DISTRO" in
     alpine) DOCKERFILE=Dockerfile.alpine ;;
     debian) DOCKERFILE=Dockerfile.dev ;;
-    *) echo "unknown --distro '$DISTRO' (debian|alpine)" >&2; exit 2 ;;
+    *) printf '%s\n' "unknown --distro '$DISTRO' (debian|alpine)" >&2; exit 2 ;;
 esac
 
-PLAT_ARGS=()
+# ${PLATFORM:+--platform "$PLATFORM"} below is two words when PLATFORM is
+# set and none when it is empty.
 TAG_SUFFIX=""
 if [ -n "$PLATFORM" ]; then
-    PLAT_ARGS=(--platform "$PLATFORM")
-    TAG_SUFFIX="-$(echo "$PLATFORM" | tr '/' '-')"
+    TAG_SUFFIX="-$(printf '%s\n' "$PLATFORM" | tr '/' '-')"
     # Emulated runs need a binfmt handler on the host; without one the container
     # starts and every exec dies with "exec format error".
+    # shellcheck disable=SC2010  # names under binfmt_misc have no blanks
     if ! ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -qi qemu; then
         echo "WARNING: no qemu binfmt handlers registered; a foreign --platform will fail." >&2
         echo "         Register them with: docker run --privileged --rm tonistiigi/binfmt --install all" >&2
@@ -368,8 +399,8 @@ fi
 IMAGE="freeunit-harness/ci:${DISTRO}-test${TAG_SUFFIX}"
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || {
-    echo "==> building $IMAGE (target: test)"
-    docker build "${PLAT_ARGS[@]}" --target test -t "$IMAGE" \
+    printf '%s\n' "==> building $IMAGE (target: test)"
+    docker build ${PLATFORM:+--platform "$PLATFORM"} --target test -t "$IMAGE" \
         -f "$HARNESS/ci/$DOCKERFILE" "$HARNESS/ci"
 }
 
@@ -384,16 +415,17 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || {
 MARKER="$SRC/build/.built-by"
 WANT="container:${DISTRO}${TAG_SUFFIX}"
 if [ -x "$SRC/build/sbin/unitd" ] && [ "$(cat "$MARKER" 2>/dev/null)" != "$WANT" ]; then
-    echo "ERROR: $SRC/build was not built by this image ($WANT)." >&2
-    echo "       Found: $(cat "$MARKER" 2>/dev/null || echo 'a host build')" >&2
+    printf '%s\n' "ERROR: $SRC/build was not built by this image ($WANT)." >&2
+    printf '%s\n' "       Found: $(cat "$MARKER" 2>/dev/null || echo 'a host build')" >&2
     echo "       Running it here mixes libc/module ABIs and fails in ways that" >&2
     echo "       look like code bugs. Use a checkout dedicated to this target," >&2
-    echo "       or rebuild:  rm -rf $SRC/build" >&2
+    printf '%s\n' "       or rebuild:  rm -rf $SRC/build" >&2
     exit 1
 fi
 
 echo "==> running the suite in a container (own netns; host :8080 irrelevant)"
-docker run --rm "${PLAT_ARGS[@]}" --init \
+eval "set -- $ARGS"
+docker run --rm ${PLATFORM:+--platform "$PLATFORM"} --init \
     -v "$SRC:/src" -w /src \
     -e WANT="$WANT" \
     "$IMAGE" sh -euc '
@@ -409,7 +441,7 @@ docker run --rm "${PLAT_ARGS[@]}" --init \
             ./configure php ${PHP_CONFIG:+--config=$PHP_CONFIG} \
                            ${PHP_LIB_PATH:+--lib-path=$PHP_LIB_PATH}
             make -j"$(nproc)" php
-            echo "$WANT" > build/.built-by
+            printf "%s\n" "$WANT" > build/.built-by
         fi
         exec python3 -m pytest --print-log "$@"
-    ' _ "${args[@]}"
+    ' _ "$@"

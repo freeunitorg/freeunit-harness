@@ -221,7 +221,7 @@ PY
     # them, so a JIT build shows more than a build without JIT.
     emit "$ph" "$side" "$cell" "$k" "$s" xmaps "$(awk '$2 ~ /x/ && NF == 5' /proc/$rp/maps 2>/dev/null | wc -l)"
     emit "$ph" "$side" "$cell" "$k" "$s" alerts "$(grep -cE '\[(alert|crit|emerg)\]' $R/log)"
-    echo "  $ph $side $cell block $k slot $s: ok=$ok router_us=$ru server_us=$su"
+    printf '%s\n' "  $ph $side $cell block $k slot $s: ok=$ok router_us=$ru server_us=$su"
     stop_unit
 }
 
@@ -247,7 +247,7 @@ probe_cell() {  # phase side cell conns block slot tree
     emit "$ph" "$side" "$cell" "$k" "$s" probe_ok "$ok"
     strace_parse $R/st.r rsys "$ok" | while read -r m v; do emit "$ph" "$side" "$cell" "$k" "$s" "$m" "$v"; done
     [ -n "$sa" ] && strace_parse $R/st.a asys "$ok" | while read -r m v; do emit "$ph" "$side" "$cell" "$k" "$s" "$m" "$v"; done
-    echo "  $ph $side $cell block $k slot $s: strace probe ok=$ok"
+    printf '%s\n' "  $ph $side $cell block $k slot $s: strace probe ok=$ok"
     stop_unit
 }
 

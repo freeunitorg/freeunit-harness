@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # bench-release.sh — A/B bench for a release cut: shipped build (A) vs a
 # candidate (B), measured as router request-thread CPU per request.
 #
@@ -165,8 +165,8 @@ set -u
 # testing this script, not by design -- worth having as a guard.
 export LC_ALL=C
 
-usage() { echo "usage: $0 [--swap] <labelA> <builddirA> <labelB> <builddirB> [reps]" >&2
-    echo "       $0 --preflight-only" >&2; exit 2; }
+usage() { printf '%s\n' "usage: $0 [--swap] <labelA> <builddirA> <labelB> <builddirB> [reps]" >&2
+    printf '%s\n' "       $0 --preflight-only" >&2; exit 2; }
 PREFLIGHT_ONLY=0
 if [ "${1:-}" = "--preflight-only" ]; then PREFLIGHT_ONLY=1; shift; fi
 if [ "${1:-}" = "--swap" ]; then SWAP=1; shift; fi
@@ -181,7 +181,7 @@ SWAP=${SWAP:-0}
 
 # $HOME/.cargo is not the registry root everywhere any more -- the build boxes
 # export CARGO_HOME onto a data disk to keep their 40 G root filesystem from filling.
-OHA=$(command -v oha || echo "${CARGO_HOME:-$HOME/.cargo}/bin/oha")
+OHA=$(command -v oha || printf '%s\n' "${CARGO_HOME:-$HOME/.cargo}/bin/oha")
 PORT=${PORT:-8901}
 CLK=$(getconf CLK_TCK)
 
@@ -199,9 +199,33 @@ mkdir -p "$RUNBASE"
 # A die() that leaves its server running poisons the next run: the port
 # stays held and every following cell fails to configure.
 UNIT_PID=""
-cleanup() { [ -n "$UNIT_PID" ] && kill "$UNIT_PID" 2>/dev/null; }
+LOAD_PID=""   # the oha run in progress, so that a signal also stops it
+cleanup() {
+    [ -n "$LOAD_PID" ] && kill "$LOAD_PID" 2>/dev/null
+    [ -n "$UNIT_PID" ] && kill "$UNIT_PID" 2>/dev/null
+}
 trap cleanup EXIT
-die() { echo "FATAL: $*" >&2; cleanup; exit 1; }
+# dash and busybox ash skip the EXIT trap when a signal ends the shell; bash
+# runs it. Exit through the trap, so the router is killed on a signal too.
+# QUIT stays as it is, as in exit_traps of tools/perf-lab/scaling/lib.sh:
+# bash ignores it, and an ignored QUIT would pass to unitd.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+die() { printf '%s\n' "FATAL: $*" >&2; cleanup; exit 1; }
+
+# load OUT CMD...: run CMD with stdout and stderr in OUT, in the background,
+# and wait for it. bash runs a signal trap only after a foreground command
+# ends, so a TERM during a cell would wait for oha; "wait" returns at once.
+load() {
+    ld_out=$1; shift
+    "$@" > "$ld_out" 2>&1 &
+    LOAD_PID=$!
+    wait "$LOAD_PID"
+    ld_rc=$?
+    LOAD_PID=""
+    return "$ld_rc"
+}
 
 if [ "$PREFLIGHT_ONLY" != 1 ]; then
     [ -x "$OHA" ] || die "no oha on PATH or in ${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -218,39 +242,43 @@ fi
 # mid-cell, which is non-stationarity this script cannot tell apart from a
 # real difference.
 preflight_cpu() {
-    local rcpu=${ROUTER_CPU:-2} sibs="" gov="unknown"
-    local sibpath="/sys/devices/system/cpu/cpu$rcpu/topology/thread_siblings_list"
-    local govpath="/sys/devices/system/cpu/cpu$rcpu/cpufreq/scaling_governor"
-    [ -r "$sibpath" ] && sibs=$(cat "$sibpath")
-    if [ -r "$govpath" ]; then
-        gov=$(cat "$govpath")
+    pf_rcpu=${ROUTER_CPU:-2} pf_sibs="" pf_gov="unknown"
+    pf_sibpath="/sys/devices/system/cpu/cpu$pf_rcpu/topology/thread_siblings_list"
+    pf_govpath="/sys/devices/system/cpu/cpu$pf_rcpu/cpufreq/scaling_governor"
+    [ -r "$pf_sibpath" ] && pf_sibs=$(cat "$pf_sibpath")
+    if [ -r "$pf_govpath" ]; then
+        pf_gov=$(cat "$pf_govpath")
     else
-        echo "WARNING: $govpath not readable -- cannot check the governor, continuing." >&2
+        printf '%s\n' "WARNING: $pf_govpath not readable -- cannot check the governor, continuing." >&2
     fi
-    echo "router cpu=$rcpu  smt siblings=${sibs:-unknown}  governor=$gov"
+    printf '%s\n' "router cpu=$pf_rcpu  smt siblings=${pf_sibs:-unknown}  governor=$pf_gov"
 
-    if [ "$gov" = "powersave" ] && [ "${ALLOW_POWERSAVE:-0}" != 1 ]; then
-        die "router cpu$rcpu governor is 'powersave' -- frequency scaling mid-cell is non-stationarity this script cannot tell apart from a real delta. Fix: sudo cpupower frequency-set -g performance (or write 'performance' to $govpath as root -- on the reference bench host this needs root, which agents don't have, so set it before the run). ALLOW_POWERSAVE=1 to override."
-    elif [ "$gov" != "performance" ] && [ "$gov" != "unknown" ]; then
-        echo "WARNING: governor is '$gov', not 'performance' -- frequency scaling" >&2
+    if [ "$pf_gov" = "powersave" ] && [ "${ALLOW_POWERSAVE:-0}" != 1 ]; then
+        die "router cpu$pf_rcpu governor is 'powersave' -- frequency scaling mid-cell is non-stationarity this script cannot tell apart from a real delta. Fix: sudo cpupower frequency-set -g performance (or write 'performance' to $pf_govpath as root -- on the reference bench host this needs root, which agents don't have, so set it before the run). ALLOW_POWERSAVE=1 to override."
+    elif [ "$pf_gov" != "performance" ] && [ "$pf_gov" != "unknown" ]; then
+        printf '%s\n' "WARNING: governor is '$pf_gov', not 'performance' -- frequency scaling" >&2
         echo "  mid-cell looks like a real difference to this script. ALLOW_NOISY=1 to silence." >&2
     fi
 
-    [ -n "$sibs" ] || return 0
-    local sib_list load_list overlap
-    sib_list=$(echo "$sibs" | tr ',' '\n' | while read -r r; do
-        case "$r" in *-*) seq "${r%-*}" "${r#*-}";; *) echo "$r";; esac
+    [ -n "$pf_sibs" ] || return 0
+    pf_sib_list=$(printf '%s\n' "$pf_sibs" | tr ',' '\n' | while read -r r; do
+        case "$r" in *-*) seq "${r%-*}" "${r#*-}";; *) printf '%s\n' "$r";; esac
     done)
-    load_list=$(echo "${LOAD_CPUS:-4-7}" | tr ',' '\n' | while read -r r; do
-        case "$r" in *-*) seq "${r%-*}" "${r#*-}";; *) echo "$r";; esac
+    pf_load_list=$(printf '%s\n' "${LOAD_CPUS:-4-7}" | tr ',' '\n' | while read -r r; do
+        case "$r" in *-*) seq "${r%-*}" "${r#*-}";; *) printf '%s\n' "$r";; esac
     done)
-    overlap=$(comm -12 <(echo "$sib_list" | sort -n) <(echo "$load_list" | sort -n))
-    if [ -n "$overlap" ]; then
-        echo "cpu topology: router cpu$rcpu's SMT sibling(s) [$overlap] are also in" >&2
-        echo "  LOAD_CPUS=${LOAD_CPUS:-4-7} -- the generator would contend with the router" >&2
+    # comm reads the sibling list from fd 3 (a here-document) and the load
+    # list from stdin; this replaces bash's two <( ) process substitutions.
+    pf_overlap=$(printf '%s\n' "$pf_load_list" | sort -n | comm -12 /dev/fd/3 - 3<<EOF
+$(printf '%s\n' "$pf_sib_list" | sort -n)
+EOF
+)
+    if [ -n "$pf_overlap" ]; then
+        printf '%s\n' "cpu topology: router cpu$pf_rcpu's SMT sibling(s) [$pf_overlap] are also in" >&2
+        printf '%s\n' "  LOAD_CPUS=${LOAD_CPUS:-4-7} -- the generator would contend with the router" >&2
         echo "  for one physical core, not run on a disjoint one." >&2
         [ "${ALLOW_SMT_OVERLAP:-0}" = 1 ] || \
-            die "router/load-gen share a physical core via SMT (cpu$rcpu sibling(s) $overlap in LOAD_CPUS) -- set ALLOW_SMT_OVERLAP=1 to override"
+            die "router/load-gen share a physical core via SMT (cpu$pf_rcpu sibling(s) $pf_overlap in LOAD_CPUS) -- set ALLOW_SMT_OVERLAP=1 to override"
     fi
 }
 preflight_cpu
@@ -261,16 +289,26 @@ preflight_cpu
 # process-name matching is inherently approximate -- so it warns instead of
 # aborting; ALLOW_NOISY=1 silences the warning once you've checked by hand.
 if [ "${ALLOW_NOISY:-0}" != 1 ]; then
-    busy=$(pgrep -x 'cc1|cc1plus|ld|ld.gold|ld.lld|make|gcc|g\+\+|clang|clang\+\+|cargo|rustc' 2>/dev/null | tr '\n' ' ')
+    # As procps "pgrep -x": the exact command name from /proc/<pid>/comm.
+    # busybox pgrep -x compares argv[0] instead, and gcc starts cc1 by its
+    # full path, so busybox would miss it.
+    busy=""
+    for bp_d in /proc/[0-9]*; do
+        { read -r bp_comm < "$bp_d/comm"; } 2>/dev/null || continue
+        case "$bp_comm" in
+            cc1|cc1plus|ld|ld.gold|ld.lld|make|gcc|g++|clang|clang++|cargo|rustc)
+                busy="$busy${bp_d#/proc/} " ;;
+        esac
+    done
     if [ -n "$busy" ]; then
-        echo "WARNING: compiler/linker process(es) running (pid $busy) -- benchmarks are" >&2
+        printf '%s\n' "WARNING: compiler/linker process(es) running (pid $busy) -- benchmarks are" >&2
         echo "  serial, foreground work; this run's noise floor is suspect. ALLOW_NOISY=1 to silence." >&2
     fi
     load1=$(awk '{print $1}' /proc/loadavg)
     nc=$(nproc)
     over=$(awk -v l="$load1" -v n="$nc" 'BEGIN{print (l > n*0.5) ? 1 : 0}')
     if [ "$over" = 1 ]; then
-        echo "WARNING: load average $load1 on $nc cores -- box may not be quiet. ALLOW_NOISY=1 to silence." >&2
+        printf '%s\n' "WARNING: load average $load1 on $nc cores -- box may not be quiet. ALLOW_NOISY=1 to silence." >&2
     fi
 fi
 
@@ -279,7 +317,7 @@ fi
 # guards against.
 SA=$(sha256sum "$BUILD_A/sbin/unitd" | cut -c1-16)
 SB=$(sha256sum "$BUILD_B/sbin/unitd" | cut -c1-16)
-echo "$LABEL_A=$SA  $LABEL_B=$SB"
+printf '%s\n' "$LABEL_A=$SA  $LABEL_B=$SB"
 if [ "$SA" = "$SB" ] && [ "${ALLOW_SAME:-0}" != 1 ]; then
     die "$LABEL_A and $LABEL_B are the same binary -- the comparison would be meaningless (set ALLOW_SAME=1 to run this deliberately as the null pair)"
 fi
@@ -289,104 +327,116 @@ mkdir -p "$DOC"
 head -c 1024 /dev/urandom | base64 | head -c 1024 > "$DOC/1k.txt"
 
 router_thread_ticks() {
-    local rpid=$1 sum=0 t comm rest
-    for t in /proc/"$rpid"/task/*/stat; do
-        [ -r "$t" ] || continue
-        comm=$(sed 's/^[0-9]* (\(.*\)) .*/\1/' "$t")
-        [ "$comm" = "unitd" ] || continue
-        rest=$(sed 's/.*) //' "$t")
-        sum=$(( sum + $(echo "$rest" | awk '{print $12+$13}') ))
+    tt_rpid=$1 tt_sum=0
+    for tt_t in /proc/"$tt_rpid"/task/*/stat; do
+        [ -r "$tt_t" ] || continue
+        tt_comm=$(sed 's/^[0-9]* (\(.*\)) .*/\1/' "$tt_t")
+        [ "$tt_comm" = "unitd" ] || continue
+        tt_rest=$(sed 's/.*) //' "$tt_t")
+        tt_sum=$(( tt_sum + $(printf '%s\n' "$tt_rest" | awk '{print $12+$13}') ))
     done
-    echo "$sum"
+    printf '%s\n' "$tt_sum"
 }
 
 router_thread_count() {
-    local rpid=$1 n=0 t comm
-    for t in /proc/"$rpid"/task/*/stat; do
-        [ -r "$t" ] || continue
-        comm=$(sed 's/^[0-9]* (\(.*\)) .*/\1/' "$t")
-        [ "$comm" = "unitd" ] && n=$((n+1))
+    tn_rpid=$1 tn_n=0
+    for tn_t in /proc/"$tn_rpid"/task/*/stat; do
+        [ -r "$tn_t" ] || continue
+        tn_comm=$(sed 's/^[0-9]* (\(.*\)) .*/\1/' "$tn_t")
+        [ "$tn_comm" = "unitd" ] && tn_n=$((tn_n+1))
     done
-    echo "$n"
+    printf '%s\n' "$tn_n"
 }
 
 run_cell() {
-    local build=$1 label=$2 rep=$3
-    local run="$RUNBASE/rrun"
-    rm -rf "$run"; mkdir -p "$run/state" "$run/modules"
+    rc_build=$1 rc_label=$2 rc_rep=$3
+    rc_run="$RUNBASE/rrun"
+    rm -rf "$rc_run"; mkdir -p "$rc_run/state" "$rc_run/modules"
 
-    "$build/sbin/unitd" --no-daemon \
-        --control "unix:$run/control.sock" \
-        --pid "$run/unit.pid" --log "$run/unit.log" \
-        --statedir "$run/state" --tmpdir "$run" --modulesdir "$run/modules" \
+    "$rc_build/sbin/unitd" --no-daemon \
+        --control "unix:$rc_run/control.sock" \
+        --pid "$rc_run/unit.pid" --log "$rc_run/unit.log" \
+        --statedir "$rc_run/state" --tmpdir "$rc_run" --modulesdir "$rc_run/modules" \
         >/dev/null 2>&1 &
-    local unit_pid=$!
-    UNIT_PID=$unit_pid
+    rc_unit_pid=$!
+    UNIT_PID=$rc_unit_pid
     sleep 1.2
-    kill -0 "$unit_pid" 2>/dev/null || die "unitd ($label) died on start"
+    kill -0 "$rc_unit_pid" 2>/dev/null || die "unitd ($rc_label) died on start"
 
-    local conf
-    conf=$(curl -s --unix-socket "$run/control.sock" -X PUT -d '{
+    # shellcheck disable=SC2016  # $uri is a Unit variable, not a shell one
+    rc_conf=$(curl -s --unix-socket "$rc_run/control.sock" -X PUT -d '{
       "settings": {"listen_threads": 1},
       "listeners": {"127.0.0.1:'"$PORT"'": {"pass": "routes/s"}},
       "routes": {"s": [{"action": {"share": "'"$DOC"'$uri"}}]}
     }' http://localhost/config)
-    case "$conf" in
+    case "$rc_conf" in
         *success*) ;;
-        *) tail -15 "$run/unit.log" >&2; kill "$unit_pid" 2>/dev/null
-           die "config rejected ($label rep$rep): [$conf]" ;;
+        *) tail -15 "$rc_run/unit.log" >&2; kill "$rc_unit_pid" 2>/dev/null
+           die "config rejected ($rc_label rep$rc_rep): [$rc_conf]" ;;
     esac
 
     sleep 0.5
-    local router
-    router=$(pgrep -P "$unit_pid" -f router | head -1)
-    [ -n "$router" ] || { kill "$unit_pid" 2>/dev/null; die "no router pid"; }
+    # As "pgrep -P PID -f router | head -1", from /proc: some busybox builds
+    # have no pgrep. The awk joins a stat record split by a newline in the
+    # command name, as proc_records in bench-engines.sh does, and prints the
+    # pids whose parent (the second field after the last ") ") is unitd.
+    rc_router=""
+    for rc_p in $(cat /proc/[0-9]*/stat 2>/dev/null | awk -v pp="$rc_unit_pid" '
+            { rec = (rec == "") ? $0 : rec "\n" $0
+              n = split(rec, part, /[)] /)
+              if (n < 2 || split(part[n], f, " ") < 20) next
+              if (f[2] == pp) print substr(rec, 1, index(rec, " ") - 1)
+              rec = "" }' | sort -n); do
+        # tr first: the busybox grep of Ubuntu stops at the first NUL.
+        { tr '\0' '\n' < "/proc/$rc_p/cmdline"; } 2>/dev/null | grep -qF router \
+            && { rc_router=$rc_p; break; }
+    done
+    [ -n "$rc_router" ] || { kill "$rc_unit_pid" 2>/dev/null; die "no router pid"; }
 
     # Serve check: a cell that 404s would measure the error path, not static.
     # Pin the router to one dedicated core and the generator to a disjoint
     # set. Unpinned, the two migrate across cores between repetitions and
     # that placement noise dominates the difference being measured.
-    taskset -pc "${ROUTER_CPU:-2}" "$router" >/dev/null 2>&1 \
-        || die "taskset failed on router $router"
+    taskset -pc "${ROUTER_CPU:-2}" "$rc_router" >/dev/null 2>&1 \
+        || die "taskset failed on router $rc_router"
 
-    local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/1k.txt")
-    [ "$code" = "200" ] || { kill "$unit_pid" 2>/dev/null
-        die "$label serves $code, not 200 -- wrong workload"; }
+    rc_code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/1k.txt")
+    [ "$rc_code" = "200" ] || { kill "$rc_unit_pid" 2>/dev/null
+        die "$rc_label serves $rc_code, not 200 -- wrong workload"; }
 
-    local ka=()
-    [ "$MODE" = "close" ] && ka=(--disable-keepalive)
+    rc_ka=""
+    [ "$MODE" = "close" ] && rc_ka=--disable-keepalive
 
-    taskset -c "${LOAD_CPUS:-4-7}" "$OHA" -n 3000 -c "$CONNS" "${ka[@]}" --no-tui \
-        "http://127.0.0.1:$PORT/1k.txt" >/dev/null 2>&1
+    load /dev/null taskset -c "${LOAD_CPUS:-4-7}" "$OHA" -n 3000 -c "$CONNS" ${rc_ka:+"$rc_ka"} --no-tui \
+        "http://127.0.0.1:$PORT/1k.txt"
 
-    local nthreads before after ticks ohaout rps ok us
-    nthreads=$(router_thread_count "$router")
-    [ "$nthreads" -gt 0 ] || die "no request threads matched comm=unitd"
+    rc_nthreads=$(router_thread_count "$rc_router")
+    [ "$rc_nthreads" -gt 0 ] || die "no request threads matched comm=unitd"
 
-    before=$(router_thread_ticks "$router")
-    ohaout=$(taskset -c "${LOAD_CPUS:-4-7}" "$OHA" -n "$N" -c "$CONNS" -q "$RATE" "${ka[@]}" --no-tui \
-             "http://127.0.0.1:$PORT/1k.txt" 2>&1)
-    after=$(router_thread_ticks "$router")
-    ticks=$(( after - before ))
+    rc_before=$(router_thread_ticks "$rc_router")
+    load "$rc_run/oha.out" taskset -c "${LOAD_CPUS:-4-7}" "$OHA" -n "$N" -c "$CONNS" -q "$RATE" \
+        ${rc_ka:+"$rc_ka"} --no-tui "http://127.0.0.1:$PORT/1k.txt"
+    rc_ohaout=$(cat "$rc_run/oha.out")
+    rc_after=$(router_thread_ticks "$rc_router")
+    rc_ticks=$(( rc_after - rc_before ))
 
     # First match only, digits only: oha prints more than one line matching
     # [200], and a multi-line value turns the gate below into a shell error
     # rather than a check.
-    rps=$(echo "$ohaout" | awk '/Requests\/sec/{print $2; exit}' | tr -cd '0-9.')
-    ok=$(echo "$ohaout" | awk '/\[200\]/{print $2; exit}' | tr -cd '0-9')
+    rc_rps=$(printf '%s\n' "$rc_ohaout" | awk '/Requests\/sec/{print $2; exit}' | tr -cd '0-9.')
+    rc_ok=$(printf '%s\n' "$rc_ohaout" | awk '/\[200\]/{print $2; exit}' | tr -cd '0-9')
 
-    [ "$ticks" -gt 0 ] || die "zero CPU delta ($label rep$rep) -- broken"
-    [ "${ok:-0}" -ge $(( N * 99 / 100 )) ] || die "$label rep$rep: only ${ok:-0}/$N were 200"
+    [ "$rc_ticks" -gt 0 ] || die "zero CPU delta ($rc_label rep$rc_rep) -- broken"
+    [ "${rc_ok:-0}" -ge $(( N * 99 / 100 )) ] || die "$rc_label rep$rc_rep: only ${rc_ok:-0}/$N were 200"
 
-    us=$(awk -v t="$ticks" -v n="$N" -v c="$CLK" \
+    rc_us=$(awk -v t="$rc_ticks" -v n="$N" -v c="$CLK" \
          'BEGIN{printf "%.2f", (t*1000000/c)/n}')
 
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        "$label" "$rep" "$us" "$ticks" "$nthreads" "${rps:-NA}" "${ok:-NA}" >> "$OUT"
-    echo "  rep$rep $label: $us us/req (${ticks}t, ok=$ok)"
+        "$rc_label" "$rc_rep" "$rc_us" "$rc_ticks" "$rc_nthreads" "${rc_rps:-NA}" "${rc_ok:-NA}" >> "$OUT"
+    printf '%s\n' "  rep$rc_rep $rc_label: $rc_us us/req (${rc_ticks}t, ok=$rc_ok)"
 
-    kill "$unit_pid" 2>/dev/null; wait "$unit_pid" 2>/dev/null
+    kill "$rc_unit_pid" 2>/dev/null; wait "$rc_unit_pid" 2>/dev/null
     UNIT_PID=""
     sleep 0.5
 }
@@ -406,20 +456,19 @@ printf "cell\trep\tus_per_req\tticks\tthreads\trps\tok\n" >> "$OUT"
 # the two with tools/bench-crossover.py rather than trusting either alone.
 X="$BUILD_A $LABEL_A"; Y="$BUILD_B $LABEL_B"
 [ "$SWAP" = 1 ] && { X="$BUILD_B $LABEL_B"; Y="$BUILD_A $LABEL_A"; }
-CELLS=("$X" "$Y" "$Y" "$X" "$Y" "$X" "$X" "$Y")
-NC=${#CELLS[@]}
+CELLS="X Y Y X Y X X Y"   # names of the two cells above, in slot order
 
-echo "A=$LABEL_A B=$LABEL_B mode=$MODE swap=$SWAP N=$N rate=$RATE reps=$REPS -> $OUT"
+printf '%s\n' "A=$LABEL_A B=$LABEL_B mode=$MODE swap=$SWAP N=$N rate=$RATE reps=$REPS -> $OUT"
 # Repetition 0 is a warm-up and is recorded but dropped from the summary
 # below: the very first run of the sequence has no predecessor.
 for rep in $(seq 0 "$REPS"); do
-    for i in $(seq 0 $((NC - 1))); do
-        # shellcheck disable=SC2086
-        set -- ${CELLS[$i]}
+    for cell in $CELLS; do
+        # shellcheck disable=SC2086  # "build label", split as before
+        case "$cell" in X) set -- $X ;; *) set -- $Y ;; esac
         run_cell "$1" "$2" "$rep"
     done
 done
-echo "done -> $OUT"
+printf '%s\n' "done -> $OUT"
 
 # Paired summary: per rep (excluding warm-up rep 0), the difference between
 # the two labels' cell means, then the mean of those differences with a 95%

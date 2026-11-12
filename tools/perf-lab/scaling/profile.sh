@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # profile.sh -- where the time goes at one point of the sweep. Runs inside the lab
 # container (run.sh profile; it has --cap-add PERFMON and SYS_PTRACE), or natively.
 #
@@ -55,10 +55,14 @@ case $PERF_SCOPE in pids|cpus) ;; *) die "PERF_SCOPE is pids or cpus, not '$PERF
 # A misspelt step must not pass: no step would run, and DONE would follow.
 # Split on any blank, newlines and tabs included, and keep the steps one space
 # apart: has() below looks for " step ".
-read -r -d '' -a steps <<< "$PROFILE" || true
-PROFILE="${steps[*]}"
-[ "${#steps[@]}" -gt 0 ] || die "PROFILE is empty; the steps are record, futex and c2c"
-for s in "${steps[@]}"; do
+# set -f: a "*" is a step name, not the file names of the cwd.
+set -f
+# shellcheck disable=SC2086  # one word per step
+set -- $PROFILE
+set +f
+PROFILE="$*"
+[ "$#" -gt 0 ] || die "PROFILE is empty; the steps are record, futex and c2c"
+for s in "$@"; do
     case $s in record|futex|c2c) ;; *) die "PROFILE: unknown step '$s'; the steps are record, futex and c2c" ;; esac
 done
 
@@ -71,7 +75,7 @@ write_meta profile "$V"
 FAIL=$OUT/failures.txt; : > "$FAIL"
 
 # --- preflight: stop before unitd starts when a requested step cannot work --------------
-has() { [[ " $PROFILE " == *" $1 "* ]]; }
+has() { case " $PROFILE " in *" $1 "*) return 0 ;; esac; return 1; }
 want=$PROFILE
 [ "$PERF_SCOPE" = cpus ] && want="$want cpus"
 [ "$C2C_G" = 1 ] && has c2c && want="$want c2cg"
@@ -91,21 +95,22 @@ ev=""
 has record && ev="$ev,$PERF_EVENT$u"
 has futex && [ "$FUTEX_FORM" = tracepoint ] && ev="$ev,syscalls:sys_enter_futex"
 if [ -z "$ev" ] && ! has c2c; then
-    echo "probe: not needed (PROFILE='$PROFILE' runs no perf)" | tee -a "$OUT/preflight.txt"
+    printf '%s\n' "probe: not needed (PROFILE='$PROFILE' runs no perf)" | tee -a "$OUT/preflight.txt"
 else
     ev="task-clock$u$ev"
     command -v perf >/dev/null || { own_out; die "no perf"; }
     if ! perf stat -x, -e "$ev" -- true > "$OUT/probe.txt" 2>&1 \
         || grep -q -e '<not supported>' -e '<not counted>' "$OUT/probe.txt"; then
-        echo "probe: perf stat -e $ev failed; see probe.txt" | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
+        printf '%s\n' "probe: perf stat -e $ev failed; see probe.txt" | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
         own_out; die "perf does not count here; see probe.txt"
     fi
     # c2c samples memory events that perf stat cannot count (IBS samples only), so
     # the c2c probe is the record itself, in the form of the preflight, on "true".
     if has c2c; then
-        PERF_T=(); [ "$PERF_SCOPE" = cpus ] && PERF_T=(-a -C "$(cpus_server "$N")")
+        PERF_T=""; unset PERF_TA
+        [ "$PERF_SCOPE" = cpus ] && PERF_T="-a -C" PERF_TA=$(cpus_server "$N")
         if ! c2c_record "$OUT/probe-c2c.data" "$OUT/probe-c2c.err" -- true; then
-            echo "probe: perf c2c record ($C2C_FORM) failed; see probe-c2c.err" \
+            printf '%s\n' "probe: perf c2c record ($C2C_FORM) failed; see probe-c2c.err" \
                 | tee -a "$OUT/preflight.txt" > "$OUT/FAILED"
             own_out; die "the c2c probe failed; see probe-c2c.err"
         fi
@@ -115,19 +120,18 @@ fi
 if [ "$PREFLIGHT_ONLY" = 1 ]; then
     cp "$OUT/preflight.txt" "$OUT/summary.txt"; : > "$OUT/DONE"; own_out; exit 0
 fi
-trap 'stop_unit; own_out' EXIT
+exit_traps 'stop_unit; own_out'
 setup_www
-try() { local what=$1; shift; "$@" || echo "FAILED: $what ($*)" >> "$FAIL"; }
+try() { try_what=$1; shift; "$@" || printf '%s\n' "FAILED: $try_what ($*)" >> "$FAIL"; }
 # lock_share DATA OUT ERR: the share of the lock symbols in the samples of DATA.
 # No OUT when perf report fails or finds no sample: "0.00% of 0.00%" is not a result.
 lock_share() {
-    local rep
-    rep=$(perf report -i "$1" --no-children --stdio -g none --sort symbol 2>> "$3") || return 1
-    printf '%s\n' "$rep" | awk '/^ +[0-9.]+%/ { n++; p = $1; sub("%", "", p); tot += p
+    ls_rep=$(perf report -i "$1" --no-children --stdio -g none --sort symbol 2>> "$3") || return 1
+    printf '%s\n' "$ls_rep" | awk '/^ +[0-9.]+%/ { n++; p = $1; sub("%", "", p); tot += p
             if ($0 ~ /futex|pthread_mutex|nxt_thread_mutex|lll_lock|lll_unlock|__lll_/) lock += p }
         END { if (!n) exit 1; printf "lock-related symbols: %.2f%% of %.2f%% sampled\n", lock, tot }' > "$2.tmp" \
         && mv "$2.tmp" "$2" && return 0
-    rm -f "$2.tmp"; echo "lock_share: no sample in $1" >> "$3"
+    rm -f "$2.tmp"; printf '%s\n' "lock_share: no sample in $1" >> "$3"
     return 1
 }
 
@@ -140,17 +144,19 @@ for w in $WORKLOADS; do
     LP=$!
     sleep 3
     pids=$(my_pids | paste -s -d, -)
-    [ -n "$pids" ] || echo "FAILED: no process of the kit is running for $w" >> "$FAIL"
-    echo "$w: pids $pids" >> "$OUT/pids.txt"
+    [ -n "$pids" ] || printf '%s\n' "FAILED: no process of the kit is running for $w" >> "$FAIL"
+    printf '%s\n' "$w: pids $pids" >> "$OUT/pids.txt"
     perf_args "$PERF_SCOPE" "$pids" "$srv"
 
     # A. samples of the kit's processes, or of the server cpus
-    has record && try "perf record $w" perf record -e "$PERF_EVENT" "${PERF_T[@]}" ${PERF_U[@]+"${PERF_U[@]}"} \
+    # shellcheck disable=SC2086  # PERF_T and PERF_U are option words (perf_args in lib.sh)
+    has record && try "perf record $w" perf record -e "$PERF_EVENT" $PERF_T ${PERF_TA+"$PERF_TA"} $PERF_U \
         -g -F 499 -o "$OUT/perf-$w.data" -- sleep "$PERF_SEC" 2> "$OUT/perf-$w.err" >/dev/null
 
     # B. futex calls: the kernel side of a contended pthread mutex
     if has futex && [ "$FUTEX_FORM" = tracepoint ]; then
-        try "futex tracepoint $w" perf stat "${PERF_T[@]}" -e 'syscalls:sys_enter_futex' -o "$OUT/futex-$w.txt" \
+        # shellcheck disable=SC2086  # as above
+        try "futex tracepoint $w" perf stat $PERF_T ${PERF_TA+"$PERF_TA"} -e 'syscalls:sys_enter_futex' -o "$OUT/futex-$w.txt" \
             -- sleep 10 2> "$OUT/futex-$w.err"
     elif has futex; then
         rp=""
@@ -160,7 +166,7 @@ for w in $WORKLOADS; do
         if [ -n "$rp" ] && command -v "$STRACE" >/dev/null; then
             try "strace futex $w" strace_futex "$rp" 10 "$OUT/futex-strace-$w.txt" "$OUT/futex-$w.err"
         else
-            echo "FAILED: strace futex $w (router pid '$rp', strace $(command -v "$STRACE" || echo missing))" >> "$FAIL"
+            printf '%s\n' "FAILED: strace futex $w (router pid '$rp', strace $(command -v "$STRACE" || echo missing))" >> "$FAIL"
         fi
     fi
 
@@ -174,31 +180,31 @@ for w in $WORKLOADS; do
 
     wait "$LP" 2>/dev/null
     stop_unit
-    read_oha "$OUT/load-$w.json" > /dev/null 2>&1 || echo "FAILED: load $w (no oha result in load-$w.json)" >> "$FAIL"
+    read_oha "$OUT/load-$w.json" > /dev/null 2>&1 || printf '%s\n' "FAILED: load $w (no oha result in load-$w.json)" >> "$FAIL"
 
     # the reports, with the load gone
-    has record && try "perf report $w" bash -c "perf report -i '$OUT/perf-$w.data' --no-children --stdio -g none \
+    has record && try "perf report $w" sh -c "perf report -i '$OUT/perf-$w.data' --no-children --stdio -g none \
         --percent-limit 0.5 --sort comm,symbol > '$OUT/top-$w.txt' 2>> '$OUT/perf-$w.err'"
     has record && try "lock share $w" lock_share "$OUT/perf-$w.data" "$OUT/lockshare-$w.txt" "$OUT/perf-$w.err"
-    has c2c && try "perf c2c report $w" bash -c "perf c2c report -i '$OUT/c2c-$w.data' --stdio -c pid,iaddr --full-symbols \
+    has c2c && try "perf c2c report $w" sh -c "perf c2c report -i '$OUT/c2c-$w.data' --stdio -c pid,iaddr --full-symbols \
         > '$OUT/c2c-$w.txt' 2>> '$OUT/c2c-$w.err'"
-    has c2c && try "perf c2c stats $w" bash -c "perf c2c report -i '$OUT/c2c-$w.data' --stats > '$OUT/c2c-$w-stats.txt' \
+    has c2c && try "perf c2c stats $w" sh -c "perf c2c report -i '$OUT/c2c-$w.data' --stats > '$OUT/c2c-$w-stats.txt' \
         2>> '$OUT/c2c-$w.err'"
     if [ "$C2C_G" = 1 ] && has c2c; then
-        try "perf c2c report -g $w" bash -c "perf c2c report -i '$OUT/c2cg-$w.data' --stdio -d lcl \
+        try "perf c2c report -g $w" sh -c "perf c2c report -i '$OUT/c2cg-$w.data' --stdio -d lcl \
             --call-graph=caller,0.5 --percent-limit 0.5 > '$OUT/c2cg-$w.txt' 2>> '$OUT/c2cg-$w.err'"
     fi
 done
 chmod -R a+r "$OUT" 2>/dev/null
 {
-    echo "profile V=$V N=$N WORKLOADS='$WORKLOADS' server cpus $(cpus_server "$N") load cpus $(cpus_load "$N")"
-    echo "perf: scope $PERF_SCOPE, level $PERF_LEVEL, user space only $PERF_USER_ONLY, event $PERF_EVENT," \
+    printf '%s\n' "profile V=$V N=$N WORKLOADS='$WORKLOADS' server cpus $(cpus_server "$N") load cpus $(cpus_load "$N")"
+    printf '%s %s\n' "perf: scope $PERF_SCOPE, level $PERF_LEVEL, user space only $PERF_USER_ONLY, event $PERF_EVENT," \
          "c2c ${C2C_FORM:-none}, futex ${FUTEX_FORM:-none}"
     cat "$OUT/pids.txt" 2>/dev/null
     for w in $WORKLOADS; do
         share=""
         has record && { share=$(cat "$OUT/lockshare-$w.txt" 2>/dev/null) || share="lock share: FAILED"; }
-        echo "$w: $share; load $(read_oha "$OUT/load-$w.json" 2>/dev/null || echo "FAILED: no oha result")"
+        printf '%s\n' "$w: $share; load $(read_oha "$OUT/load-$w.json" 2>/dev/null || echo "FAILED: no oha result")"
     done
     echo "failures: $(wc -l < "$FAIL")"
     cat "$FAIL"

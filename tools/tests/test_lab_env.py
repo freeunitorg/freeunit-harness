@@ -56,10 +56,10 @@ class LabEnvTest(unittest.TestCase):
         return self.run_cmd("sh", "-c", f'LAB_HARNESS={self.tmp}; . "{ENV_SH}"; {script}', env=env)
 
     def hosts(self, *args, env=None):
-        return self.run_cmd("bash", HOSTS, *args, env=env)
+        return self.run_cmd("sh", HOSTS, *args, env=env)
 
     def unit_build(self, *args, env=None):
-        return self.run_cmd("bash", UNIT_BUILD, *args, env=env)
+        return self.run_cmd("sh", UNIT_BUILD, *args, env=env)
 
     def make_src(self, name="freeunit", configure=True):
         src = os.path.join(self.tmp, name)

@@ -32,7 +32,7 @@
 #
 # The work is done by python3 (stdlib only); the code follows the marker line.
 set -eu
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 command -v python3 >/dev/null 2>&1 || { echo "check-public: python3 not found" >&2; exit 2; }
 exec python3 -I -c "
 import sys

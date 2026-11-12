@@ -39,13 +39,14 @@ case ${1:-} in
 esac
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 HARNESS=$(CDPATH='' cd -- "$HERE/../../.." && pwd)
+# shellcheck disable=SC2034  # read by tools/lib/env.sh
 LAB_HARNESS=$HARNESS
 # shellcheck source=tools/lib/env.sh
 . "$HARNESS/tools/lib/env.sh"
 # shellcheck disable=SC2119  # no options: the defaults
 lab_env_load
 
-die() { echo "run.sh: $*" >&2; exit 1; }
+die() { printf '%s\n' "run.sh: $*" >&2; exit 1; }
 for k in PERF_HOST REMOTE_WORKDIR CLAIM_DIR OHA; do
     eval "[ -n \"\${$k:-}\" ]" || die "$k is not set (run/lab.env, see tools/perf-lab/lab.env.example)"
 done
@@ -99,7 +100,7 @@ mkdir -p "\$CLAIM_DIR"
 exec 9> "\$CLAIM_DIR/.perflab.lock"
 flock -w 60 9 || { echo "BUSY: the claim lock is held"; exit 75; }
 o=\$(other_claims "")
-[ -z "\$o" ] || { echo "BUSY: claimed by:\$o"; exit 75; }
+[ -z "\$o" ] || { printf '%s\n' "BUSY: claimed by:\$o"; exit 75; }
 # 9>&-: the holder must not inherit the lock. It lives for the whole claim, and
 # tools/perf-lab/remote.sh takes the same lock before it reads the claims.
 nohup sleep $((min * 60)) >/dev/null 2>&1 9>&- &
@@ -109,10 +110,10 @@ printf 'format=perflab-1\nwho=%s\npurpose=scaling kit\nhost=%s\npid=%s\nstarted=
     "\$(id -un)@\$(uname -n)" "\$(uname -n)" "\$pid" "\$now" "\$((now + $min * 60))" > $(q "$claim")
 echo "pid=\$pid"
 EOF
-    ) || { echo "$out"; exit 75; }
+    ) || { printf '%s\n' "$out"; exit 75; }
     mkdir -p "$LOCAL"
     printf 'claim=%s\n%s\n' "$claim" "$out" > "$CLAIM_REC"
-    echo "claimed: ${claim##*/} for $min minutes"
+    printf '%s\n' "claimed: ${claim##*/} for $min minutes"
 }
 
 stage_release() {
@@ -142,7 +143,7 @@ rm -f "\$f"
 EOF
     )
     rm -f "$CLAIM_REC"
-    echo "released: ${claim##*/}${held:+ ($held)}"
+    printf '%s\n' "released: ${claim##*/}${held:+ ($held)}"
 }
 
 push_scripts() {
@@ -165,9 +166,9 @@ stage_build() {
         sha=$(git -C "$repo" rev-parse --verify "$ref^{commit}") || die "no commit $ref in $repo"
         t=$RD/trees/$v
         if [ "$(rsh "cat $(q "$t/.sha") 2>/dev/null || true")" = "$sha" ] && rsh "test -x $(q "$t/build/lab_capp")"; then
-            echo "build: $v is current ($sha)"; continue
+            printf '%s\n' "build: $v is current ($sha)"; continue
         fi
-        echo "build: $v = $sha"
+        printf '%s\n' "build: $v = $sha"
         rsh "rm -rf $(q "$t") && mkdir -p $(q "$t")"
         git -C "$repo" archive "$sha" | rsh "tar -x -C $(q "$t")"
         rsh "echo $sha > $(q "$t/.sha")"
@@ -192,7 +193,7 @@ stage_shim() {
         rsh "docker run --rm --user \$(id -u):\$(id -g) -v $(q "$RD/scripts"):/s -w /s $(q "$LAB_IMAGE") $cc" \
             || die "shim build failed"
     fi
-    echo "shim built: $RD/scripts/mutexshim.so"
+    printf '%s\n' "shim built: $RD/scripts/mutexshim.so"
 }
 
 # start TAG SCRIPT KEY=VALUE...: run SCRIPT detached, so an ssh drop cannot
@@ -209,7 +210,7 @@ start() {
         [ "${PERF_KERNEL:-0}" = 1 ] && echo "run.sh: PERF_KERNEL=1 has no effect with NATIVE=1" >&2
         # R holds the control socket: keep it short, a unix socket path has at most 107 bytes
         rsh "cd $(q "$RD") && env $envs OUT=$(q "$out") TREES=$(q "$RD/trees") R=$(q "/tmp/scaling-$tag") \
-            WWW=$(q "$RD/www-$tag") OHA=$(q "$OHA") setsid nohup bash $(q "$RD/scripts/$script") \
+            WWW=$(q "$RD/www-$tag") OHA=$(q "$OHA") setsid nohup sh $(q "$RD/scripts/$script") \
             > $(q "$out/run.log") 2>&1 < /dev/null & echo \$! > $(q "$out/pid")"
     else
         e=""
@@ -229,9 +230,9 @@ start() {
         rsh "docker run -d --rm --name $(q "scaling-$tag") $caps \
             -v $(q "$RD/trees"):/t:ro -v $(q "$RD/scripts"):/lab:ro -v $(q "$out"):/out \
             -v $(q "$OHA"):/usr/local/bin/oha:ro $e -e OUT=/out $(q "$LAB_IMAGE") \
-            bash -c $(q "bash /lab/$script > /out/run.log 2>&1")" >/dev/null
+            sh -c $(q "sh /lab/$script > /out/run.log 2>&1")" >/dev/null
     fi
-    echo "started $script as $tag; log $out/run.log"
+    printf '%s\n' "started $script as $tag; log $out/run.log"
 }
 
 # check_names VARIANTS WORKLOADS: each word is a path component in sweep.sh,
@@ -290,23 +291,23 @@ stage_watch() {
     while :; do
         st=$(rsh "CLAIM_DIR=$(q "$CLAIM_DIR") LEGACY_CLAIM_MAX_H=$(q "${LEGACY_CLAIM_MAX_H:-72}") sh -s" <<EOF
 $OTHER_CLAIMS
-if [ -f $(q "$out/FAILED") ]; then echo "FAILED \$(cat $(q "$out/FAILED"))"; exit 0; fi
+if [ -f $(q "$out/FAILED") ]; then printf '%s\n' "FAILED \$(cat $(q "$out/FAILED"))"; exit 0; fi
 if [ -f $(q "$out/DONE") ] && [ -s $(q "$out/$file") ]; then echo DONE; exit 0; fi
 if [ -f $(q "$out/pid") ]; then kill -0 "\$(cat $(q "$out/pid"))" 2>/dev/null && echo RUNNING || echo GONE
 else docker ps -q --filter name=$(q "^scaling-$tag\$") | grep -q . && echo RUNNING || echo GONE; fi
-echo "claims:\$(other_claims $(q "$(claim_file)"))"
+printf '%s\n' "claims:\$(other_claims $(q "$(claim_file)"))"
 EOF
         ) || { echo "watch: ssh failed, retrying"; sleep 60; continue; }
         case $st in
-            DONE*) echo "done: $out/$file"; return 0 ;;
-            FAILED*) echo "failed: ${st#FAILED }; see $out/run.log"; return 5 ;;
+            DONE*) printf '%s\n' "done: $out/$file"; return 0 ;;
+            FAILED*) printf '%s\n' "failed: ${st#FAILED }; see $out/run.log"; return 5 ;;
         esac
         foreign=$(printf '%s\n' "$st" | sed -n 's/^claims://p')
         if [ -n "$foreign" ]; then
             rsh "touch $(q "$out/STOP")"
-            echo "foreign claim:$foreign; STOP written at $(date -u +%FT%TZ)"; return 3
+            printf '%s\n' "foreign claim:$foreign; STOP written at $(date -u +%FT%TZ)"; return 3
         fi
-        case $st in GONE*) echo "the run is gone without $file; see $out/run.log"; return 4 ;; esac
+        case $st in GONE*) printf '%s\n' "the run is gone without $file; see $out/run.log"; return 4 ;; esac
         sleep 60
     done
 }
@@ -316,7 +317,7 @@ stage_fetch() {
     check_name tag "$tag"
     mkdir -p "$LOCAL/$tag"
     rsync -a "$TARGET:$RD/results/$tag/" "$LOCAL/$tag/"
-    echo "fetched to $LOCAL/$tag"
+    printf '%s\n' "fetched to $LOCAL/$tag"
 }
 
 stage=$1
