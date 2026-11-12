@@ -1,0 +1,3270 @@
+#!/usr/bin/env python3
+# unit-registry: a greppable code registry for the FreeUnit C tree.
+#
+# It answers, from flat text artifacts and in milliseconds, the questions that
+# otherwise cost minutes of ad-hoc `rg` and are easy to get wrong:
+#
+#   who calls this           unit-registry callers nxt_utf8_encode
+#   is it dead in production unit-registry uses nxt_utf8_is_valid
+#   what does the binary     unit-registry abi
+#   export that nothing uses
+#   where is this constant   unit-registry const NXT_HTTP_REQUEST_TIMEOUT
+#   what includes what       unit-registry includes src/nxt_conf.c
+#
+# (These five answer on FreeUnit master at d54b109a.)
+#
+# There is no database. The index is a directory of TSV files, greppable with
+# the same `rg` you were already reaching for, diffable between two refs, and
+# reviewable by eye. `unit-registry index` rebuilds it in a few seconds
+# (4.5 to 5 s for the FreeUnit tree on a laptop). The cross-check needs ast-grep on PATH or
+# --astgrep; without it `index` fails, and --no-crosscheck builds an index
+# that `verify` refuses as unverified.
+#
+# The file:line citations and counts in this header and in the comments below
+# are the cases that shaped the tool, as they stood on the tree each was found
+# on. Lines drift and some symbols are gone (nxt_utf8_casecmp, nxt_utf8_next,
+# nxt_fiber_main_create are not in FreeUnit master): read them as history.
+# `verify` pins the ones that still matter, and skips a check whose symbol is
+# absent at the indexed ref.
+#
+#
+# WHY THIS EXTRACTION STRATEGY
+#
+# Unit inherits nginx's house style, and one rule of it is mechanically
+# load-bearing here: a function *definition* puts the return type on its own
+# line, so the function name starts at column 1 (docs/style.md, verified
+# against the tree). That makes the top level of a translation unit cheap to
+# scan exactly, without a C parser.
+#
+# So the primary extractor is a two-stage lexer:
+#
+#   1. a character state machine that blanks comments, string and character
+#      literals, and preprocessor directives, preserving offsets;
+#   2. a brace-depth scanner over the blanked text that walks the top level of
+#      the translation unit and classifies each statement.
+#
+# Stage 1 is not an optimisation, it is the correctness step. Without it
+#   nxt_log_alert(thr->log, "nxt_utf8_casecmp() failed")
+# registers as a call to nxt_utf8_casecmp (src/test/nxt_utf8_test.c:185) and
+#   /* nxt_utf8_next() expects a valid UTF-8 string. */
+# registers as a reference to a function that in fact has none anywhere in the
+# tree (src/nxt_utf8.h:29). Both were real lines in the tree this was written
+# on; a registry that counts them is worse than no registry, because it is
+# confidently wrong.
+#
+# Alternatives considered and rejected:
+#
+#   tree-sitter: this is the tool that already failed here. A previous index
+#     silently truncated nxt_router.c to 44% of its lines, because parse ERROR
+#     nodes ended extraction early and the chunk count still looked plausible.
+#     A whole-file lexer cannot truncate: it either reaches EOF or raises.
+#   clang / compile_commands.json: needs a configured build, so it cannot
+#     index a branch, and the registry must index the main branch and an
+#     open branch without building either.
+#   universal-ctags: it is not a harness dependency, and it does not carry
+#     the production-vs-test classification that is the point of the usage
+#     registry.
+#   ast-grep alone: it *is* a real C parser and it is fast, but it fails to an
+#     empty result set rather than an error, so a broken query and a clean file
+#     are indistinguishable. It is used here as an independent cross-check
+#     (below) rather than as the source of truth.
+#
+#
+# THE GATES
+#
+# Each of these exists because of a specific way this has already gone wrong.
+# They run on every `index` and a failure is loud and non-zero-exit.
+#
+#   coverage   For every indexed file the scanner accounts for each line as
+#              function body, top-level declaration, object, directive, comment
+#              or blank, and compares the total against wc -l. A non-trivial .c
+#              file yielding zero function definitions is a hard failure. Never
+#              trust a symbol count on its own: the truncated index had a
+#              plausible one.
+#   balance    A file that ends at nonzero brace depth, a body that runs to EOF
+#              without closing, or a `}` seen at depth 0, all mean a definition
+#              has swallowed the rest of the translation unit. Coverage alone
+#              cannot catch this: a runaway body "accounts for" every line it
+#              eats, which is exactly how nxt_openssl.c read as fully covered
+#              while 23 of its 27 definitions were missing. A stray `}` must
+#              not be clamped to zero either. That let a mutated nxt_router.c
+#              lose 105 of 106 definitions and still report depth 0.
+#   crosscheck ast-grep re-extracts function definitions with a real C grammar.
+#              Per-file name-set disagreements are recorded as findings, and a
+#              shortfall (ast-grep finding 4+ definitions where the scanner
+#              found under half) FAILS the run. Merely recording it is not
+#              enough: a mutated nxt_router.c that kept 1 of its 106
+#              definitions reported "1 vs 106" here and still exited 0. An
+#              empty ast-grep result tree-wide, or a nonzero exit, is treated
+#              as a broken cross-check, never as agreement. Where an #if/#else
+#              straddles a brace the scanner reads each other branch in a
+#              second pass, so a definition only that branch opens is still
+#              indexed; one ast-grep finds there and no pass does is reported
+#              (disagreements.tsv, MANIFEST conditional_hidden_files), not
+#              fatal.
+#   read       A source file or directory that cannot be read, an unreadable
+#              auto/make, auto/sources or auto/modules script, and a .c file
+#              that reads as C++, fail the index: its references, the
+#              classification or the public ABI would be missing.
+#   column1    The house style predicts the definition name sits at column 1.
+#              Where the scanner and that prediction disagree the definition is
+#              flagged. The outliers in the tree (MANIFEST col1_outliers) are
+#              genuine style outliers (the return type sharing the name's line,
+#              as for nxt_conf_vldt_match_encoded_patterns_sets in
+#              src/nxt_conf_validation.c), not parser confusion.
+#
+# The git ref indexed is stamped in MANIFEST, and --ref indexes any ref without
+# touching your working tree. That is load-bearing rather than tidy:
+# nxt_utf8_is_valid once had zero callers on the main branch and one production
+# caller on an open fix branch. A registry that only knew the main branch would
+# have reported it dead and got it deleted.
+#
+# NAME RESOLUTION IS BY BARE NAME, WITH ONE EXCEPTION
+#
+# A reference is recorded against the identifier it spells, not against a
+# resolved declaration, so two functions that share a name share their
+# references in `uses` and `callers`. Parameters, block-scope locals and
+# struct or union member declarations are the exception the other way: in
+# its own scope a local is the local, so it is never recorded as a use of a
+# file-scope symbol of the same name. The one place a symbol is scoped is `dead`:
+# a `static` definition in a .c file counts only the references in its own
+# file, and a reference in a file that has its own static of that name is not
+# credited to any other definition. Statics in headers (`nxt_inline`) are
+# still matched by bare name, because every includer may use them. Treat
+# `dead` as a candidate list to confirm by reading, never as proof.
+#
+# WHAT IT DOES NOT SEE
+#
+#   Struct and union members, parameters and locals are not symbols: only
+#   file-scope names are registered. A local that shares a file-scope name
+#   (`error`, `handler`) is not counted as a use of it inside the local's
+#   scope (the rest of its block; a `for` declaration, that loop). A local
+#   declared by a macro, or inside a GNU statement expression, is not seen.
+#   A whole-body macro, one whose expansion holds a function's braces, hides
+#   that function from the scanner (the directive is blanked) and from
+#   ast-grep alike, with every gate green. A function defined through a
+#   macro invocation, PHP_FUNCTION(name) { ... }, is registered under its
+#   argument; the macro row (form=macro) is not a function and `dead` skips
+#   it. Calls through function pointers and token pasting are not seen. Go
+#   is read only for `C.name` (see SCAN_ROOTS). A K&R (old-style) definition,
+#   `int f(a, b) int a; int b; { ... }`, is not indexed, and its parameter
+#   declarations read as file-scope objects; FreeUnit has none. Generated
+#   headers (build/include/nxt_auto_config.h, nxt_version.h) are not read, so
+#   NXT_VERSION and the NXT_HAVE_* values of configure are unknown names.
+#   Known limits, none of which the FreeUnit tree hits today: a definition
+#   that returns a function pointer shows a cut signature; a parameter is
+#   excluded by line, so a body use on the line of a parameter declaration
+#   is dropped; a block-scope `extern int y;` reads as a new local, so its
+#   uses in that block are not counted for the file-scope `y`.
+#
+# A constant (a #define or an enum member) named in #if, #elif, #ifdef,
+# #ifndef or defined() is a use of kind `pp`. It is counted in `uses`, `const`
+# and `dead`, and it is neither a call nor an address-taken reference, so
+# `callers` does not list it. Any other name there is not a use: the
+# preprocessor knows no functions or objects. The #ifndef of an include guard
+# (the first conditional of a file, followed at once by `#define` of the same
+# name) is not a use: an include guard reports 0 uses unless some other file
+# tests it. Only that first form is a guard: a guard after an `extern "C"`
+# block, or a second one in the same file, counts as a `pp` use.
+#
+# An #if branch is dropped when its condition is constant false. pp_const()
+# reads decimal and octal integers, defined(), `! + - * < > <= >= == != && ||`
+# and parentheses. Anything else, such as a hex literal, an unsigned literal,
+# `?:` or a macro name, makes the condition unknown and the branch is kept.
+#
+# `callers` lists direct calls, then a separate "address-taken (not a direct
+# call):" group: every non-call reference, such as `rp->handler = &fn;`. The
+# dispatch through that pointer is not seen, so `--transitive` walks call
+# edges only and ends with the count of address-taken references it did not
+# follow.
+#
+# Reads the source tree; never writes to it. An index whose gates failed still
+# writes its artifacts, so they can be inspected, but every query except
+# `stat` refuses to answer from it. A source file or directory that cannot be
+# read is a gate failure: its references would otherwise vanish silently. `verify` also
+# refuses an index built with --no-crosscheck or missing an artifact.
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from collections import defaultdict
+
+VERSION = "1"
+
+# Artifact schema version. Bump when a column changes meaning, so a stale
+# index is rejected rather than silently misread.
+SCHEMA = "1"
+
+
+# --------------------------------------------------------------------------
+# Classification
+#
+# Which bucket a file's references count towards. This is the single most
+# valuable field in the registry: it is what makes "dead in production"
+# answerable, and it is why "nxt_utf8_casecmp has 3 references" is a useless
+# answer while "0 production, 2 test, 1 fuzzing" is an actionable one.
+#
+# The module source list is read from auto/modules/* rather than guessed from
+# path prefixes, because two module sources do not live in a module directory:
+# src/nxt_php_sapi.c and src/nxt_java.c. Only the code of those scripts is
+# read, not their shell comments, and a file that auto/sources lists is core
+# code whatever a module script names.
+# --------------------------------------------------------------------------
+
+CTX_PROD = "prod"
+CTX_TEST = "test"
+CTX_FUZZ = "fuzz"
+CTX_MODULE = "module"
+CTX_TOOL = "tool"
+
+CONTEXT_ORDER = [CTX_PROD, CTX_TEST, CTX_FUZZ, CTX_MODULE, CTX_TOOL]
+
+C_EXT = (".c", ".h")
+
+# Files that are not C. src/nodejs/unit-http/ is a node-gyp C++ addon. It is
+# not in auto/modules and Unit's configure never compiles it, so a C scanner
+# and a C grammar will disagree about it for reasons that say nothing about
+# either. Detected from content rather than by path, so a new one is caught.
+# Read on the masked text: the words in a comment, and the standard
+# `#ifdef __cplusplus / extern "C" {` guard of a C header, are not C++ code.
+# The excluded paths are listed in MANIFEST, and a .c file among them fails
+# the index: it is C by name, and dropping it would drop its references.
+CXX_MARKERS = re.compile(
+    r'^\s*(class\s+\w|namespace\s+\w|template\s*<)', re.M)
+
+
+def is_cxx(code: str) -> bool:
+    return bool(CXX_MARKERS.search(code))
+
+# Directories that are never source of interest.
+SKIP_DIRS = {".git", "build", "node_modules", "__pycache__"}
+
+# Roots we walk at all. `go/` holds the Go module: a cgo shim in C
+# (go/nxt_cgo_lib.c, which calls nxt_unit_run_ctx) and Go files that call the
+# public libunit API directly as `C.name`: nxt_unit_run_shared from
+# go/port.go, nxt_unit_dequeue_request from go/request.go, nxt_cgo_run from
+# go/unit.go. Those Go call sites are not C, so the scanner never sees them;
+# index_go() reads them as module-context references instead (GO_C_REF).
+# Without that, `uses nxt_unit_dequeue_request` said "NO REFERENCES ANYWHERE".
+# njs/ and pkg/contrib/ are separate upstream checkouts vendored into the
+# tree, not FreeUnit source, and are deliberately not indexed.
+SCAN_ROOTS = ["src", "test", "fuzzing", "tools", "auto", "go"]
+
+
+SH_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$", re.M)
+SRC_C_RE = re.compile(r"\bsrc/[A-Za-z0-9_/]+\.c\b")
+
+
+def unreadable_msg(root: str, e: OSError,
+                   what="what it holds is missing from the index") -> str:
+    """The gate failure for a path that exists and cannot be read."""
+    path = os.path.relpath(e.filename, root) if e.filename else "?"
+    return "read: cannot read %s (%s): %s" % (path, e.strerror or e, what)
+
+
+def read_build_file(root: str, rel: str, errors: list):
+    """The text of a build-system file, or None when it is absent.
+
+    One that exists and cannot be read is a gate failure, not an empty
+    file: the module list and the public headers come from these.
+    """
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", errors="replace") as fh:
+            return fh.read()
+    except OSError as e:
+        errors.append(unreadable_msg(root, e))
+        return None
+
+
+def _sh_sources(root: str, rel: str, errors: list) -> list:
+    """The src/*.c paths a shell build script names, outside its comments.
+
+    A comment can name a core file: auto/modules/php names
+    src/nxt_application.c in one, and reading it made that core file
+    module code.
+    """
+    text = read_build_file(root, rel, errors)
+    return SRC_C_RE.findall(SH_COMMENT.sub("", text)) if text else []
+
+
+def read_module_sources(root: str, errors: list) -> dict:
+    """Map module source path -> module name, from the build system itself.
+
+    A file that auto/sources lists is core code, whatever a module names.
+    """
+    mods = {}
+    mdir = os.path.join(root, "auto", "modules")
+    if not os.path.isdir(mdir):
+        return mods
+    core = set(_sh_sources(root, "auto/sources", errors))
+    try:
+        names = sorted(os.listdir(mdir))
+    except OSError:
+        return mods     # auto/ is a scan root: walk_sources() reports it
+    for name in names:
+        for src in _sh_sources(root, "auto/modules/" + name, errors):
+            if src not in core:
+                mods.setdefault(src, name)
+    return mods
+
+
+def read_public_headers(root: str, errors: list) -> set:
+    """The headers `make libunit-install` actually installs.
+
+    libunit is a shipped static library with a pkg-config file; language
+    modules and third-party applications compile against these headers. A
+    function declared in one has consumers this tree cannot see, so "no
+    references in the tree" is emphatically NOT "safe to delete" for it:
+    nxt_unit_run_shared and nxt_unit_dequeue_request have no in-tree caller and
+    are both public API. Read from the install recipe rather than a name
+    pattern, so the set follows the build.
+    """
+    text = read_build_file(root, "auto/make", errors)
+    if text is None:
+        return set()
+    m = re.search(r"^libunit-install:.*?(?=^\S)", text, re.M | re.S)
+    if not m:
+        return set()
+    return set(re.findall(r"\bsrc/[A-Za-z0-9_/]+\.h\b", m.group(0)))
+
+
+class Classifier:
+    def __init__(self, root: str, errors: list):
+        self.module_srcs = read_module_sources(root, errors)
+        # Module directories, derived from the module source list.
+        self.module_dirs = set()
+        for p in self.module_srcs:
+            d = os.path.dirname(p)
+            if d != "src":
+                self.module_dirs.add(d + "/")
+
+    def context(self, rel: str) -> str:
+        if rel.startswith("src/test/") or rel.startswith("test/"):
+            return CTX_TEST
+        if rel.startswith("fuzzing/"):
+            return CTX_FUZZ
+        if rel.startswith("go/"):
+            return CTX_MODULE
+        if rel in self.module_srcs:
+            return CTX_MODULE
+        for d in self.module_dirs:
+            if rel.startswith(d):
+                return CTX_MODULE
+        # A header beside a module source belongs to that module.
+        if rel.startswith("src/"):
+            return CTX_PROD
+        return CTX_TOOL
+
+
+# --------------------------------------------------------------------------
+# Stage 1: the lexer
+#
+# Blank out everything that is not code, preserving byte offsets and line
+# structure so every later stage can map an offset back to a line. Directives
+# are captured with their *original* text, because masking would eat the path
+# in #include "nxt_main.h" and the value in #define NXT_X "y".
+# --------------------------------------------------------------------------
+
+class Masked:
+    __slots__ = ("code", "brace_code", "usage_code", "src", "line_start",
+                 "directives", "nlines", "comment_lines", "path",
+                 "cond_conflicts", "define_spans", "cond_marks", "pp_lines")
+
+    def __init__(self, path, src, code, line_start, directives, comment_lines,
+                 brace_code, cond_conflicts, usage_code, define_spans,
+                 cond_marks=(), pp_lines=frozenset()):
+        self.path = path
+        self.src = src
+        self.code = code                    # for identifiers and usage
+        self.brace_code = brace_code        # for brace depth only, see below
+        self.line_start = line_start        # offset -> line, via bisect
+        self.directives = directives        # (line, raw_text)
+        self.comment_lines = comment_lines  # set of lines with any comment
+        self.cond_conflicts = cond_conflicts
+        self.usage_code = usage_code      # macro bodies kept, see mask()
+        self.define_spans = define_spans  # (macro name, first line, last line)
+        self.cond_marks = cond_marks      # (start, end, kind, text) per #if..
+        self.pp_lines = pp_lines          # lines of #if/#elif/#ifdef/#ifndef
+        self.nlines = len(line_start)
+
+    def line_of(self, off: int) -> int:
+        # line_start[i] is the offset of line i+1
+        lo, hi = 0, len(self.line_start) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.line_start[mid] <= off:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo + 1
+
+
+DEFINE_NAME_RE = re.compile(r"#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)")
+COND_RE = re.compile(r"#\s*(ifdef|ifndef|elif|else|endif|if)\b")
+GUARD_RE = re.compile(r"#\s*(?:ifndef\s+|if\s*!\s*defined\s*\(?\s*)"
+                      r"([A-Za-z_]\w*)\s*\)?\s*$")
+
+
+def include_guard(cond_marks):
+    """(start, end) of the #ifndef X of an include guard, else None.
+
+    A guard is the first conditional of the file, `#ifndef X` or
+    `#if !defined(X)`, whose next directive is `#define X`. Its test is not
+    a use of X: counting it would make every guard look used.
+    """
+    for i, (start, end, kind, dtext) in enumerate(cond_marks):
+        if kind is None:
+            continue
+        m = GUARD_RE.match(dtext)
+        if not m or i + 1 >= len(cond_marks):
+            return None
+        dm = DEFINE_NAME_RE.match(cond_marks[i + 1][3])
+        if dm and dm.group(1) == m.group(1):
+            return start, end
+        return None
+    return None
+
+_PP_TOKEN = re.compile(r"\s*(?:(\d+)([uUlL]*)|(defined)\s*(?:\(\s*\w+\s*\)|\w+)"
+                       r"|(&&|\|\||==|!=|<=|>=|[!()<>+*-]))")
+
+# Binary operators by C precedence, loosest first. Each level is read left
+# to right, so `3 > 2 > 1` is `(3 > 2) > 1`, which is 0, as in C.
+_PP_LEVELS = (("||",), ("&&",), ("==", "!="), ("<", ">", "<=", ">="),
+              ("+", "-"), ("*",))
+_PP_OPS = {
+    "||": lambda a, b: int(bool(a) or bool(b)),
+    "&&": lambda a, b: int(bool(a) and bool(b)),
+    "==": lambda a, b: int(a == b), "!=": lambda a, b: int(a != b),
+    "<": lambda a, b: int(a < b), ">": lambda a, b: int(a > b),
+    "<=": lambda a, b: int(a <= b), ">=": lambda a, b: int(a >= b),
+    "+": lambda a, b: a + b, "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+}
+# Deeper nesting of parentheses and unary operators reads as unknown (a live
+# branch) instead of exhausting the Python stack.
+PP_MAX_DEPTH = 64
+
+
+def _pp_eval(toks, bits):
+    """The value of the token list, with defined() number k set to bit k."""
+    pos = 0
+
+    def binary(level, depth):
+        nonlocal pos
+        if level == len(_PP_LEVELS):
+            return unary(depth)
+        v = binary(level + 1, depth)
+        while pos < len(toks) and toks[pos] in _PP_LEVELS[level]:
+            op = toks[pos]
+            pos += 1
+            v = _PP_OPS[op](v, binary(level + 1, depth))
+        return v
+
+    def unary(depth):
+        nonlocal pos
+        if depth > PP_MAX_DEPTH or pos >= len(toks):
+            raise ValueError
+        t = toks[pos]
+        pos += 1
+        if isinstance(t, int):
+            return t
+        if isinstance(t, tuple):
+            return (bits >> t[1]) & 1
+        if t == "!":
+            return int(not unary(depth + 1))
+        if t == "-":
+            return -unary(depth + 1)
+        if t == "+":
+            return unary(depth + 1)
+        if t == "(":
+            v = binary(0, depth + 1)
+            if pos >= len(toks) or toks[pos] != ")":
+                raise ValueError
+            pos += 1
+            return v
+        raise ValueError
+
+    v = binary(0, 0)
+    if pos != len(toks):
+        raise ValueError
+    return v
+
+
+def pp_const(expr: str):
+    """True or False for an #if/#elif expression that is constant, else None.
+
+    `#if 0` is not the only spelling of a dead branch: `#if !1` and
+    `#if 0 && defined(X)` are false whatever is defined. `defined(X)` is
+    unknown, so it is tried both ways, and the expression is constant only if
+    every way agrees. Any other identifier makes it unknown (a live branch).
+    """
+    toks, i, n_defined = [], 0, 0
+    while i < len(expr):
+        if expr[i:].strip() == "":
+            break
+        m = _PP_TOKEN.match(expr, i)
+        if not m:
+            return None
+        if m.group(1) is not None:
+            # Unsigned arithmetic is not modelled (`0u - 1 > 0` is true in
+            # C), so an unsigned literal makes the expression unknown.
+            if "u" in m.group(2).lower():
+                return None
+            d = m.group(1)
+            try:
+                toks.append(int(d, 8) if d.startswith("0") else int(d))
+            except ValueError:      # 08, 09
+                return None
+        elif m.group(3):
+            toks.append(("D", n_defined))
+            n_defined += 1
+        else:
+            toks.append(m.group(4))
+        i = m.end()
+    if not toks or n_defined > 4:
+        return None
+    seen = set()
+    for bits in range(1 << n_defined):
+        try:
+            seen.add(bool(_pp_eval(toks, bits)))
+        except ValueError:
+            return None
+    return seen.pop() if len(seen) == 1 else None
+
+
+def _cond_expr(dtext: str) -> str:
+    m = re.match(r"#\s*(?:el)?if\b(.*)", dtext, re.S)
+    return m.group(1) if m else ""
+
+
+def mask(path: str, src: str) -> Masked:
+    """Blank what is not code, keeping byte offsets and lines intact.
+
+    Two views are produced over the same offsets:
+
+      code        comments, literals and whole preprocessor directives blanked.
+                  The top-level parser and the brace scanner read this.
+      usage_code  the same, except the *body* of every #define is kept. Macro
+                  bodies are real code and blanking them wholesale is how
+                  nxt_conn_sys_socket (src/nxt_conn_connect.c:14) came to be
+                  reported as having no caller anywhere: its only reference is
+                  inside the #define nxt_conn_connect body at src/nxt_conn.h:296,
+                  which is live from src/nxt_h1proto.c:2411 and three sites in
+                  src/nxt_conn_proxy.c. Nine functions were wrong this way,
+                  including nxt_unit_close_impl, which src/nxt_unit.c:206 wraps
+                  and that file then calls 24 times.
+
+    A `#if 0` branch is blanked in both views: it is not compiled, so neither
+    its definitions nor its references are real.
+    """
+    n = len(src)
+    buf = list(src)     # -> code
+    ubuf = list(src)    # -> usage_code
+    directives = []
+    cond_marks = []
+    define_spans = []
+    pp_lines = set()
+    comment_lines = set()
+
+    line_start = [0]
+    for i, ch in enumerate(src):
+        if ch == "\n":
+            line_start.append(i + 1)
+
+    def line_of(off):
+        lo, hi = 0, len(line_start) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if line_start[mid] <= off:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo + 1
+
+    def blank(lo, hi, both=True):
+        for k in range(lo, min(hi, n)):
+            if src[k] != "\n":
+                buf[k] = " "
+                if both:
+                    ubuf[k] = " "
+
+    def restore(lo, hi, noncode):
+        # Put src[lo:hi] back into usage_code; literals and comments in it
+        # stay blank.
+        for k in range(lo, min(hi, n)):
+            if src[k] != "\n":
+                ubuf[k] = src[k]
+        for a, b in noncode:
+            for k in range(max(a, lo), min(b, n)):
+                if src[k] != "\n":
+                    ubuf[k] = " "
+
+    i = 0
+    at_line_start = True
+    while i < n:
+        ch = src[i]
+
+        if ch == "\n":
+            at_line_start = True
+            i += 1
+            continue
+
+        if ch in " \t\r":
+            i += 1
+            continue
+
+        # ---- block comment
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            for ln in range(line_of(i), line_of(min(j, n - 1) if n else 0) + 1):
+                comment_lines.add(ln)
+            i = j
+            continue
+
+        # ---- line comment
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            comment_lines.add(line_of(i))
+            i = j
+            continue
+
+        # ---- preprocessor directive (only at logical line start)
+        if ch == "#" and at_line_start:
+            start = i
+            j = i
+            raw = []
+            # Comments and literals inside the directive: blanked from the
+            # macro body that usage_code restores below.
+            noncode = []
+            while j < n:
+                # A literal is copied whole: `/*` or `//` inside one, as in
+                # `#define NXT_GLOB "src/*.c"`, does not open a comment.
+                # Taking it for one cut the value short and, for `/*`, left
+                # a phantom block comment that blanked the rest of the file.
+                if src[j] in "\"'":
+                    quote = src[j]
+                    lit = j
+                    raw.append(src[j])
+                    j += 1
+                    while j < n and src[j] != "\n":
+                        if src[j] == "\\" and j + 1 < n:
+                            raw.append(" " if src[j + 1] == "\n"
+                                       else src[j:j + 2])
+                            j += 2
+                            continue
+                        raw.append(src[j])
+                        j += 1
+                        if src[j - 1] == quote:
+                            break
+                    noncode.append((lit, j))
+                    continue
+                # A comment inside a directive is one space, and the
+                # directive goes on after it: `#if /* off */ 0` is `#if 0`,
+                # and a commented continuation line of a macro does not end
+                # the macro (the rest of it is not top-level code).
+                if src[j] == "/" and j + 1 < n and src[j + 1] == "*":
+                    e = src.find("*/", j + 2)
+                    e = n if e < 0 else e + 2
+                    for ln in range(line_of(j), line_of(max(j, e - 1)) + 1):
+                        comment_lines.add(ln)
+                    noncode.append((j, e))
+                    raw.append(" ")
+                    j = e
+                    continue
+                if src[j] == "/" and j + 1 < n and src[j + 1] == "/":
+                    e = j
+                    while e < n and src[e] != "\n":
+                        e += 1
+                    comment_lines.add(line_of(j))
+                    noncode.append((j, e))
+                    j = e
+                    break
+                if src[j] == "\n":
+                    k = j - 1
+                    while k >= start and src[k] in " \t\r":
+                        k -= 1
+                    if k >= start and src[k] == "\\":
+                        # The backslash and the newline are one space.
+                        while raw and raw[-1] in " \t\r":
+                            raw.pop()
+                        if raw and raw[-1] == "\\":
+                            raw[-1] = " "
+                        else:
+                            raw.append(" ")
+                        j += 1
+                        continue
+                    break
+                raw.append(src[j])
+                j += 1
+
+            dtext = "".join(raw).strip()
+            blank(start, j)
+
+            dm = DEFINE_NAME_RE.match(src, start)
+            if dm:
+                # Keep the macro body in usage_code. The body begins after the
+                # name, or after the parameter list for a function-like macro
+                # (which requires '(' immediately after the name).
+                body = dm.end()
+                if body < n and src[body] == "(":
+                    d, k = 0, body
+                    while k < j:
+                        if src[k] == "(":
+                            d += 1
+                        elif src[k] == ")":
+                            d -= 1
+                            if d == 0:
+                                k += 1
+                                break
+                        k += 1
+                    body = k
+                restore(body, j, noncode)
+                define_spans.append((dm.group(1), line_of(start),
+                                     line_of(max(start, j - 1))))
+
+            cm = COND_RE.match(dtext)
+            pm = COND_RE.match(src, start)
+            if pm and pm.group(1) not in ("else", "endif"):
+                # Keep the condition in usage_code too, so that a macro
+                # tested only in #if (NXT_MP_CLUSTER_CACHE) is not reported
+                # as unused. index_usage() gives these the kind `pp`.
+                restore(pm.end(), j, noncode)
+                pp_lines.update(range(line_of(start),
+                                      line_of(max(start, j - 1)) + 1))
+            directives.append((line_of(start), dtext))
+            cond_marks.append((start, j, cm.group(1) if cm else None, dtext))
+            i = j
+            at_line_start = False
+            continue
+
+        at_line_start = False
+
+        # ---- string / char literal
+        if ch in "\"'":
+            quote = ch
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == quote:
+                    j += 1
+                    break
+                if src[j] == "\n" and quote == "'":
+                    break
+                j += 1
+            blank(i, min(j, n))
+            i = min(j, n)
+            continue
+
+        i += 1
+
+    guard = include_guard(cond_marks)
+    if guard:
+        blank(*guard)   # usage_code too, so its lines hold no name
+
+    # ---- #if 0 branches are not compiled; neither their defs nor their refs
+    # are real. src/nxt_event_engine.c:65 was the example: it kept
+    # nxt_fiber_main_create off the dead list on the strength of a call that
+    # is not built (src/nxt_cert.c:1316 is one on master at d54b109a). Any
+    # constant expression counts, not only the `#if 0` spelling: `#if !1`,
+    # `#if 0 && defined(X)`, and the #else of `#if 1`; see pp_const().
+    # Each open group is [start of a dead branch or None, a branch was
+    # constant-true]. Once one branch is constant-true every later one is dead.
+    stack = []
+    dead_ranges = []
+    for start, end, kind, dtext in cond_marks:
+        if kind in ("if", "ifdef", "ifndef"):
+            v = pp_const(_cond_expr(dtext)) if kind == "if" else None
+            stack.append([end if v is False else None, v is True])
+        elif kind in ("elif", "else") and stack:
+            grp = stack[-1]
+            if grp[0] is not None:
+                blank(grp[0], start)
+                dead_ranges.append((grp[0], start))
+            v = (pp_const(_cond_expr(dtext)) if kind == "elif" else None)
+            grp[0] = end if (grp[1] or v is False) else None
+            grp[1] = grp[1] or v is True
+        elif kind == "endif":
+            if stack:
+                dead = stack.pop()[0]
+                if dead is not None:
+                    blank(dead, start)
+                    dead_ranges.append((dead, start))
+    # Nor are its #define and #include: they were captured before this pass.
+    if dead_ranges:
+        directives = [d for d, (st, _e, _k, _t) in zip(directives, cond_marks)
+                      if not any(lo <= st < hi for lo, hi in dead_ranges)]
+
+    code = "".join(buf)
+    brace_code, conflicts = _balance_conditionals(code, cond_marks)
+    return Masked(path, src, code, line_start, directives, comment_lines,
+                  brace_code, conflicts, "".join(ubuf), define_spans,
+                  cond_marks, pp_lines)
+
+
+def _balance_conditionals(code: str, cond_marks, keep=None):
+    """Neutralise braces in #if/#else branches that do not balance each other.
+
+    Only one branch of a conditional is ever compiled, but the blanked text
+    holds all of them, so every brace in an alternative branch is counted a
+    second time and the scan desynchronises for the rest of the file.
+    src/nxt_openssl.c:464-470 is the example (on master at d54b109a; it was
+    426-430 when this was written):
+
+        #ifdef SSL_CTX_add0_chain_cert
+                if (SSL_CTX_add0_chain_cert(ctx, ca) != 1) {
+        #else
+                if (SSL_CTX_add_extra_chain_cert(ctx, ca) != 1) {
+        #endif
+
+    Two `{`, one real. Left alone, every function after that line is swallowed
+    into the body of the one before it: 23 of the file's 27 definitions
+    disappeared, and the coverage gate was satisfied because a runaway body
+    "accounts for" every line it eats.
+
+    So for depth purposes we keep the first branch and neutralise the braces in
+    the alternatives. Where the branches carry different brace deltas that
+    choice is not neutral: the file's cond_conflicts in coverage.tsv counts
+    it, and alternative_defs() scans the file again once per other branch, so
+    a definition that only another branch opens is still indexed. `keep` maps
+    a group (the offset of its first branch) to the branch to keep instead.
+    The usage index always reads the unmodified text, so no reference is lost
+    either way.
+
+    Returns the balanced text and one (first branch offset, branches) entry
+    per group that straddles a brace.
+    """
+    buf = list(code)
+    conflicts = []
+    stack = []
+    for start, end, kind, _dtext in cond_marks:
+        if kind in ("if", "ifdef", "ifndef"):
+            stack.append({"branches": [[end, None]], "start": start})
+            continue
+        if not stack:
+            continue
+        if kind in ("elif", "else"):
+            stack[-1]["branches"][-1][1] = start
+            stack[-1]["branches"].append([end, None])
+            continue
+        if kind == "endif":
+            grp = stack.pop()
+            grp["branches"][-1][1] = start
+            if len(grp["branches"]) < 2:
+                continue
+            # Inner groups have already been corrected, so measure on `buf`.
+            deltas = []
+            for b0, b1 in grp["branches"]:
+                seg = "".join(buf[b0:b1])
+                deltas.append(seg.count("{") - seg.count("}"))
+            # A group whose every branch is internally balanced cannot
+            # desynchronise anything, so keep them all. That is what lets a
+            # whole function definition sit inside #else and still be indexed
+            # (src/nxt_clang.h nxt_popcount). Only a group that straddles a
+            # brace needs one branch chosen, and then the choice is a real
+            # judgement, so record it.
+            if not any(deltas):
+                continue
+            key = grp["branches"][0][0]
+            conflicts.append((key, [tuple(b) for b in grp["branches"]]))
+            pick = (keep or {}).get(key, 0)
+            for bi, (b0, b1) in enumerate(grp["branches"]):
+                if bi == pick:
+                    continue
+                for k in range(b0, b1):
+                    if buf[k] in "{}":
+                        buf[k] = " "
+    return "".join(buf), conflicts
+
+
+# --------------------------------------------------------------------------
+# Stage 2: the top-level scanner
+#
+# Walk the blanked text tracking brace depth. At depth 0 accumulate a
+# statement; a `{` that follows a balanced `(...)` opens a function body,
+# anything else is an aggregate (struct/enum/union/initialiser) and keeps
+# accumulating until its `;`.
+# --------------------------------------------------------------------------
+
+# The lookbehind keeps the suffix of a number (`L` in `201112L`, `UL` in
+# `16UL`) from reading as an identifier.
+IDENT = re.compile(r"(?<![0-9A-Za-z_])[A-Za-z_][A-Za-z0-9_]*")
+
+# Noise that can sit between the parameter list and the body, or masquerade as
+# the declarator when scanning right-to-left.
+DECL_NOISE = {"__attribute__", "__asm__", "asm", "NXT_MAYBE_UNUSED"}
+
+# A keyword is never a declarator. Without this `typedef void (*fn_t)(void)`
+# registered `void` as a declared function, and every `void` in the tree then
+# counted as a reference to it.
+C_KEYWORDS = {
+    "auto", "break", "case", "char", "const", "continue", "default", "do",
+    "double", "else", "enum", "extern", "float", "for", "goto", "if",
+    "inline", "int", "long", "register", "restrict", "return", "short",
+    "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+    "unsigned", "void", "volatile", "while", "_Bool", "_Noreturn",
+    "_Static_assert", "_Alignof", "_Alignas", "_Atomic", "_Thread_local"}
+
+FNPTR_NAME = re.compile(r"\(\s*\*+\s*(?:(?:const|volatile|restrict)\s+)*"
+                        r"([A-Za-z_]\w*)")
+
+STORAGE_KEYS = ("NXT_EXPORT", "nxt_inline", "static", "extern", "inline")
+
+
+class FuncDef:
+    __slots__ = ("name", "line", "end_line", "storage", "signature",
+                 "col1", "macro", "body_start", "body_end", "param_sites",
+                 "header_sites",
+                 "open_off", "close_off")
+
+    def __init__(self, name, line, end_line, storage, signature, col1, macro,
+                 body_start, body_end):
+        self.name = name
+        self.line = line
+        self.end_line = end_line
+        self.storage = storage
+        self.signature = signature
+        self.col1 = col1
+        self.macro = macro
+        self.body_start = body_start
+        self.body_end = body_end
+        self.param_sites = []
+        self.header_sites = []      # (line, name) of the other #if arms' headers
+        self.open_off = None        # offsets of the body's braces
+        self.close_off = None
+
+
+class FuncDecl:
+    __slots__ = ("name", "line", "storage", "signature", "param_sites")
+
+    def __init__(self, name, line, storage, signature):
+        self.name = name
+        self.line = line
+        self.storage = storage
+        self.signature = signature
+        self.param_sites = []
+
+
+def _split_declarator(stmt: str):
+    """Return (prefix, name, params) for the outermost `name(...)`.
+
+    Scans right to left so that a function-pointer parameter or a trailing
+    __attribute__ does not win over the real declarator.
+    """
+    j = len(stmt)
+    while True:
+        close = stmt.rfind(")", 0, j)
+        if close < 0:
+            return None
+        depth = 0
+        k = close
+        while k >= 0:
+            if stmt[k] == ")":
+                depth += 1
+            elif stmt[k] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 0:
+            return None
+        # `(*name)` or `(*name(params))`: the declarator is inside the group,
+        # and the identifier before it is the return type. A function that
+        # returns a function pointer is declared inside; a bare `(*name)` is
+        # a function-pointer object or typedef, not a function.
+        inner = stmt[k + 1:close]
+        if inner.lstrip().startswith("*"):
+            parts = _split_declarator(inner)
+            if parts is None:
+                return None
+            return stmt[:k + 1] + parts[0], parts[1], parts[2]
+        # identifier immediately before the '('
+        m = None
+        e = k
+        while e > 0 and stmt[e - 1] in " \t\n":
+            e -= 1
+        s = e
+        while s > 0 and (stmt[s - 1].isalnum() or stmt[s - 1] == "_"):
+            s -= 1
+        if s < e:
+            m = stmt[s:e]
+        if (m and m not in DECL_NOISE and m not in C_KEYWORDS
+                and not m.isdigit()):
+            return stmt[:s], m, stmt[k + 1:close]
+        j = k          # skip past this group and keep scanning left
+        if j <= 0:
+            return None
+
+
+def _strip_trailing_groups(t: str) -> str:
+    """Remove trailing `[...]` array bounds and `IDENT(...)` attribute macros.
+
+    `static const uint32_t nxt_unicode_block_000[128] nxt_aligned(64)` ends in
+    an alignment macro, so a naive "last identifier wins" reads the declarator
+    name as `nxt_aligned`, for all 26 blocks in src/nxt_unicode_lowcase.h.
+    Every reference to them then fails to resolve and the symbols read as
+    unreferenced, which is a plausible-looking answer and the wrong one.
+    """
+    t = t.rstrip()
+    while True:
+        before = t
+        if t.endswith("]"):
+            d, k = 0, len(t) - 1
+            while k >= 0:
+                if t[k] == "]":
+                    d += 1
+                elif t[k] == "[":
+                    d -= 1
+                    if d == 0:
+                        break
+                k -= 1
+            if k >= 0:
+                t = t[:k].rstrip()
+        elif t.endswith(")"):
+            d, k = 0, len(t) - 1
+            while k >= 0:
+                if t[k] == ")":
+                    d += 1
+                elif t[k] == "(":
+                    d -= 1
+                    if d == 0:
+                        break
+                k -= 1
+            if k >= 0:
+                head = t[:k].rstrip()
+                m = re.search(r"[A-Za-z_]\w*$", head)
+                # Only an identifier-led group is an attribute macro; a bare
+                # `(...)` belongs to a function pointer declarator.
+                if m:
+                    t = head[:m.start()].rstrip()
+                else:
+                    break
+            else:
+                break
+        if t == before:
+            break
+    return t
+
+
+def _depth0(t: str) -> str:
+    """The characters of t outside any parentheses or brackets."""
+    out, depth = [], 0
+    for ch in t:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def _split_top_commas(t: str):
+    out, depth, cur = [], 0, []
+    for ch in t:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+            continue
+        cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
+def _flatten_braces(t: str) -> str:
+    """t with the contents of every outermost `{...}` removed.
+
+    The members of `typedef struct { uint32_t a, b, c; } nxt_sha1_t` are not
+    top-level objects; only the declarators after the closing brace are.
+    """
+    out, depth = [], 0
+    for ch in t:
+        if ch == "{":
+            if depth == 0:
+                out.append("{")
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                out.append("}")
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+# Words that can stand before a parameter's type and are not one.
+_PARAM_QUALIFIERS = {"const", "volatile", "restrict", "register", "struct",
+                     "union", "enum"}
+
+
+def param_sites(mk: Masked, name_off: int, name: str):
+    """(line, name) of every parameter declarator of the function at name_off.
+
+    `nxt_conf_json_error_t *error` in a prototype names a parameter, not the
+    file-static `error` in src/nxt_http_error.c; counting it inflated `uses`.
+    The types in the list are real references and stay counted. A segment
+    that is only a type (`nxt_task_t`, `const nxt_str_t`) declares nothing.
+    """
+    code = mk.code
+    k = name_off + len(name)
+    while k < len(code) and code[k] in " \t\n":
+        k += 1
+    if k >= len(code) or code[k] != "(":
+        return []
+    d, e = 0, k
+    while e < len(code):
+        if code[e] == "(":
+            d += 1
+        elif code[e] == ")":
+            d -= 1
+            if d == 0:
+                break
+        e += 1
+    out, seg_start, depth = [], k + 1, 0
+    for p in range(k + 1, e + 1):
+        ch = code[p]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]" and p != e:
+            depth -= 1
+        if p == e or (ch == "," and depth == 0):
+            seg = code[seg_start:p]
+            t = _strip_trailing_groups(seg)
+            m = re.search(r"[A-Za-z_]\w*$", t)
+            # An upper-case name is a macro (`int type TSRMLS_DC`), a use.
+            if (m and m.group(0) not in C_KEYWORDS
+                    and not re.fullmatch(r"[A-Z][A-Z0-9_]*", m.group(0))):
+                rest = set(IDENT.findall(t[:m.start()]))
+                if (rest - _PARAM_QUALIFIERS) or "*" in t[:m.start()]:
+                    out.append((mk.line_of(seg_start + m.start()),
+                                m.group(0)))
+            elif not m:
+                m = FNPTR_NAME.search(t)
+                if m:
+                    out.append((mk.line_of(seg_start + m.start(1)),
+                                m.group(1)))
+            seg_start = p + 1
+    return out
+
+
+def declarator_names(head: str):
+    """Every object name declared by one top-level statement."""
+    names = []
+    for seg in _split_top_commas(head):
+        t = _strip_trailing_groups(seg)
+        m = re.search(r"[A-Za-z_]\w*$", t)
+        if not m:
+            # `typedef void (*nxt_cb_t)(void)`: the name is inside the group.
+            m = FNPTR_NAME.search(t)
+            if m:
+                names.append(m.group(1))
+        elif m.group(0) not in C_KEYWORDS:
+            names.append(m.group(0))
+    return names
+
+
+def _storage_of(prefix: str) -> str:
+    toks = set(IDENT.findall(prefix))
+    for key in STORAGE_KEYS:
+        if key in toks:
+            return key
+    return "extern"
+
+
+class TopVar:
+    __slots__ = ("name", "line", "kind", "storage", "text")
+
+    def __init__(self, name, line, kind, storage, text):
+        self.name = name
+        self.line = line
+        self.kind = kind
+        self.storage = storage
+        self.text = text
+
+
+def scan_top_level(mk: Masked):
+    """Walk the top level of the translation unit.
+
+    Brace depth is tracked on mk.brace_code (conditional branches balanced);
+    every identifier and declarator is read from the same offsets in mk.code,
+    which is unmodified. Returns definitions, declarations, objects, aggregate
+    bodies, the line spans consumed, and the final brace depth, which must be
+    zero for a well-formed file and is gated on: a body that runs to EOF
+    without closing is the runaway that ate 23 of nxt_openssl.c's 27
+    definitions while leaving the line accounting looking perfect.
+    """
+    code = mk.code
+    depth_src = mk.brace_code
+    n = len(code)
+    defs, decls, objs, aggregates, spans = [], [], [], [], []
+    runaway = 0
+    stray = 0
+    linkage = 0     # open `extern "C" {` blocks
+
+    i = 0
+    depth = 0
+    stmt_start = 0
+    while i < n:
+        ch = depth_src[i]
+        if ch == "{":
+            if depth == 0:
+                stmt = code[stmt_start:i]
+                tail = stmt.rstrip()
+                # `extern "C" {` is a linkage specification, not a scope: its
+                # contents are still at the top level. The string literal is
+                # already blanked, so the statement reads as a bare `extern`.
+                if tail.split() == ["extern"]:
+                    linkage += 1
+                    spans.append((mk.line_of(stmt_start + len(stmt)
+                                             - len(stmt.lstrip())),
+                                  mk.line_of(i)))
+                    i += 1
+                    stmt_start = i
+                    continue
+                parts = _split_declarator(tail)
+                is_fn = parts is not None and tail.endswith(")")
+                body_open = i
+                d = 1
+                j = i + 1
+                while j < n and d:
+                    if depth_src[j] == "{":
+                        d += 1
+                    elif depth_src[j] == "}":
+                        d -= 1
+                    j += 1
+                if d:
+                    # Ran to EOF without closing: this construct has swallowed
+                    # the rest of the translation unit.
+                    runaway += 1
+                body_close = j - 1
+                if is_fn:
+                    prefix, name, params = parts
+                    off = stmt_start + len(prefix)
+                    name_line = mk.line_of(off)
+                    col = off - mk.line_start[name_line - 1] + 1
+                    macro = bool(re.fullmatch(r"[A-Z][A-Z0-9_]*", name))
+                    sig = " ".join((prefix + name + "(" + params + ")").split())
+                    defs.append(FuncDef(
+                        name, name_line, mk.line_of(body_close),
+                        _storage_of(prefix), sig, col == 1, macro,
+                        mk.line_of(body_open), mk.line_of(body_close)))
+                    defs[-1].open_off, defs[-1].close_off = body_open, body_close
+                    if not macro:
+                        sites = param_sites(mk, off, name)
+                        # Each #if arm can hold its own header for the one
+                        # body (src/nxt_php_sapi.c, nxt_php_read_post). An
+                        # earlier header is part of the definition, not a
+                        # call of it.
+                        head = code[stmt_start:off]
+                        for hm in (IDENT.finditer(head) if name in head
+                                   else ()):
+                            if hm.group(0) != name:
+                                continue
+                            ho = stmt_start + hm.start()
+                            defs[-1].header_sites.append((mk.line_of(ho),
+                                                          name))
+                            sites.extend(param_sites(mk, ho, name))
+                        defs[-1].param_sites = sites
+                    # ZEND_NAMED_FUNCTION(nxt_php_chdir) and XS(XS_..._cb)
+                    # define a function whose name is the macro *argument*.
+                    # Registering only the macro left the whole PHP-extension
+                    # and Perl-XS surface answering "no function named that",
+                    # which reads identically to "dead".
+                    if macro and re.fullmatch(r"[A-Za-z_]\w*", params.strip()):
+                        defs.append(FuncDef(
+                            params.strip(), name_line, mk.line_of(body_close),
+                            _storage_of(prefix), sig, False, "macro-arg",
+                            mk.line_of(body_open), mk.line_of(body_close)))
+                        defs[-1].open_off = body_open
+                        defs[-1].close_off = body_close
+                    spans.append((mk.line_of(stmt_start
+                                             + (len(stmt) - len(stmt.lstrip()))
+                                             if stmt.strip() else stmt_start),
+                                  mk.line_of(body_close)))
+                    i = j
+                    stmt_start = i
+                    continue
+                # struct/enum/union/initialiser: the ';' closes the statement
+                aggregates.append((stmt_start, body_open, body_close,
+                                   mk.line_of(stmt_start)))
+                i = j
+                continue
+            depth += 1
+            i += 1
+            continue
+
+        if ch == "}":
+            if depth == 0 and linkage:
+                # The end of `extern "C" {`, as in the __cplusplus guard of a
+                # C header.
+                linkage -= 1
+                spans.append((mk.line_of(i), mk.line_of(i)))
+                i += 1
+                stmt_start = i
+                continue
+            if depth == 0:
+                # Clamping this to zero let a single stray closing brace
+                # neutralise the runaway gate: nxt_router.c lost 105 of its 106
+                # definitions and still reported final_depth 0, gates OK.
+                stray += 1
+            else:
+                depth -= 1
+            i += 1
+            continue
+
+        if ch == ";" and depth == 0:
+            stmt = code[stmt_start:i]
+            lead = len(stmt) - len(stmt.lstrip())
+            s_ = stmt.strip()
+            if s_:
+                line0 = mk.line_of(stmt_start + lead)
+                # An aggregate's members are not top-level declarators.
+                flat = _flatten_braces(s_)
+                parts = _split_declarator(s_) if "{" not in flat else None
+                # `static const nxt_str_t p = nxt_string("/api")` is an
+                # object with a macro initialiser, not a prototype of the
+                # macro: a prototype has no `=` outside its parentheses.
+                if parts is not None and s_.endswith(")") \
+                        and "=" not in _depth0(s_):
+                    prefix, name, params = parts
+                    sig = " ".join((prefix + name + "(" + params + ")").split())
+                    # The name's own line, not the statement's. In house style
+                    # the return type sits on its own line, so recording line0
+                    # left the prototype counting as a reference to itself:
+                    # src/nxt_rbtree.h:115 was the only "reference" that
+                    # nxt_rbtree_find_greater_or_equal had anywhere.
+                    off = stmt_start + lead + len(prefix)
+                    decls.append(FuncDecl(
+                        name, mk.line_of(off), _storage_of(prefix), sig))
+                    # A top-level macro call such as nxt_static_assert(...)
+                    # has no return type before it, and its arguments are
+                    # expressions, not parameters.
+                    if prefix.strip():
+                        decls[-1].param_sites = param_sites(mk, off, name)
+                else:
+                    # A top-level object: `PyObject *nxt_py_body_str;`, a
+                    # table, or a typedef. Registering these is what keeps
+                    # src/python/nxt_python_asgi_str.c (143 lines, 55 of them
+                    # bare PyObject declarations) from reading as unaccounted.
+                    head = _flatten_braces(s_).split("=")[0]
+                    kind = ("typedef" if "typedef" in IDENT.findall(head)
+                            else "var")
+                    for name in declarator_names(head):
+                        objs.append(TopVar(name, line0, kind,
+                                           _storage_of(head),
+                                           " ".join(s_.split())[:160]))
+                spans.append((line0, mk.line_of(i)))
+            i += 1
+            stmt_start = i
+            continue
+
+        i += 1
+
+    return (defs, decls, objs, aggregates, spans,
+            depth + runaway + stray + linkage)
+
+
+def alternative_defs(mk: Masked, defs):
+    """Definitions that only another branch of a brace-straddling #if opens.
+
+    The scanner keeps the first branch of such a group, so in
+
+        #ifdef NXT_ALT
+        static int nxt_alt_def(void) {
+        #else
+        static int nxt_norm_def(void) {
+        #endif
+
+    nxt_norm_def is not seen, and ast-grep, which reads both, does see it.
+    That used to fail the whole index. Instead the file is scanned once more
+    per other branch of each such group, with that branch kept and the rest of
+    the group blanked, and every definition this finds under a new name is
+    added. A variant that does not balance is ignored: its definitions would
+    be the runaway kind. Only definitions are taken; the usage index already
+    reads every branch.
+    """
+    have = {d.name for d in defs}
+    extra = []
+    for key, branches in mk.cond_conflicts:
+        for pick in range(1, len(branches)):
+            buf = list(mk.code)
+            for bi, (b0, b1) in enumerate(branches):
+                if bi == pick:
+                    continue
+                for k in range(b0, b1):
+                    if buf[k] != "\n":
+                        buf[k] = " "
+            code = "".join(buf)
+            brace, _ = _balance_conditionals(code, mk.cond_marks, {key: pick})
+            alt = Masked(mk.path, mk.src, code, mk.line_start, mk.directives,
+                         mk.comment_lines, brace, mk.cond_conflicts,
+                         mk.usage_code, mk.define_spans, mk.cond_marks)
+            adefs, _d, _o, _a, _s, depth = scan_top_level(alt)
+            if depth:
+                continue
+            for d in adefs:
+                if d.name not in have:
+                    have.add(d.name)
+                    extra.append(d)
+    return extra
+
+
+# --------------------------------------------------------------------------
+# Constants: #define and enum members
+# --------------------------------------------------------------------------
+
+DEFINE_RE = re.compile(r"#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)(\()?\s*(.*)")
+INCLUDE_RE = re.compile(r"#\s*include\s*([<\"])([^>\"]+)[>\"]")
+
+
+# constants.tsv cuts a longer value, and marks the cut with "...".
+MAX_VALUE = 120
+
+
+def extract_directives(mk: Masked):
+    consts, includes = [], []
+    for line, raw in mk.directives:
+        m = DEFINE_RE.match(raw)
+        if m:
+            name, fnlike, value = m.group(1), bool(m.group(2)), m.group(3)
+            if fnlike:
+                # The value column is the body; the parameter list that the
+                # regex left in front of it is not part of the value.
+                close = value.find(")")
+                value = value[close + 1:] if close >= 0 else ""
+            value = " ".join(value.split())
+            if len(value) > MAX_VALUE:
+                value = value[:MAX_VALUE - 3] + "..."
+            consts.append((name, "define-fn" if fnlike else "define", line,
+                           value))
+            continue
+        m = INCLUDE_RE.match(raw)
+        if m:
+            includes.append((m.group(2),
+                             "angle" if m.group(1) == "<" else "quote"))
+    return consts, includes
+
+
+ENUM_HEAD = re.compile(r"\benum\b(?:\s+[A-Za-z_]\w*)?\s*\{")
+
+
+def extract_enums(mk: Masked, aggregates):
+    """Enum member names, from every `enum {` in a top-level aggregate.
+
+    That includes an enum nested in a struct, whose members are file-scope
+    constants all the same: NXT_ROUTER_ENGINE_ADD in src/nxt_router.h is one.
+    """
+    out = []
+    code = mk.code
+    for stmt_start, _body_open, body_close, _line in aggregates:
+        for em in ENUM_HEAD.finditer(code, stmt_start, body_close + 1):
+            base = em.end()
+            depth = 0
+            expect = True
+            i = base
+            while i < body_close:
+                c = code[i]
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif depth == 0 and c == ",":
+                    expect = True
+                elif depth == 0 and c == "=":
+                    expect = False
+                elif expect and (c.isalpha() or c == "_"):
+                    m = IDENT.match(code, i)
+                    if m:
+                        out.append((m.group(0), "enum", mk.line_of(i), ""))
+                        i = m.end()
+                        expect = False
+                        continue
+                i += 1
+    return out
+
+
+# --------------------------------------------------------------------------
+# Usage index
+#
+# Every identifier occurrence in blanked code that names a registered symbol,
+# with the enclosing function and the context bucket. A `call` is an
+# occurrence followed by `(`; anything else is a `ref` (a function pointer
+# taken, a constant read).
+#
+# Definition and declaration sites are excluded: they are what defines the
+# symbol, not a use of it. That is why `nxt_utf8_next` correctly reports zero
+# references despite being defined at src/nxt_utf8.h:32.
+# --------------------------------------------------------------------------
+
+# Words that start a statement which is never a declaration.
+_STMT_KEYWORDS = {"if", "else", "while", "do", "for", "switch", "return",
+                  "goto", "break", "continue", "case", "default", "sizeof"}
+# Words that, first in a statement, make it a declaration.
+_DECL_START = {"auto", "char", "const", "double", "enum", "extern", "float",
+               "int", "long", "register", "restrict", "short", "signed",
+               "static", "struct", "union", "unsigned", "void", "volatile",
+               "_Bool", "_Atomic", "_Thread_local", "inline", "typedef"}
+_LABEL = re.compile(r"\s*(?:case\b[^;:]*|default|[A-Za-z_]\w*)\s*:(?!:)")
+_NOT_DECL_HEAD = re.compile(r"->|\.|\+\+|--|[-+*/%&|^!<>]=|<<|>>|[?:]")
+
+
+def _local_declarators(stmt: str):
+    """The names a block-scope statement declares, or [] if it is not one.
+
+    `nxt_int_t  error;`, `const char  *p, *q = NULL;`, `static int n;`:
+    a type word or a typedef name followed by a declarator. A statement led
+    by a keyword such as `return`, a call, an assignment or a member access
+    declares nothing. Ambiguous `a * b;` reads as a declaration, which is
+    what it would be anywhere it is not dead code.
+    """
+    while True:
+        m = _LABEL.match(stmt)
+        if not m:
+            break
+        stmt = stmt[m.end():]
+    flat = _flatten_braces(stmt)
+    words = IDENT.findall(flat)
+    if not words:
+        return []
+    m = re.match(r"\s*([A-Za-z_]\w*)", flat)
+    if not m or m.group(1) in _STMT_KEYWORDS:
+        return []
+    first = m.group(1)
+    segs = _split_top_commas(flat)
+    head0 = _depth0(segs[0].split("=", 1)[0])
+    if _NOT_DECL_HEAD.search(head0) or "==" in _depth0(segs[0]):
+        return []
+    rest = head0[m.end():]
+    if first not in _DECL_START and not re.match(r"\s*(?:\*|[A-Za-z_])",
+                                                 rest):
+        return []
+    names = []
+    for i, seg in enumerate(segs):
+        head = seg.split("=", 1)[0]
+        t = _strip_trailing_groups(head)
+        # `u_char  hex[16] NXT_NONSTRING`: an upper-case attribute macro
+        # after the declarator is not its name.
+        while True:
+            am = re.search(r"\s([A-Z][A-Z0-9_]*)$", t)
+            if not am or len(IDENT.findall(t)) < 3:
+                break
+            t = _strip_trailing_groups(t[:am.start()])
+        nm = re.search(r"[A-Za-z_]\w*$", t)
+        if nm:
+            # `nxt_str_t  name`: the last word, which is never the type itself.
+            if i == 0 and len(IDENT.findall(t)) < 2:
+                continue
+            if nm.group(0) not in C_KEYWORDS:
+                names.append(nm.group(0))
+        else:
+            fm = FNPTR_NAME.search(t)
+            if fm:
+                names.append(fm.group(1))
+    return names
+
+
+def local_scopes(mk: Masked, d):
+    """name -> [(start, end)] offsets where that name is a local of d.
+
+    A parameter is in scope for the whole body. A block-scope declaration is
+    in scope from its statement to the end of the enclosing block, and a
+    `for (int i = 0; ...)` declaration to the end of that loop. Inside those
+    ranges the name is the local, not a file-scope symbol of the same name.
+    Brace depth is read from brace_code, as for the top level.
+    """
+    out = defaultdict(list)
+    lo, hi = d.open_off, d.close_off
+    if lo is None or hi is None:
+        return out
+    for _line, name in d.param_sites:
+        out[name].append((lo, hi))
+    code, braces = mk.code, mk.brace_code
+    match, st = {}, []
+    for k in range(lo, hi + 1):
+        if braces[k] == "{":
+            st.append(k)
+        elif braces[k] == "}" and st:
+            match[st.pop()] = k
+    blocks = [hi]           # end offset of each open block
+    paren = 0
+    stmt_start = lo + 1
+    i = lo + 1
+
+    def declare(text, start, end):
+        for name in _local_declarators(text):
+            out[name].append((start, end))
+
+    def for_init(text, start, end):
+        m = re.match(r"\s*for\s*\(", text)
+        if not m:
+            return False
+        init = text[m.end():].split(";", 1)[0]
+        declare(init, start, end)
+        return True
+
+    while i < hi:
+        ch = code[i]
+        b = braces[i]
+        if ch in "([":
+            paren += 1
+        elif ch in ")]":
+            paren = max(paren - 1, 0)
+        elif b == "{" and paren == 0:
+            stmt = code[stmt_start:i]
+            if ("=" in _depth0(stmt) or re.match(r"\s*(?:\w+\s+)*"
+                                                 r"(?:struct|union|enum)\b",
+                                                 stmt)) \
+                    and not stmt.rstrip().endswith(")"):
+                # an initialiser, or a local aggregate: the statement goes on
+                i = match.get(i, i) + 1
+                continue
+            for_init(stmt, stmt_start, match.get(i, hi))
+            blocks.append(match.get(i, hi))
+            stmt_start = i + 1
+        elif b == "}" and paren == 0:
+            if len(blocks) > 1:
+                blocks.pop()
+            stmt_start = i + 1
+        elif ch == ";" and paren == 0:
+            stmt = code[stmt_start:i]
+            if not for_init(stmt, stmt_start, i):
+                declare(stmt, stmt_start, blocks[-1])
+            stmt_start = i + 1
+        i += 1
+    return out
+
+
+def member_sites(mk: Masked, aggregates):
+    """name -> [(start, end)] of each struct or union member declaration.
+
+    `nxt_str_t  error;` in a struct names a member, not the file-static
+    `error`. The member's own declaration is excluded, as a parameter's is;
+    the type before it is still a use. Enums and initialisers are skipped:
+    enum members are constants, and an initialiser holds expressions.
+    """
+    out = defaultdict(list)
+    code = mk.code
+    for stmt_start, body_open, body_close, _line in aggregates:
+        head = code[stmt_start:body_open]
+        if "=" in head or not re.search(r"\b(?:struct|union)\b", head):
+            continue
+        seg, paren = body_open + 1, 0
+        for k in range(body_open + 1, body_close + 1):
+            ch = code[k]
+            if ch in "([":
+                paren += 1
+            elif ch in ")]":
+                paren = max(paren - 1, 0)
+            elif ch in ";{}" and paren == 0:
+                text = re.sub(r":\s*\w+\s*$", "", code[seg:k])
+                for name in _local_declarators(text):
+                    out[name].append((seg, k))
+                seg = k + 1
+    return out
+
+
+def index_usage(mk: Masked, defs, decls, objs, enums, known, aggregates=(),
+                pp_names=frozenset(), code_names=frozenset()):
+    """Usage rows of one file.
+
+    pp_names are the constants, the only names an #if can test. code_names
+    are the functions and objects.
+    """
+    excluded = set()
+    # A macro's own name in its body is not expanded again, so it is not a
+    # use of the macro: `#define NXT_ALIAS NXT_ALIAS`. It names the function
+    # or object of that name, if there is one: the body of the nxt_debug()
+    # macro reads the nxt_debug variable (src/nxt_log.h).
+    for name, lo, hi in mk.define_spans:
+        if name not in code_names:
+            excluded.update((ln, name) for ln in range(lo, hi + 1))
+    # An enum member's own definition is not a use of it, any more than a
+    # function's is: every member used to count itself once, so a member used
+    # only in tests read as having a production use.
+    for name, _kind, line, _value in enums:
+        excluded.add((line, name))
+    for d in defs:
+        excluded.add((d.line, d.name))
+        excluded.update(d.param_sites)
+        excluded.update(d.header_sites)
+    for d in decls:
+        excluded.add((d.line, d.name))
+        excluded.update(d.param_sites)
+    for o in objs:
+        excluded.add((o.line, o.name))
+
+    # line -> enclosing function
+    encl = {}
+    for d in defs:
+        for ln in range(d.line, d.end_line + 1):
+            encl[ln] = d.name
+    # A reference inside a macro body belongs to the macro; that is the useful
+    # answer ("reached via nxt_conn_connect"), and macros never nest in a
+    # function body at the top level, so this cannot shadow a real one.
+    for name, lo, hi in mk.define_spans:
+        for ln in range(lo, hi + 1):
+            encl[ln] = name
+
+    # A parameter or local that shares a file-scope name is that local in
+    # its own scope: `nxt_int_t error` in a function of src/nxt_http_error.c
+    # is not the file-static `error`. Only names that are also file-scope
+    # symbols matter here.
+    shadow = defaultdict(list)
+    scopes = [local_scopes(mk, d) for d in defs]
+    scopes.append(member_sites(mk, aggregates))
+    for sc in scopes:
+        for name, ranges in sc.items():
+            if name in known:
+                shadow[name].extend(ranges)
+
+    code = mk.usage_code
+    out = []
+    for m in IDENT.finditer(code):
+        name = m.group(0)
+        if name not in known:
+            continue
+        if name in shadow and any(lo <= m.start() <= hi
+                                  for lo, hi in shadow[name]):
+            continue
+        # A struct or union member access never names a file-scope symbol, and
+        # neither does a designated initialiser. Counting them inflates exactly
+        # the symbols where a wrong answer costs most: the tree has 469 such
+        # occurrences, on names like `status`, `error`, `ready_handler` and
+        # `main` (e.g. `resp->status` at src/nxt_controller.c:1351), each of
+        # which would otherwise read as a reference to the global of that name.
+        k = m.start() - 1
+        while k >= 0 and code[k] in " \t\n":
+            k -= 1
+        if k >= 0 and (code[k] == "." or (code[k] == ">" and k > 0
+                                          and code[k - 1] == "-")):
+            continue
+        # `error:` as a label, and the `goto error` that reaches it, are not
+        # references to the file-static `error` in src/nxt_http_error.c:19.
+        j2 = m.end()
+        while j2 < len(code) and code[j2] in " \t":
+            j2 += 1
+        if (j2 < len(code) and code[j2] == ":"
+                and not code.startswith("::", j2)
+                and (k < 0 or code[k] in ";{}:")):
+            continue
+        if k >= 0 and code[k].isalnum():
+            w0 = k
+            while w0 >= 0 and (code[w0].isalnum() or code[w0] == "_"):
+                w0 -= 1
+            if code[w0 + 1:k + 1] == "goto":
+                continue
+        line = mk.line_of(m.start())
+        if (line, name) in excluded:
+            continue
+        if line in mk.pp_lines:
+            # The preprocessor knows macros and nothing else: a function or
+            # object named in #ifdef is a different, undefined name there.
+            if name not in pp_names:
+                continue
+            kind = "pp"
+        else:
+            # A call has its `(` on the name's line, as everywhere in this
+            # tree; the next line may be a restored #if condition.
+            j = m.end()
+            while j < len(code) and code[j] in " \t\r":
+                j += 1
+            kind = "call" if j < len(code) and code[j] == "(" else "ref"
+        col = m.start() - mk.line_start[line - 1] + 1
+        out.append((name, line, col, kind, encl.get(line, "-")))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Gates
+# --------------------------------------------------------------------------
+
+MIN_CODE_LINES = 40      # below this a .c file with no functions is fine
+MAX_UNACCOUNTED = 0.15   # fraction of code lines the scanner may not attribute
+
+
+def coverage(mk: Masked, defs, decls, objs, aggregates, spans, final_depth):
+    """Account for every line of the file, and report what we could not.
+
+    Every line must be explained as part of a top-level construct, a
+    preprocessor directive, a comment, or blank. What is left over is the
+    number that matters: a previous tree-sitter index reported a plausible
+    symbol count while silently dropping 56% of nxt_router.c, so the gate is
+    stated in lines against wc -l rather than in symbols.
+    """
+    lines = mk.src.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+
+    directive_lines = set()
+    for line, raw in mk.directives:
+        for k in range(raw.count("\n") + 1):
+            directive_lines.add(line + k)
+
+    covered = set()
+    for lo, hi in spans:
+        for ln in range(lo, hi + 1):
+            covered.add(ln)
+    for stmt_start, _open, body_close, _ln in aggregates:
+        for ln in range(mk.line_of(stmt_start), mk.line_of(body_close) + 1):
+            covered.add(ln)
+
+    blank = set()
+    code_lines = 0
+    for idx in range(1, total + 1):
+        st = mk.line_start[idx - 1]
+        en = (mk.line_start[idx] - 1 if idx < len(mk.line_start)
+              else len(mk.code))
+        if not mk.code[st:en].strip():
+            blank.add(idx)
+        else:
+            code_lines += 1
+
+    accounted = covered | directive_lines | blank | mk.comment_lines
+    unaccounted = [i for i in range(1, total + 1) if i not in accounted]
+
+    return {
+        "lines": total,
+        "code_lines": code_lines,
+        "defs": len(defs),
+        "decls": len(decls),
+        "objs": len(objs),
+        "attributed": total - len(unaccounted),
+        "unaccounted": len(unaccounted),
+        "first_unaccounted": unaccounted[0] if unaccounted else 0,
+        "final_depth": final_depth,
+        "cond_conflicts": len(mk.cond_conflicts),
+    }
+
+
+def crosscheck_astgrep(root: str, files, astgrep: str):
+    """Independent extraction of function definitions with a real C grammar.
+
+    Returns (per-file name sets, ok). `ok` is False when ast-grep produced
+    nothing at all, which means the cross-check is broken, NOT that the tree
+    agrees. ast-grep fails to an empty set rather than an error, so an empty
+    result is never evidence of agreement.
+    """
+    rule = ("id: unit_registry_fndef\n"
+            "language: c\n"
+            "rule:\n"
+            "  kind: function_definition\n"
+            "  has:\n"
+            "    kind: function_declarator\n"
+            "    stopBy: end\n"
+            "    has:\n"
+            "      kind: identifier\n"
+            "      field: declarator\n"
+            "      pattern: $NAME\n")
+    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as fh:
+        fh.write(rule)
+        rule_path = fh.name
+    try:
+        found = defaultdict(set)
+        # Batch: ast-grep scans a directory tree far faster than N invocations.
+        proc = subprocess.run(
+            [astgrep, "scan", "-r", rule_path, "--json=stream",
+             *[os.path.join(root, d) for d in SCAN_ROOTS
+               if os.path.isdir(os.path.join(root, d))]],
+            capture_output=True, text=True, timeout=300)
+        nlines = 0
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            nlines += 1
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rel = os.path.relpath(d.get("file", ""), root)
+            name = (d.get("metaVariables", {}).get("single", {})
+                    .get("NAME", {}).get("text"))
+            if name:
+                found[rel].add(name)
+        if proc.returncode != 0:
+            return {}, False
+        return found, nlines > 0 and bool(found)
+    except (OSError, subprocess.SubprocessError):
+        return {}, False
+    finally:
+        try:
+            os.unlink(rule_path)
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------
+# ABI: declared (NXT_EXPORT) vs actual (nm)
+# --------------------------------------------------------------------------
+
+NM_RE = re.compile(r"^([0-9a-fA-F]*)\s+([A-Za-z])\s+(\S+)$")
+
+
+def nm_targets(build_dir: str):
+    """The artifacts read_nm() reads, each with its nm options."""
+    targets = []
+    for cand in ("sbin/unitd", "lib/libunit.a", "lib/libnxt.a"):
+        p = os.path.join(build_dir, cand)
+        if os.path.exists(p):
+            targets.append((p, ["--defined-only", "--extern-only"]))
+    for root_, _dirs, files in os.walk(build_dir):
+        for f in sorted(files):
+            if f.endswith(".so"):
+                targets.append((os.path.join(root_, f),
+                                ["--defined-only", "--extern-only",
+                                 "--dynamic"]))
+    return targets
+
+
+def read_nm(build_dir: str):
+    """Symbols the built artifacts export: global binding only.
+
+    A local symbol (nm type t/d/r/b: a static function, a string table, a
+    compiler label such as __func__.0) is not an export, and counting them
+    made most of abi.tsv about symbols nothing can link. libnxt.a holds the
+    NXT_EXPORT core (nxt_thread_cond_create is in no other artifact), so it
+    is read too. Module .so files are read through their dynamic table.
+    """
+    out = {}
+    for t, opts in nm_targets(build_dir):
+        try:
+            proc = subprocess.run(["nm", *opts, t],
+                                  capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as e:
+            warn("nm %s failed: %s" % (t, e))
+            continue
+        if proc.returncode != 0:
+            warn("nm %s exited %d: %s"
+                 % (t, proc.returncode, proc.stderr.strip()[:200]))
+        for line in proc.stdout.splitlines():
+            m = NM_RE.match(line.strip())
+            if not m:
+                continue
+            _addr, typ, name = m.groups()
+            # Upper case is global binding; `u` is a GNU unique global.
+            # Checked here as well, not left to the nm options alone.
+            if not (typ.isupper() or typ == "u") or typ == "U":
+                continue
+            out.setdefault(name, (typ, os.path.basename(t)))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Indexing
+# --------------------------------------------------------------------------
+
+def walk_sources(root: str, errors: list):
+    for d in SCAN_ROOTS:
+        base = os.path.join(root, d)
+        if not os.path.isdir(base):
+            continue
+        # os.walk skips a directory it cannot list without a word.
+        for dirpath, dirnames, filenames in os.walk(
+                base, onerror=lambda e: errors.append(
+                    unreadable_msg(root, e))):
+            dirnames[:] = [x for x in dirnames if x not in SKIP_DIRS]
+            for f in sorted(filenames):
+                if f.endswith(C_EXT):
+                    p = os.path.join(dirpath, f)
+                    yield os.path.relpath(p, root), p
+
+
+# Every artifact `index` writes, with its columns. verify requires all of them:
+# a missing public_abi.tsv silently stopped `dead` withholding the public ABI,
+# which is the to-delete direction.
+ARTIFACT_COLUMNS = {
+    "functions.tsv": ["symbol", "kind", "file", "line", "end_line", "storage",
+                      "col1", "form", "context", "signature"],
+    "usage.tsv": ["symbol", "file", "line", "col", "context", "kind",
+                  "enclosing"],
+    "objects.tsv": ["name", "kind", "file", "line", "storage", "context",
+                    "text"],
+    "constants.tsv": ["name", "kind", "file", "line", "context", "value"],
+    "includes.tsv": ["file", "includes", "origin", "bracket", "context"],
+    "abi.tsv": ["symbol", "abi", "declared_at", "nm_type", "nm_artifact",
+                "prod_uses", "total_uses", "verdict"],
+    "public_abi.tsv": ["symbol", "header"],
+    "coverage.tsv": ["file", "context", "lines", "code_lines", "defs",
+                     "decls", "objs", "attributed", "unaccounted",
+                     "first_unaccounted", "final_depth", "cond_conflicts"],
+    "disagreements.tsv": ["file", "scanner_defs", "astgrep_defs",
+                          "only_scanner", "only_astgrep"],
+}
+
+
+# Go comments and literals (blanked, newlines kept) and a cgo reference.
+GO_NOISE = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|`[^`]*`'
+                      r"|'(?:\\.|[^'\\\n])*'", re.S)
+GO_C_REF = re.compile(r"(?<![\w.])C\.([A-Za-z_]\w*)")
+
+
+def index_go(root: str, known: set):
+    """`C.name` references from go/*.go: (rel, rows, lines) per file.
+
+    Only names the C index already registered are recorded, as calls when
+    followed by `(` and as refs otherwise (`C.nxt_unit_ctx_t`). No Go parser:
+    a cgo reference is lexically unambiguous once comments and strings are out.
+    """
+    base = os.path.join(root, "go")
+    if not os.path.isdir(base):
+        return
+    # go/ is a scan root: walk_sources() reports a directory it cannot read.
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(x for x in dirnames if x not in SKIP_DIRS)
+        for f in sorted(filenames):
+            if not f.endswith(".go"):
+                continue
+            path = os.path.join(dirpath, f)
+            rel = os.path.relpath(path, root)
+            try:
+                with open(path, "r", errors="replace") as fh:
+                    text = fh.read()
+            except OSError as e:
+                yield rel, None, e
+                continue
+            code = GO_NOISE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)),
+                                text)
+            rows = []
+            for m in GO_C_REF.finditer(code):
+                name = m.group(1)
+                if name not in known:
+                    continue
+                line = code.count("\n", 0, m.start()) + 1
+                col = m.start() - (code.rfind("\n", 0, m.start()) + 1) + 1
+                rest = code[m.end():].lstrip(" \t")
+                rows.append((name, line, col,
+                             "call" if rest.startswith("(") else "ref", "-"))
+            yield rel, rows, text.count("\n")
+
+
+def tsv(fields):
+    return "\t".join(
+        str(f).replace("\t", " ").replace("\n", " ").replace("\r", " ")
+        for f in fields)
+
+
+# The include roots the build puts on -I. Unit includes its OWN headers with
+# angle brackets (`#include <nxt_main.h>` at src/nxt_conf.c:8), so bracket style
+# says nothing about whether a header is in-tree: resolving the path against
+# the tree is the only test that works. Getting this backwards labelled 912 of
+# the tree's 1016 include edges "system", the great majority of them wrong.
+INCLUDE_ROOTS = ("src", "src/test", "test", "fuzzing", ".")
+
+
+def resolve_include(rel_from: str, inc: str, all_files: set):
+    """Resolve an #include against the tree. In-tree iff the file is there."""
+    cand = os.path.normpath(os.path.join(os.path.dirname(rel_from), inc))
+    if cand in all_files:
+        return cand, "intree"
+    for d in INCLUDE_ROOTS:
+        cand = os.path.normpath(os.path.join(d, inc))
+        if cand in all_files:
+            return cand, "intree"
+    return inc, "system"
+
+
+def do_index(args):
+    t0 = time.time()
+    src_root = os.path.abspath(args.src)
+    if not os.path.isdir(src_root):
+        die("--src %s is not a directory" % args.src)
+    # An explicit --build that cannot be read would leave the ABI half empty
+    # with the index still green, and `abi` would then ask for --build.
+    if args.build_is_explicit:
+        if not os.path.isdir(args.build):
+            die("--build %s is not a directory" % args.build)
+        if shutil.which("nm") is None:
+            die("--build needs nm on PATH (binutils); it was not found")
+        if not nm_targets(args.build):
+            die("--build %s holds no sbin/unitd, lib/libunit.a, lib/libnxt.a "
+                "or module .so; build it first, or index with --no-build"
+                % args.build)
+
+    if not args.ref:
+        try:
+            top = git(src_root, "rev-parse", "--show-toplevel").strip()
+            # A tree inside some other repository is not that repository.
+            sha = (git(src_root, "rev-parse", "HEAD").strip()
+                   if os.path.realpath(top) == os.path.realpath(src_root)
+                   else "unknown")
+        except SystemExit:
+            sha = "unknown"
+        return _index(args, t0, src_root, src_root, "<worktree>", sha)
+
+    # A ref that starts with `-` would reach git as an option.
+    if args.ref.startswith("-"):
+        die("refusing --ref %r: a ref cannot start with '-'" % args.ref)
+    sha = git(src_root, "rev-parse", "--verify",
+              args.ref + "^{commit}").strip()
+    tmpdir = tempfile.mkdtemp(prefix="unit-registry-")
+    # Removed on every exit, die() included: die() raises SystemExit.
+    try:
+        tar = subprocess.run(["git", "-C", src_root, "archive", sha],
+                             capture_output=True, timeout=300)
+        if tar.returncode != 0:
+            die("git archive %s failed: %s"
+                % (args.ref, tar.stderr.decode()[:300]))
+        p = subprocess.run(["tar", "-x", "-C", tmpdir], input=tar.stdout,
+                           capture_output=True, timeout=300)
+        if p.returncode != 0:
+            die("tar extract failed: %s" % p.stderr.decode()[:300])
+        return _index(args, t0, src_root, tmpdir, args.ref, sha)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _index(args, t0, src_root, root, ref, sha):
+    out_dir = os.path.abspath(args.out)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Everything that could not be read; each one is a gate failure.
+    unreadable = []
+    cls = Classifier(root, unreadable)
+    public_headers = read_public_headers(root, unreadable)
+    files = list(walk_sources(root, unreadable))
+    if not files:
+        die("no C sources under %s (%s). Is that a FreeUnit tree?%s"
+            % (root, ", ".join(SCAN_ROOTS),
+               "".join("\n  " + u for u in unreadable)))
+    all_rel = {rel for rel, _ in files}
+
+    parsed = {}
+    cxx_files = set()
+    fn_defs, fn_decls, consts, top_objs = [], [], [], []
+    includes_rows = []
+    cov_rows = []
+    known = set()
+    alt_defs = 0
+    hidden = []
+
+    # ---- pass 1: parse, functions, constants, includes
+    for rel, path in files:
+        try:
+            with open(path, "r", errors="replace") as fh:
+                src = fh.read()
+        except OSError as e:
+            # A gate failure, not a warning: a skipped file takes its
+            # references with it, and `dead` then lists the functions only it
+            # called as deletion candidates.
+            unreadable.append(unreadable_msg(
+                root, e, "its definitions and references are missing from "
+                "the index"))
+            continue
+        mk = mask(rel, src)
+        if is_cxx(mk.code):
+            # Not C. Parsing it fed names like `status` into the symbol table
+            # and left nxt_napi.h unbalanced, and neither this scanner nor a C
+            # grammar says anything trustworthy about it.
+            cxx_files.add(rel)
+            continue
+        defs, decls, objs, aggs, spans, final_depth = scan_top_level(mk)
+        alt = alternative_defs(mk, defs) if mk.cond_conflicts else []
+        alt_defs += len(alt)
+        dconsts, dincludes = extract_directives(mk)
+        econsts = extract_enums(mk, aggs)
+        parsed[rel] = (mk, defs + alt, decls, objs, econsts, aggs)
+
+        ctx = cls.context(rel)
+        for d in defs + alt:
+            form = ("macro-arg" if d.macro == "macro-arg"
+                    else "macro" if d.macro else "-")
+            fn_defs.append((d.name, rel, d.line, d.end_line, d.storage,
+                            "yes" if d.col1 else "no", form, ctx,
+                            d.signature))
+            known.add(d.name)
+        for d in decls:
+            fn_decls.append((d.name, rel, d.line, d.storage, ctx, d.signature))
+            known.add(d.name)
+        for name, kind, line, value in dconsts + econsts:
+            consts.append((name, kind, rel, line, ctx, value))
+            known.add(name)
+        for inc, bracket in dincludes:
+            target, where = resolve_include(rel, inc, all_rel)
+            includes_rows.append((rel, target, where, bracket, ctx))
+
+        for o in objs:
+            top_objs.append((o.name, o.kind, rel, o.line, o.storage, ctx,
+                             o.text))
+            known.add(o.name)
+        cov_rows.append((rel, ctx, coverage(mk, defs, decls, objs, aggs, spans,
+                                            final_depth)))
+
+    # ---- pass 2: usage
+    usage_rows = []
+    pp_names = {c[0] for c in consts}
+    code_names = ({d[0] for d in fn_defs} | {d[0] for d in fn_decls}
+                  | {o[0] for o in top_objs})
+    for rel, (mk, defs, decls, objs, enums, aggs) in parsed.items():
+        ctx = cls.context(rel)
+        for name, line, col, kind, encl in index_usage(
+                mk, defs, decls, objs, enums, known, aggs, pp_names,
+                code_names):
+            usage_rows.append((name, rel, line, col, ctx, kind, encl))
+
+    # ---- Go callers of the C side, as module-context references
+    go_files = 0
+    for rel, rows, info in index_go(root, known):
+        if rows is None:
+            unreadable.append(unreadable_msg(
+                root, info, "its references are missing from the index"))
+            continue
+        go_files += 1
+        ctx = cls.context(rel)
+        for name, line, col, kind, encl in rows:
+            usage_rows.append((name, rel, line, col, ctx, kind, encl))
+        cov_rows.append((rel, ctx, {
+            "lines": info, "code_lines": 0, "defs": 0, "decls": 0, "objs": 0,
+            "attributed": info, "unaccounted": 0, "first_unaccounted": 0,
+            "final_depth": 0, "cond_conflicts": 0}))
+
+    # ---- gates
+    failures, findings = list(unreadable), []
+    for rel in sorted(cxx_files):
+        if rel.endswith(".c"):
+            failures.append("cxx: %s reads as C++ and was not indexed; a .c "
+                            "file is C, so its definitions and references "
+                            "would be missing" % rel)
+
+    for rel, ctx, c in cov_rows:
+        # A file whose braces do not close is the runaway-body failure: one
+        # definition swallows the rest of the translation unit and the line
+        # accounting still looks perfect. Gate on the depth, not the symptom.
+        if c["final_depth"] != 0:
+            failures.append("balance: %s ends at brace depth %d: some "
+                            "definition has swallowed the rest of the file"
+                            % (rel, c["final_depth"]))
+        if (rel.endswith(".c") and c["defs"] == 0
+                and c["code_lines"] >= MIN_CODE_LINES):
+            failures.append("coverage: %s has %d code lines and zero function "
+                            "definitions" % (rel, c["code_lines"]))
+        if c["lines"] and c["unaccounted"] / c["lines"] > MAX_UNACCOUNTED:
+            failures.append("coverage: %s leaves %d/%d lines unattributed "
+                            "(first at line %d)"
+                            % (rel, c["unaccounted"], c["lines"],
+                               c["first_unaccounted"]))
+
+    astgrep = args.astgrep or shutil.which("ast-grep") \
+        or os.path.expanduser("~/.local/bin/ast-grep")
+    xcheck_ok = False
+    if args.crosscheck and os.path.exists(astgrep):
+        ag, xcheck_ok = crosscheck_astgrep(root, files, astgrep)
+        if not xcheck_ok:
+            failures.append(
+                "crosscheck: ast-grep returned an empty result set for the "
+                "whole tree. That is a broken cross-check, not agreement: "
+                "re-run with --no-crosscheck only if you accept an unverified "
+                "index.")
+        else:
+            mine = defaultdict(set)
+            for name, rel, *_ in fn_defs:
+                mine[rel].add(name)
+            conflicted = {rel for rel, _ctx, c in cov_rows
+                          if c["cond_conflicts"]}
+            for rel in sorted(set(mine) | set(ag)):
+                if not rel.endswith(".c") and not rel.endswith(".h"):
+                    continue
+                if rel in cxx_files:
+                    continue
+                a, b = mine.get(rel, set()), ag.get(rel, set())
+                only_mine, only_ag = sorted(a - b), sorted(b - a)
+                if only_mine or only_ag:
+                    findings.append(
+                        (rel, len(a), len(b),
+                         ",".join(only_mine[:8]) or "-",
+                         ",".join(only_ag[:8]) or "-"))
+                # Recording a disagreement is not enough. A mutated nxt_router.c
+                # that lost 105 of its 106 definitions produced "1 vs 106" here
+                # and still exited 0, because nothing ast-grep found could ever
+                # fail the run. A shortfall this large is the truncation this
+                # tool exists to catch.
+                # Where an #if/#else straddles a brace, alternative_defs()
+                # has already read the other branches. A definition ast-grep
+                # still finds there is reported, not fatal: it is one
+                # definition in a conditional the scanner cannot resolve,
+                # not a truncated file. The shortfall checks below still
+                # apply to such a file.
+                if only_ag and rel in conflicted:
+                    hidden.append("%s (%s)" % (rel, ", ".join(only_ag[:6])))
+                if len(b) >= 4 and len(a) < len(b) * 0.5:
+                    failures.append(
+                        "crosscheck: %s: scanner found %d definitions, "
+                        "ast-grep found %d (missing: %s)"
+                        % (rel, len(a), len(b),
+                           ", ".join(only_ag[:6]) or "?"))
+                elif len(only_ag) >= 10:
+                    failures.append(
+                        "crosscheck: %s: ast-grep found %d definitions the "
+                        "scanner missed (%s)"
+                        % (rel, len(only_ag), ", ".join(only_ag[:6])))
+    elif args.crosscheck:
+        failures.append("crosscheck: ast-grep not found at %s" % astgrep)
+
+    # column-1 disagreement is a finding, never a silent choice
+    col1_bad = [(n, f, l) for (n, f, l, _e, _s, c1, mac, _c, _sig)
+                in fn_defs if c1 == "no" and mac == "-"]
+
+    # ---- ABI
+    abi_rows = []
+    nm_syms = {}
+    build_dir = args.build or os.path.join(src_root, "build")
+    # A binary built from the working tree says nothing about a different ref,
+    # and scoring one against the other produces confident nonsense in every
+    # abi.tsv verdict. Refuse rather than mislabel.
+    if (args.ref and not args.build_is_explicit) or args.no_build:
+        build_dir = None
+    if build_dir and os.path.isdir(build_dir):
+        nm_syms = read_nm(build_dir)
+
+    public_abi = {name for name, rel, _l, _s, _c, _sig in fn_decls
+                  if rel in public_headers}
+
+    declared_export = {}
+    for name, rel, line, storage, ctx, sig in fn_decls:
+        if storage == "NXT_EXPORT":
+            declared_export.setdefault(name, (rel, line))
+    for name, rel, line, _e, storage, _c1, _m, ctx, sig in fn_defs:
+        if storage == "NXT_EXPORT":
+            declared_export.setdefault(name, (rel, line))
+
+    call_count = defaultdict(lambda: defaultdict(int))
+    for name, rel, line, col, ctx, kind, encl in usage_rows:
+        call_count[name][ctx] += 1
+
+    defined_names = {n for n, *_ in fn_defs}
+    seen_abi = set()
+    for name in sorted(set(declared_export) | set(nm_syms)):
+        if name in seen_abi:
+            continue
+        seen_abi.add(name)
+        decl_site = declared_export.get(name)
+        in_nm = nm_syms.get(name)
+        uses = call_count.get(name, {})
+        prod = uses.get(CTX_PROD, 0)
+        total_uses = sum(uses.values())
+        verdict = []
+        if decl_site and not in_nm and nm_syms:
+            verdict.append("declared-not-in-binary")
+        if in_nm and not decl_site and name in defined_names:
+            verdict.append("in-binary-not-declared")
+        if decl_site and total_uses == 0:
+            verdict.append("exported-never-referenced")
+        if in_nm and total_uses == 0 and name not in defined_names:
+            verdict.append("binary-only-unreferenced")
+        if in_nm and total_uses == 0 and name in defined_names:
+            verdict.append("in-binary-unreferenced")
+        if decl_site and prod == 0 and total_uses > 0:
+            verdict.append("exported-no-production-caller")
+        abi_rows.append((
+            name,
+            "public" if name in public_abi else "-",
+            "%s:%d" % decl_site if decl_site else "-",
+            in_nm[0] if in_nm else "-",
+            in_nm[1] if in_nm else "-",
+            prod, total_uses,
+            ",".join(verdict) or "agree"))
+
+    # ---- write artifacts
+    def write(fn, rows):
+        p = os.path.join(out_dir, fn)
+        with open(p, "w") as fh:
+            fh.write("#" + tsv(ARTIFACT_COLUMNS[fn]) + "\n")
+            for r in rows:
+                fh.write(tsv(r) + "\n")
+        return os.path.getsize(p)
+
+    sizes = {}
+    sizes["functions.tsv"] = write(
+        "functions.tsv",
+        sorted([(n, "def", f, l, e, s, c1, m, c, sig)
+                for (n, f, l, e, s, c1, m, c, sig) in fn_defs] +
+               [(n, "decl", f, l, "", s, "", "-", c, sig)
+                for (n, f, l, s, c, sig) in fn_decls],
+               key=lambda r: (r[0], r[2], r[3])))
+    sizes["usage.tsv"] = write(
+        "usage.tsv",
+        sorted(usage_rows, key=lambda r: (r[0], r[1], r[2])))
+    sizes["objects.tsv"] = write(
+        "objects.tsv",
+        sorted(top_objs, key=lambda r: (r[0], r[2], r[3])))
+    sizes["constants.tsv"] = write(
+        "constants.tsv",
+        sorted(consts, key=lambda r: (r[0], r[2], r[3])))
+    sizes["includes.tsv"] = write(
+        "includes.tsv",
+        sorted(set(includes_rows)))
+    sizes["abi.tsv"] = write(
+        "abi.tsv",
+        abi_rows)
+    sizes["public_abi.tsv"] = write(
+        "public_abi.tsv",
+        sorted((n, r) for n, r, _l, _s, _c, _sig in fn_decls
+               if r in public_headers))
+    sizes["coverage.tsv"] = write(
+        "coverage.tsv",
+        [(rel, ctx, c["lines"], c["code_lines"], c["defs"], c["decls"],
+          c["objs"], c["attributed"], c["unaccounted"],
+          c["first_unaccounted"], c["final_depth"], c["cond_conflicts"])
+         for rel, ctx, c in sorted(cov_rows)])
+    sizes["disagreements.tsv"] = write(
+        "disagreements.tsv",
+        sorted(findings))
+
+    elapsed = time.time() - t0
+    ctx_counts = defaultdict(int)
+    for r in usage_rows:
+        ctx_counts[r[4]] += 1
+
+    manifest = [
+        "# unit-registry MANIFEST",
+        "schema\t%s" % SCHEMA,
+        "tool_version\t%s" % VERSION,
+        "generated\t%s" % time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source_root\t%s" % src_root,
+        "ref\t%s" % ref,
+        "sha\t%s" % sha,
+        "build_dir\t%s" % (build_dir if nm_syms else "-"),
+        # Never "yes": nothing here shows the build came from this tree.
+        "build_matches_ref\t%s" % ("n/a" if not nm_syms else "assumed"),
+        "nm_symbols\t%d" % len(nm_syms),
+        "files\t%d" % len(files),
+        "c_files\t%d" % sum(1 for r, _c, _v in cov_rows if r.endswith(".c")),
+        "header_files\t%d" % sum(1 for r, _c, _v in cov_rows
+                                 if r.endswith(".h")),
+        "function_defs\t%d" % len(fn_defs),
+        "function_decls\t%d" % len(fn_decls),
+        "constants\t%d" % len(consts),
+        "top_level_objects\t%d" % len(top_objs),
+        "unbalanced_files\t%d" % sum(
+            1 for _r, _c, c in cov_rows if c["final_depth"] != 0),
+        "conditional_conflicts\t%d" % sum(
+            c["cond_conflicts"] for _r, _c, c in cov_rows),
+        "conditional_alt_defs\t%d" % alt_defs,
+        "conditional_hidden_files\t%d" % len(hidden),
+        "unattributed_lines\t%d" % sum(
+            c["unaccounted"] for _r, _c, c in cov_rows),
+        "usage_rows\t%d" % len(usage_rows),
+        "include_edges\t%d" % len(set(includes_rows)),
+        "index_seconds\t%.2f" % elapsed,
+        "crosscheck\t%s" % ("ast-grep" if xcheck_ok else "NONE"),
+        "crosscheck_disagreements\t%d" % len(findings),
+        "col1_outliers\t%d" % len(col1_bad),
+        "public_headers\t%d" % len(public_headers),
+        "public_abi_symbols\t%d" % len(public_abi),
+        "cxx_files_excluded\t%d" % len(cxx_files),
+        "cxx_files\t%s" % (",".join(sorted(cxx_files)) or "-"),
+        "go_files\t%d" % go_files,
+        "gate_failures\t%d" % len(failures),
+    ]
+    for c in CONTEXT_ORDER:
+        manifest.append("usage_%s\t%d" % (c, ctx_counts.get(c, 0)))
+    with open(os.path.join(out_dir, "MANIFEST"), "w") as fh:
+        fh.write("\n".join(manifest) + "\n")
+
+    # ---- report
+    print("indexed %s (%s) in %.2fs" % (ref, sha[:12], elapsed))
+    print("  %d files, %d defs, %d decls, %d objects, %d constants, "
+          "%d usage rows"
+          % (len(files), len(fn_defs), len(fn_decls), len(top_objs),
+             len(consts), len(usage_rows)))
+    tot_lines = sum(c["lines"] for _r, _c, c in cov_rows)
+    tot_un = sum(c["unaccounted"] for _r, _c, c in cov_rows)
+    print("  line accounting: %d/%d attributed (%.2f%% unaccounted)"
+          % (tot_lines - tot_un, tot_lines,
+             100.0 * tot_un / tot_lines if tot_lines else 0.0))
+    print("  usage by context: " + "  ".join(
+        "%s=%d" % (c, ctx_counts.get(c, 0)) for c in CONTEXT_ORDER))
+    print("  artifacts in %s" % out_dir)
+    for k in sorted(sizes):
+        print("    %-20s %8.1f KiB" % (k, sizes[k] / 1024.0))
+    print("  cross-check: %s" % ("ast-grep, %d file(s) disagree" % len(findings)
+                                 if xcheck_ok
+                                 else "NONE, see gate failures"
+                                 if args.crosscheck
+                                 else "NONE, cross-check disabled"))
+    if alt_defs:
+        print("  read from another #if branch: %d definition(s)" % alt_defs)
+    if hidden:
+        print("  not indexed, hidden by an #if/#else around a brace "
+              "(see disagreements.tsv): %s" % "; ".join(hidden[:6]))
+    if col1_bad:
+        print("  column-1 outliers: %d (e.g. %s)"
+              % (len(col1_bad), ", ".join("%s %s:%d" % x for x in col1_bad[:3])))
+    if failures:
+        print("\nGATE FAILURES (%d):" % len(failures))
+        for f in failures[:40]:
+            print("  ! " + f)
+        if len(failures) > 40:
+            print("  ... and %d more" % (len(failures) - 40))
+        print("\nThe artifacts are written for inspection, but every query "
+              "except `stat` refuses this registry until an index passes.")
+        return 1
+    print("\ngates: OK")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Queries
+# --------------------------------------------------------------------------
+
+class Registry:
+    def __init__(self, d, allow_failed=False):
+        self.dir = d
+        man = os.path.join(d, "MANIFEST")
+        if not os.path.exists(man):
+            die("no registry at %s. Run: unit-registry index" % d)
+        self.manifest = {}
+        for line in open(man):
+            if line.startswith("#") or "\t" not in line:
+                continue
+            k, v = line.rstrip("\n").split("\t", 1)
+            self.manifest[k] = v
+        if self.manifest.get("schema") != SCHEMA:
+            die("registry at %s has schema %s, this tool speaks %s. Re-index"
+                % (d, self.manifest.get("schema"), SCHEMA))
+        # An index whose gates failed has artifacts that are known to be
+        # wrong somewhere. Answering from them is the confidently-wrong case
+        # the gates exist to prevent.
+        gf = self.manifest.get("gate_failures")
+        if gf != "0" and not allow_failed:
+            die("registry at %s was written by an index whose gates failed "
+                "(gate_failures=%s). Fix the cause and re-index; "
+                "`unit-registry stat` shows the MANIFEST" % (d, gf or "?"))
+
+    def rows(self, name):
+        p = os.path.join(self.dir, name)
+        if not os.path.exists(p):
+            # Answering without it is answering from part of the index.
+            die("registry at %s has no %s. Re-index" % (self.dir, name))
+        with open(p) as fh:
+            head = fh.readline().lstrip("#").rstrip("\n").split("\t")
+            for line in fh:
+                if not line.strip():
+                    continue
+                yield dict(zip(head, line.rstrip("\n").split("\t")))
+
+    def all_symbols(self):
+        names = set()
+        for fn, col in (("functions.tsv", "symbol"), ("constants.tsv", "name"),
+                        ("objects.tsv", "name")):
+            for r in self.rows(fn):
+                names.add(r[col])
+        return names
+
+    def ref(self):
+        return "%s (%s)" % (self.manifest.get("ref", "?"),
+                            self.manifest.get("sha", "?")[:12])
+
+
+def unregistered(what, name,
+                 hint="Check the spelling, or it may be macro-generated."):
+    """Exit status 2 for a name the registry does not know.
+
+    Otherwise a typo answers "no callers" or "no uses" in the same words as a
+    real result, which is the most dangerous wrong answer this tool can give.
+    """
+    sys.stderr.write("unit-registry: %r is not in this registry: no %s of "
+                     "that name was indexed at this ref. %s\n"
+                     % (name, what, hint))
+    return 2
+
+
+def cmd_defs(reg, args):
+    print("# %s" % reg.ref())
+    n = 0
+    for r in reg.rows("functions.tsv"):
+        if r["symbol"] != args.symbol:
+            continue
+        n += 1
+        print("%-5s %-9s %s:%s  %s"
+              % (r["kind"], r["storage"], r["file"], r["line"], r["signature"]))
+    if not n:
+        return unregistered("function definition or declaration", args.symbol)
+    return 0
+
+
+def cmd_uses(reg, args):
+    print("# %s" % reg.ref())
+    if args.symbol not in reg.all_symbols():
+        return unregistered("definition, declaration, constant or object",
+                            args.symbol)
+    by_ctx = defaultdict(list)
+    for r in reg.rows("usage.tsv"):
+        if r["symbol"] != args.symbol:
+            continue
+        by_ctx[r["context"]].append(r)
+    site = {}
+    for r in reg.rows("functions.tsv"):
+        if r["symbol"] == args.symbol:
+            site.setdefault(r["kind"], "%s:%s" % (r["file"], r["line"]))
+    if site:
+        print("defined: %s" % site.get("def", "-"),
+              " declared:", site.get("decl", "-"))
+    total = sum(len(v) for v in by_ctx.values())
+    print("references: %d  (%s)" % (
+        total, "  ".join("%s=%d" % (c, len(by_ctx.get(c, [])))
+                         for c in CONTEXT_ORDER)))
+    if total == 0:
+        print("\nNO REFERENCES ANYWHERE: dead in this ref.")
+        return 0
+    if not by_ctx.get(CTX_PROD):
+        print("\nNO PRODUCTION CALLER: reachable only from %s."
+              % ", ".join(sorted(c for c in by_ctx)))
+    for c in CONTEXT_ORDER:
+        rs = by_ctx.get(c)
+        if not rs:
+            continue
+        if args.context and args.context != c:
+            continue
+        print("\n[%s]" % c)
+        for r in sorted(rs, key=lambda r: (r["file"], int(r["line"]))):
+            print("  %s:%s  %-5s in %s"
+                  % (r["file"], r["line"], r["kind"], r["enclosing"]))
+    return 0
+
+
+def _call_edges(reg):
+    """caller -> set(callee) and callee -> set((caller, file, line, ctx))."""
+    fwd, rev = defaultdict(set), defaultdict(set)
+    for r in reg.rows("usage.tsv"):
+        if r["kind"] != "call":
+            continue
+        fwd[r["enclosing"]].add(r["symbol"])
+        rev[r["symbol"]].add((r["enclosing"], r["file"], r["line"],
+                              r["context"]))
+    return fwd, rev
+
+
+def _addr_refs(reg):
+    """callee -> set((enclosing, file, line, ctx)) for every non-call reference.
+
+    For a function that is `&fn` or a bare `fn` stored in a pointer: the
+    function is reachable from wherever the pointer is dispatched, which the
+    call graph cannot see.
+    """
+    refs = defaultdict(set)
+    for r in reg.rows("usage.tsv"):
+        if r["kind"] == "ref":
+            refs[r["symbol"]].add((r["enclosing"], r["file"], r["line"],
+                                   r["context"]))
+    return refs
+
+
+def _by_site(rows):
+    return sorted(rows, key=lambda t: (t[1], int(t[2])))
+
+
+ADDR_TAKEN = "address-taken (not a direct call):"
+
+
+def cmd_callers(reg, args):
+    print("# %s" % reg.ref())
+    if args.symbol not in reg.all_symbols():
+        return unregistered("definition, declaration, constant or object",
+                            args.symbol)
+    _fwd, rev = _call_edges(reg)
+    addr = _addr_refs(reg)
+    home = None
+    for r in reg.rows("functions.tsv"):
+        if r["symbol"] == args.symbol and r["kind"] == "def":
+            home = r["file"]
+            break
+    if not args.transitive:
+        rs = _by_site(rev.get(args.symbol, ()))
+        taken = _by_site(addr.get(args.symbol, ()))
+        if not rs and not taken:
+            print("no callers of %s" % args.symbol)
+            return 0
+        for encl, f, l, ctx in rs:
+            print("  %s:%s  [%s]  in %s" % (f, l, ctx, encl))
+        if taken:
+            print("%s%s" % ("\n" if rs else "", ADDR_TAKEN))
+            for encl, f, l, ctx in taken:
+                print("  %s:%s  [%s]  in %s" % (f, l, ctx, encl))
+        return 0
+
+    # BFS up the call graph. With --external, stop expanding as soon as a
+    # caller lives outside the defining file: those are the entry points.
+    seen = {args.symbol}
+    frontier = [args.symbol]
+    depth = 0
+    external = []
+    while frontier and depth < args.max_depth:
+        edges = [(sym, e) for sym in frontier
+                 for e in _by_site(rev.get(sym, ()))]
+        if not edges:
+            break
+        depth += 1
+        nxt = []
+        print("\n-- depth %d --" % depth)
+        for sym, (encl, f, l, ctx) in edges:
+            print("  %s:%s  [%s]  %s -> %s" % (f, l, ctx, encl, sym))
+            if args.external and home is not None and f != home:
+                external.append((f, l, ctx, encl))
+                continue
+            if encl != "-" and encl not in seen:
+                seen.add(encl)
+                nxt.append(encl)
+        frontier = nxt
+    if args.external:
+        print("\ncall sites outside %s: %d" % (home, len(external)))
+        for f, l, ctx, encl in sorted(external, key=lambda t: (t[0], int(t[1]))):
+            print("  %s:%s  [%s]  in %s" % (f, l, ctx, encl))
+    # The walk follows call edges only. A function on it that is also stored
+    # in a pointer is reached through that pointer too; say so, with the count.
+    taken = sorted(((f, l, ctx, encl, sym) for sym in seen
+                    for encl, f, l, ctx in addr.get(sym, ())),
+                   key=lambda t: (t[0], int(t[1]), t[4]))
+    print("\naddress-taken references not followed: %d" % len(taken))
+    for f, l, ctx, encl, sym in taken:
+        print("  %s:%s  [%s]  %s taken in %s" % (f, l, ctx, sym, encl))
+    return 0
+
+
+def cmd_dead(reg, args):
+    print("# %s" % reg.ref())
+    public = {r["symbol"]: r["header"] for r in reg.rows("public_abi.tsv")}
+    # A form=macro row with a macro-arg row on its line is the invocation
+    # (PHP_FUNCTION, XS), whose function is the macro-arg row; the macro
+    # itself is not a function. Without that pair, form=macro only means
+    # an all-caps name, as for NXT_CMSG_NXTHDR, which is a real function.
+    defs = [r for r in reg.rows("functions.tsv") if r["kind"] == "def"]
+    invoked = {(r["file"], r["line"]) for r in defs
+               if r["form"] == "macro-arg"}
+    defs = [r for r in defs if r["form"] != "macro"
+            or (r["file"], r["line"]) not in invoked]
+    # A static in a .c file is visible only in that file, so it owns that
+    # file's references to its name and none from anywhere else. Without this
+    # a dead static is hidden by any same-named function elsewhere that is
+    # live. Header statics (nxt_inline) stay matched by bare name.
+    file_static = {(r["file"], r["symbol"]) for r in defs
+                   if r["storage"] == "static" and r["file"].endswith(".c")}
+    uses = defaultdict(lambda: defaultdict(int))
+    for r in reg.rows("usage.tsv"):
+        key = r["symbol"]
+        if (r["file"], key) in file_static:
+            key = (r["file"], key)
+        uses[key][r["context"]] += 1
+    rows = []
+    for r in defs:
+        if args.file_prefix and not r["file"].startswith(args.file_prefix):
+            continue
+        key = r["symbol"]
+        if (r["file"], key) in file_static:
+            key = (r["file"], key)
+        u = uses.get(key, {})
+        prod = u.get(CTX_PROD, 0) + u.get(CTX_MODULE, 0)
+        total = sum(u.values())
+        if args.mode == "everywhere" and total == 0:
+            rows.append((r, 0, 0))
+        elif args.mode == "production" and prod == 0 and r["context"] == CTX_PROD:
+            rows.append((r, prod, total))
+
+    # libunit is a shipped library: a symbol declared in an installed header
+    # has consumers this tree cannot see, so "no references here" is not a
+    # deletion candidate. Withheld by default rather than merely annotated,
+    # because this list is read as a to-delete list.
+    withheld = [t for t in rows if t[0]["symbol"] in public]
+    if not args.include_public:
+        rows = [t for t in rows if t[0]["symbol"] not in public]
+
+    print("%d symbol(s) with no %sreference\n"
+          % (len(rows), "" if args.mode == "everywhere" else "production "))
+    for r, prod, total in sorted(rows, key=lambda t: (t[0]["file"],
+                                                      int(t[0]["line"]))):
+        key = r["symbol"]
+        if (r["file"], key) in file_static:
+            key = (r["file"], key)
+        u = uses.get(key, {})
+        where = "  ".join("%s=%d" % (c, u[c]) for c in CONTEXT_ORDER if u.get(c))
+        tag = "  [PUBLIC ABI %s]" % public[r["symbol"]] \
+            if r["symbol"] in public else ""
+        print("  %-40s %s:%s  %-10s %s%s"
+              % (r["symbol"], r["file"], r["line"], r["storage"],
+                 where or "no references", tag))
+    if withheld and not args.include_public:
+        print("\n%d further symbol(s) have no in-tree reference but are "
+              "declared in an installed libunit header, so external code "
+              "links them: NOT deletion candidates. Show with "
+              "--include-public." % len(withheld))
+    print("\nApproximate: references resolve by name (statics in .c files "
+          "are scoped to their file), and calls through function pointers, "
+          "token pasting or code outside the tree are not seen. Confirm each "
+          "candidate by reading it before deleting.")
+    return 0
+
+
+def cmd_abi(reg, args):
+    print("# %s" % reg.ref())
+    if reg.manifest.get("nm_symbols", "0") == "0":
+        print("no built artifacts were indexed; the 'actual' side of the ABI "
+              "registry is empty. Re-index with --build <dir>.")
+    groups = defaultdict(list)
+    for r in reg.rows("abi.tsv"):
+        for v in r["verdict"].split(","):
+            groups[v].append(r)
+    for v in sorted(groups):
+        if args.verdict:
+            if v != args.verdict:
+                continue
+        elif v == "agree" and not args.all:
+            continue
+        rs = groups[v]
+        print("\n== %s (%d) ==" % (v, len(rs)))
+        for r in sorted(rs, key=lambda r: r["symbol"])[:args.limit]:
+            print("  %-44s declared=%-28s nm=%s/%s prod=%s total=%s"
+                  % (r["symbol"], r["declared_at"], r["nm_type"],
+                     r["nm_artifact"], r["prod_uses"], r["total_uses"]))
+        if len(rs) > args.limit:
+            print("  ... and %d more" % (len(rs) - args.limit))
+    return 0
+
+
+def cmd_const(reg, args):
+    print("# %s" % reg.ref())
+    found = False
+    for r in reg.rows("constants.tsv"):
+        if r["name"] != args.name:
+            continue
+        found = True
+        print("%-11s %s:%s  %s" % (r["kind"], r["file"], r["line"], r["value"]))
+    if not found:
+        return unregistered("#define or enum constant", args.name)
+    n = 0
+    by_ctx = defaultdict(int)
+    for r in reg.rows("usage.tsv"):
+        if r["symbol"] != args.name:
+            continue
+        n += 1
+        by_ctx[r["context"]] += 1
+    print("uses: %d  (%s)" % (n, "  ".join("%s=%d" % (c, by_ctx.get(c, 0))
+                                           for c in CONTEXT_ORDER)))
+    return 0
+
+
+def cmd_includes(reg, args):
+    print("# %s" % reg.ref())
+    fwd = [r for r in reg.rows("includes.tsv") if r["file"] == args.file]
+    rev = [r for r in reg.rows("includes.tsv") if r["includes"] == args.file]
+    if (not fwd and not rev
+            and args.file not in {r["file"] for r in reg.rows("coverage.tsv")}):
+        return unregistered("source file", args.file,
+                            "Give the path relative to the source root, "
+                            "e.g. src/nxt_conf.c.")
+    print("\n%s includes:" % args.file)
+    for r in sorted(fwd, key=lambda r: (r["origin"], r["includes"])):
+        print("  %-9s %s" % (r["origin"], r["includes"]))
+    print("\nincluded by (%d):" % len(rev))
+    for r in sorted(rev, key=lambda r: r["file"]):
+        print("  %-8s %s" % (r["context"], r["file"]))
+    return 0
+
+
+def cmd_stat(reg, args):
+    for line in open(os.path.join(reg.dir, "MANIFEST")):
+        sys.stdout.write(line)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# verify: the acceptance suite
+#
+# Two kinds of check, both re-derived from the artifacts alone.
+#
+# Invariants hold on any tree at any ref: if one fails, the registry is wrong.
+#
+# Tree checks pin hand-derived answers about specific FreeUnit symbols, each
+# chosen because the registry once got it wrong in the "delete live code"
+# direction. They are facts about a tree, not about the registry, so each one
+# states what it needs (the symbol defined, the files indexed) and is SKIPPED
+# with that reason at a ref where it is absent, rather than failed. Nothing
+# keys on a ref or branch name. A FAIL on a tree check means the registry or
+# the tree changed; the detail column says which sites it saw.
+# --------------------------------------------------------------------------
+
+def _artifact_problems(reg):
+    bad = []
+    for fn, cols in sorted(ARTIFACT_COLUMNS.items()):
+        p = os.path.join(reg.dir, fn)
+        try:
+            with open(p) as fh:
+                head = fh.readline().lstrip("#").rstrip("\n").split("\t")
+        except OSError:
+            bad.append("%s missing" % fn)
+            continue
+        if head != cols:
+            bad.append("%s has columns %s" % (fn, head))
+    return bad
+
+
+def cmd_verify(reg, args):
+    # Every later check reads these; with one gone they would pass on nothing.
+    missing = _artifact_problems(reg)
+    if missing:
+        print("# %s\n" % reg.ref())
+        print("FAIL  invariant: every artifact exists with its columns  %s"
+              % "; ".join(missing))
+        print("\n0 passed, 1 failed, 0 skipped")
+        return 1
+
+    uses = defaultdict(list)
+    for r in reg.rows("usage.tsv"):
+        uses[r["symbol"]].append(r)
+    funcs = list(reg.rows("functions.tsv"))
+    consts = list(reg.rows("constants.tsv"))
+    cov = {r["file"]: r for r in reg.rows("coverage.tsv")}
+    known = reg.all_symbols()
+
+    def files_of(sym, ctxs=None):
+        return sorted({r["file"] for r in uses.get(sym, ())
+                       if ctxs is None or r["context"] in ctxs})
+
+    results = []
+
+    def check(name, ok, detail):
+        results.append((name, ok, detail))
+
+    def needs(sym, *files):
+        """None if the check can run here, else the reason to skip it."""
+        if sym not in known:
+            return "skipped: %s not registered at this ref" % sym
+        missing = [f for f in files if f not in cov]
+        if missing:
+            return "skipped: not indexed at this ref: %s" % ", ".join(missing)
+        return None
+
+    def tree_check(name, sym, files, fn):
+        why = needs(sym, *files)
+        if why:
+            check(name, None, why)
+        else:
+            ok, detail = fn()
+            check(name, ok, detail)
+
+    # ---- invariants
+
+    def first(bad):
+        return "%d bad, e.g. %s" % (len(bad), bad[:3]) if bad else "ok"
+
+    check("invariant: the index passed its gates",
+          reg.manifest.get("gate_failures") == "0",
+          "gate_failures=%s" % reg.manifest.get("gate_failures"))
+
+    # An index built with --no-crosscheck has no gate failures and is still
+    # unverified; the acceptance suite must not call it accepted.
+    check("invariant: the index was cross-checked",
+          reg.manifest.get("crosscheck") not in (None, "NONE"),
+          "crosscheck=%s" % reg.manifest.get("crosscheck"))
+
+    check("invariant: every artifact exists with its columns", True,
+          "%d artifacts" % len(ARTIFACT_COLUMNS))
+
+    n_defs = sum(1 for r in funcs if r["kind"] == "def")
+    n_use = sum(len(v) for v in uses.values())
+    check("invariant: MANIFEST counts match the artifacts",
+          (reg.manifest.get("function_defs") == str(n_defs)
+           and reg.manifest.get("usage_rows") == str(n_use)),
+          "defs %s/%d, usage %s/%d"
+          % (reg.manifest.get("function_defs"), n_defs,
+             reg.manifest.get("usage_rows"), n_use))
+
+    bad = sorted({r["symbol"] for v in uses.values() for r in v
+                  if r["symbol"] not in known})
+    check("invariant: every reference names a registered symbol",
+          not bad, first(bad))
+
+    # A macro's name in its own body is a use only of a function or object
+    # of that name (see index_usage), so a constant's line is a site only
+    # when no function or object shares its name.
+    objs = list(reg.rows("objects.tsv"))
+    code_names = {r["symbol"] for r in funcs} | {r["name"] for r in objs}
+    sites = ({(r["symbol"], r["file"], r["line"]) for r in funcs}
+             | {(r["name"], r["file"], r["line"]) for r in objs}
+             | {(r["name"], r["file"], r["line"]) for r in consts
+                if r["name"] not in code_names})
+    bad = ["%s %s:%s" % (r["symbol"], r["file"], r["line"])
+           for v in uses.values() for r in v
+           if (r["symbol"], r["file"], r["line"]) in sites]
+    check("invariant: no definition or declaration counts as its own use",
+          not bad, first(bad))
+
+    bad = sorted({r["file"] for v in uses.values() for r in v
+                  if r["file"] not in cov})
+    check("invariant: every reference is in an indexed file",
+          not bad, first(bad))
+
+    bad = ["%s %s!=%s" % (r["file"], r["context"], cov[r["file"]]["context"])
+           for v in uses.values() for r in v
+           if r["file"] in cov and r["context"] != cov[r["file"]]["context"]]
+    check("invariant: each reference carries its file's context",
+          not bad, first(bad))
+
+    owners = ({(r["file"], r["symbol"]) for r in funcs if r["kind"] == "def"}
+              | {(r["file"], r["name"]) for r in consts
+                 if r["kind"] in ("define", "define-fn")})
+    bad = ["%s:%s in %s" % (r["file"], r["line"], r["enclosing"])
+           for v in uses.values() for r in v
+           if r["enclosing"] != "-"
+           and (r["file"], r["enclosing"]) not in owners]
+    check("invariant: each enclosing name is a function or macro of that file",
+          not bad, first(bad))
+
+    bad = ["%s %s" % (f, r["final_depth"]) for f, r in sorted(cov.items())
+           if r["final_depth"] != "0"]
+    bad += ["%s %s:%s" % (r["symbol"], r["file"], r["line"]) for r in funcs
+            if r["kind"] == "def" and int(r["end_line"]) < int(r["line"])]
+    check("invariant: every file balances and every body closes",
+          not bad, first(bad))
+
+    # ---- tree checks
+
+    tree_check("nxt_utf8_next has zero references", "nxt_utf8_next", (),
+               lambda: (not uses.get("nxt_utf8_next"),
+                        str(files_of("nxt_utf8_next"))))
+
+    tree_check("nxt_utf8_decode2 confined to src/nxt_utf8.{c,h}",
+               "nxt_utf8_decode2", ("src/nxt_utf8.c",),
+               lambda: (set(files_of("nxt_utf8_decode2"))
+                        <= {"src/nxt_utf8.c", "src/nxt_utf8.h"},
+                        str(files_of("nxt_utf8_decode2"))))
+
+    # A mention inside a string literal in the test is not a call.
+    tree_check("nxt_utf8_casecmp: no production caller", "nxt_utf8_casecmp",
+               ("src/test/nxt_utf8_test.c",),
+               lambda: (files_of("nxt_utf8_casecmp", {CTX_PROD}) == [],
+                        "all=%s" % files_of("nxt_utf8_casecmp")))
+
+    for sym in ("nxt_utf8_encode", "nxt_utf8_length"):
+        def fn(sym=sym):
+            prod = sorted({r["file"] for r in uses.get(sym, ())
+                           if r["context"] == CTX_PROD
+                           and r["file"] != "src/nxt_utf8.c"})
+            return prod == ["src/nxt_conf.c"], str(prod)
+        tree_check("%s production callers are src/nxt_conf.c only" % sym,
+                   sym, ("src/nxt_conf.c",), fn)
+
+    def json_escape():
+        _fwd, rev = _call_edges(reg)
+        seen, frontier, external = ({"nxt_conf_json_escape"},
+                                    ["nxt_conf_json_escape"], [])
+        for _ in range(6):
+            nxt = []
+            for sym in frontier:
+                for encl, fl, _ln, _ctx in rev.get(sym, ()):
+                    if fl != "src/nxt_conf.c":
+                        external.append(fl)
+                    elif encl != "-" and encl not in seen:
+                        seen.add(encl)
+                        nxt.append(encl)
+            frontier = nxt
+        return bool(external), "%d site(s) in %s" % (len(external),
+                                                    sorted(set(external)))
+    tree_check("nxt_conf_json_escape reached from outside src/nxt_conf.c",
+               "nxt_conf_json_escape", ("src/nxt_conf.c",), json_escape)
+
+    # A reference that exists only inside a macro body.
+    def conn_socket():
+        rs = [r for r in uses.get("nxt_conn_sys_socket", ())
+              if r["context"] == CTX_PROD]
+        return (any(r["enclosing"] == "nxt_conn_connect" for r in rs),
+                str(["%s:%s in %s" % (r["file"], r["line"], r["enclosing"])
+                     for r in rs]))
+    tree_check("nxt_conn_sys_socket is live via the nxt_conn_connect macro",
+               "nxt_conn_sys_socket", (), conn_socket)
+
+    # A wrapper macro whose expansion is the only caller.
+    tree_check("nxt_unit_close_impl is reached through the nxt_unit_close "
+               "macro", "nxt_unit_close_impl", (),
+               lambda: (any(r["enclosing"] == "nxt_unit_close"
+                            for r in uses.get("nxt_unit_close_impl", ())),
+                        "%d reference(s)"
+                        % len(uses.get("nxt_unit_close_impl", ()))))
+
+    # Code inside #if 0 is not compiled, so it is not a reference.
+    tree_check("nxt_fiber_main_create's only call site is #if 0, so it is "
+               "dead", "nxt_fiber_main_create", ("src/nxt_event_engine.c",),
+               lambda: (not uses.get("nxt_fiber_main_create"),
+                        "%d reference(s)"
+                        % len(uses.get("nxt_fiber_main_create", ()))))
+
+    # The lowcase tables are static arrays: compiled in, but local symbols,
+    # so not on the ABI side (which reads exports only). Read from the
+    # objects the scanner registered instead; no build needed.
+    blocks = sorted({r["name"] for r in reg.rows("objects.tsv")
+                     if r["name"].startswith("nxt_unicode_block_")})
+    name = "nxt_unicode_block_* are reached only via nxt_utf8_lowcase"
+    if not blocks:
+        check(name, None, "skipped: no nxt_unicode_block_* registered at "
+                          "this ref")
+    else:
+        def blocks_fn():
+            consumers = {r["enclosing"] for v in uses.values() for r in v
+                         if r["symbol"].startswith("nxt_unicode_block_")
+                         and r["enclosing"] != "-"}
+            return (consumers == {"nxt_utf8_lowcase"},
+                    "%d blocks; consumers=%s"
+                    % (len(blocks), sorted(consumers)))
+        tree_check(name, "nxt_utf8_lowcase", (), blocks_fn)
+
+    width = max(len(n) for n, _o, _d in results)
+    print("# %s\n" % reg.ref())
+    npass = nfail = nskip = 0
+    for name, ok, detail in results:
+        if ok is None:
+            nskip += 1
+            tag = "SKIP"
+        elif ok:
+            npass += 1
+            tag = "PASS"
+        else:
+            nfail += 1
+            tag = "FAIL"
+        print("%-4s  %-*s  %s" % (tag, width, name, detail))
+    print("\n%d passed, %d failed, %d skipped" % (npass, nfail, nskip))
+    return 1 if nfail else 0
+
+
+# --------------------------------------------------------------------------
+
+def git(root, *args):
+    p = subprocess.run(["git", "-C", root, *args], capture_output=True,
+                       text=True, timeout=120)
+    if p.returncode != 0:
+        die("git %s failed: %s" % (" ".join(args), p.stderr.strip()[:300]))
+    return p.stdout
+
+
+def warn(msg):
+    sys.stderr.write("unit-registry: %s\n" % msg)
+
+
+def die(msg):
+    sys.stderr.write("unit-registry: %s\n" % msg)
+    sys.exit(2)
+
+
+DEFAULT_SRC = os.environ.get(
+    "UNIT_SRC", os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "src"))
+DEFAULT_OUT = os.environ.get(
+    "UNIT_REGISTRY", os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "run", "registry"))
+
+
+def main(argv):
+    p = argparse.ArgumentParser(
+        prog="unit-registry",
+        description="A greppable code registry for the FreeUnit C tree. "
+                    "No database: the index is TSV you can rg, diff and read.",
+        epilog="Artifacts land in $UNIT_REGISTRY (default run/registry/). "
+               "Source tree from --src or $UNIT_SRC.")
+    p.add_argument("--src", default=DEFAULT_SRC,
+                   help="FreeUnit source tree (default: $UNIT_SRC)")
+    p.add_argument("--registry", default=DEFAULT_OUT,
+                   help="registry directory to read (default: $UNIT_REGISTRY)")
+    sub = p.add_subparsers(dest="cmd")
+
+    q = sub.add_parser("index", help="build the registry")
+    q.add_argument("--ref", help="index this git ref instead of the working "
+                                 "tree (e.g. origin/master)")
+    q.add_argument("--out", default=None, help="output directory")
+    b = q.add_mutually_exclusive_group()
+    b.add_argument("--build", default=None,
+                   help="build directory for the ABI side (default <src>/build)")
+    b.add_argument("--no-build", action="store_true",
+                   help="read no build directory; the ABI side stays empty")
+    q.add_argument("--astgrep", default=None, help="path to ast-grep")
+    q.add_argument("--no-crosscheck", dest="crosscheck", action="store_false",
+                   help="skip the ast-grep cross-check (the index is then "
+                        "unverified; say so if you report from it)")
+    q.set_defaults(crosscheck=True)
+
+    q = sub.add_parser("defs", help="where a symbol is defined and declared")
+    q.add_argument("symbol")
+
+    q = sub.add_parser("uses", help="every reference, split by context")
+    q.add_argument("symbol")
+    q.add_argument("--context", choices=CONTEXT_ORDER)
+
+    q = sub.add_parser("callers", help="who calls a symbol")
+    q.add_argument("symbol")
+    q.add_argument("--transitive", action="store_true")
+    q.add_argument("--external", action="store_true",
+                   help="with --transitive, report the call sites outside the "
+                        "defining file (the entry points)")
+    q.add_argument("--max-depth", type=int, default=6)
+
+    q = sub.add_parser("dead", help="definitions nothing references")
+    q.add_argument("--mode", choices=("production", "everywhere"),
+                   default="production")
+    q.add_argument("--file-prefix", default=None)
+    q.add_argument("--include-public", action="store_true",
+                   help="also list symbols declared in installed libunit "
+                        "headers (external code links these; they are not "
+                        "deletion candidates)")
+
+    q = sub.add_parser("abi", help="declared NXT_EXPORT vs what nm sees")
+    q.add_argument("--verdict", choices=(
+        "agree", "declared-not-in-binary", "in-binary-not-declared",
+        "exported-never-referenced", "binary-only-unreferenced",
+        "in-binary-unreferenced", "exported-no-production-caller"))
+    q.add_argument("--all", action="store_true")
+    q.add_argument("--limit", type=int, default=25)
+
+    q = sub.add_parser("const", help="a #define or enum constant")
+    q.add_argument("name")
+
+    q = sub.add_parser("includes", help="the include graph around a file")
+    q.add_argument("file")
+
+    sub.add_parser("stat", help="what this registry is and when it was built")
+    sub.add_parser("verify", help="the acceptance suite for the registry")
+
+    args = p.parse_args(argv)
+    if not args.cmd:
+        p.print_help()
+        return 0
+
+    if args.cmd == "index":
+        if args.out is None:
+            args.out = args.registry
+        args.build_is_explicit = args.build is not None
+        return do_index(args)
+
+    reg = Registry(args.registry, allow_failed=args.cmd == "stat")
+    return {
+        "defs": cmd_defs, "uses": cmd_uses, "callers": cmd_callers,
+        "dead": cmd_dead, "abi": cmd_abi, "const": cmd_const,
+        "includes": cmd_includes, "stat": cmd_stat, "verify": cmd_verify,
+    }[args.cmd](reg, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BrokenPipeError:
+        os._exit(0)
+    except KeyboardInterrupt:
+        sys.exit(130)
