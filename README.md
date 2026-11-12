@@ -71,6 +71,55 @@ Performance: `tools/bench-engines.sh` (A/B of two builds, noise floor first),
 one job on the lab machine, `tools/perf-compare.py` writes the verdict,
 `tools/perf-bisect.sh` finds the first slower commit ([docs/perf/perf-lab.md](docs/perf/perf-lab.md)).
 
+### Code registry
+
+`tools/unit-registry` indexes the C tree into flat TSV under `run/registry/`
+(`make registry`, a few seconds, no build needed; the cross-check needs
+[ast-grep](https://ast-grep.github.io/), and `REGISTRY_ARGS=--no-crosscheck` skips it)
+and answers from it:
+`uses <sym>` splits every reference into production, test, fuzzing, module and tool;
+`callers <sym> [--transitive]`, `dead`, `abi`, `const <name>`, `includes <file>` and
+`defs <sym>` do what they say. A name the registry does not know exits 2, so a typo
+cannot read as "no callers". `make registry REGISTRY_REF=<ref>` indexes a git ref
+without touching the checkout; it then reads no binary for the ABI half, because a
+binary built from the working tree says nothing about another ref. An index whose
+gates failed keeps its artifacts for inspection, but every query except `stat`
+refuses to answer from it, and so does an index with a source file, a directory or an
+`auto/` build script it could not read. `--build` on a directory with no artifacts
+exits 2; `make registry` passes `--no-build` when `BUILD_DIR` does not exist and says so.
+`make registry-verify` runs the registry's own checks: invariants that hold on any
+tree, plus pinned FreeUnit facts that skip when their symbol is absent at the indexed
+ref. It fails an index built without the cross-check or missing an artifact.
+
+References resolve by name. `dead` scopes a `static` in a `.c` file to that file, but
+`uses` and `callers` merge every function that shares a name, and calls through
+function pointers or token pasting are not seen. Only file-scope names are symbols:
+struct members, parameters and locals are not indexed, and inside its own scope a
+parameter or local that shares a file-scope name is not counted as a use of it.
+Where an `#if`/`#else` around a brace hides a definition, the other branch is read
+too; a definition that is still hidden is listed in `disagreements.tsv` and the index
+still builds. A function whose braces come from a whole-body macro is invisible to
+the scanner and to ast-grep. A K&R (old-style) definition is not indexed; FreeUnit
+has none. Generated headers (`build/include/nxt_auto_config.h`, `nxt_version.h`) are
+not read, so `NXT_VERSION` and the `NXT_HAVE_*` values of configure are unknown names.
+A constant tested in `#if`, `#elif`, `#ifdef`, `#ifndef` or `defined()` is a
+use of kind `pp`: `uses`, `const` and `dead` count it, `callers` does not; a function
+or object named there is not a use. The first `#ifndef` of a file followed by its
+`#define` is an include guard and is not a use, so a guard reports 0 uses unless another
+file tests it; a guard in any other position counts. A branch whose `#if` is constant
+false is dropped; a hex or unsigned literal or `?:` makes the condition unknown, and
+the branch is kept. Known limits the tree does not hit today: a definition returning a
+function pointer shows a cut signature, a parameter is excluded by line, and a
+block-scope `extern` reads as a new local. The module list is read from the source lists of `auto/modules/*`,
+not from their comments, and a file that `auto/sources` lists is never module code.
+Go code calls libunit
+as `C.name` from `go/*.go`; those calls are read as module references, but nothing
+else in Go is. `callers` lists a function stored in a pointer (`rp->handler = &fn;`)
+under "address-taken (not a direct call)", and `--transitive` does not follow those
+references; it prints how many it skipped. `abi` compares the declared exports with
+the global symbols of `sbin/unitd`, `lib/libunit.a`, `lib/libnxt.a` and the module
+`.so` files. Treat `dead` as a candidate list to read, not as proof.
+
 ### Local gates before a push
 
 `tools/gates/run-gates` runs seven gates against a FreeUnit checkout. Each gate prints

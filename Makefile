@@ -82,11 +82,18 @@ help:
 	@echo "  make ci-local       full CI pipeline in Docker"
 	@echo "  make bench A=<dir> B=<dir>   A/B benchmark two builds"
 	@echo
+	@echo "Read the code"
+	@echo "  make registry       index symbols, references and the ABI into REGISTRY_DIR"
+	@echo "  make registry REGISTRY_REF=<ref>   index a git ref instead of the working tree"
+	@echo "  make registry-verify   the registry's own acceptance checks"
+	@echo "  tools/unit-registry uses|callers|dead|abi|const|includes <arg>"
+	@echo
 	@echo "Clean"
 	@echo "  make clean          drop BUILD_DIR and RUN_DIR (run/dev only, not run/)"
 	@echo "  make distclean      also drop the managed source checkout"
 	@echo
 	@echo "Knobs: UNIT_GIT UNIT_REF UNIT_SRC BUILD_DIR RUN_DIR PORT MODULES JOBS"
+	@echo "       REGISTRY_DIR REGISTRY_REF REGISTRY_ARGS"
 	@echo "       CONFIGURE_FLAGS  (current: $(CONFIGURE_FLAGS))"
 
 # ---- doctor -----------------------------------------------------------------
@@ -234,6 +241,34 @@ bench:
 	    exit 2; \
 	fi
 	@tools/bench-engines.sh "$$(basename $(A))" "$(A)" "$$(basename $(B))" "$(B)" $(ROUNDS)
+
+# ---- registry ---------------------------------------------------------------
+# A greppable symbol, reference and ABI index of the C tree in flat TSV
+# (tools/unit-registry). No build needed; the ABI half reads BUILD_DIR if built.
+#
+# REGISTRY_REF indexes a git ref instead of the working tree. BUILD_DIR is
+# passed only for a working-tree index: a binary built from the working tree
+# says nothing about another ref, and the tool refuses to score a ref against
+# one unless it is named explicitly. A BUILD_DIR that does not exist is
+# reported and indexed with --no-build, never read from another directory.
+# One that exists with no artifacts (configured, not built), or no nm on
+# PATH, fails the index. The index needs ast-grep for its cross-check;
+# REGISTRY_ARGS=--no-crosscheck builds without it, and registry-verify then
+# refuses the result as unverified.
+REGISTRY_DIR ?= $(CURDIR)/run/registry
+REGISTRY_REF ?=
+REGISTRY_ARGS ?=
+.PHONY: registry registry-verify
+registry:
+	@if [ -n "$(REGISTRY_REF)" ]; then set -- --ref "$(REGISTRY_REF)"; \
+	elif [ -d "$(BUILD_DIR)" ]; then set -- --build "$(BUILD_DIR)"; \
+	else echo "registry: no BUILD_DIR '$(BUILD_DIR)': indexing without the ABI half" >&2; \
+	    set -- --no-build; fi; \
+	tools/unit-registry --src "$(UNIT_SRC)" index --out "$(REGISTRY_DIR)" "$$@" \
+	    $(REGISTRY_ARGS)
+
+registry-verify:
+	@tools/unit-registry --registry "$(REGISTRY_DIR)" verify
 
 # ---- clean ------------------------------------------------------------------
 .PHONY: clean distclean
