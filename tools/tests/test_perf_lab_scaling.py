@@ -1,13 +1,16 @@
 """Tests of the router-thread scaling kit in tools/perf-lab/scaling.
 
-The shell functions run from lib.sh under bash. Nothing touches the network:
-ssh is a stub that runs the remote command locally, and the topology is a fake
-sysfs tree. SCALING_LIB=<file> tests another copy of lib.sh.
+The shell functions run from lib.sh under sh, and so do sweep.sh and
+profile.sh. SCALING_SH="busybox sh" (or dash, or "bash --posix") picks another
+shell. Nothing touches the network: ssh is a stub that runs the remote command
+locally, and the topology is a fake sysfs tree. SCALING_LIB=<file> tests
+another copy of lib.sh.
 Run: python3 -m unittest discover -s tools/tests -v
 """
 import importlib.util
 import io
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -21,6 +24,7 @@ sys.dont_write_bytecode = True
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KIT = os.path.join(TOOLS, "perf-lab", "scaling")
 LIB = os.environ.get("SCALING_LIB") or os.path.join(KIT, "lib.sh")
+SH = shlex.split(os.environ.get("SCALING_SH") or "sh")
 
 
 def module(name):
@@ -39,7 +43,7 @@ class Base(unittest.TestCase):
 
     def lib(self, script, **env):
         e = dict(self.env, LIB=LIB, **env)
-        return subprocess.run(["bash", "-c", '. "$LIB"\n' + script], capture_output=True, text=True,
+        return subprocess.run(SH + ["-c", '. "$LIB"\n' + script], capture_output=True, text=True,
                               env=e, timeout=60, stdin=subprocess.DEVNULL)
 
     def topology(self, siblings):
@@ -276,7 +280,7 @@ class ProfilePreflightTest(FakeBox):
                    SYSCPU=os.path.join(self.tmp, "cpu") if os.path.isdir(os.path.join(self.tmp, "cpu"))
                    else self.topology(["0", "1"]),
                    PATH=stubs + os.pathsep + os.environ["PATH"], **extra)
-        r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
+        r = subprocess.run(SH + [os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
                            timeout=60, stdin=subprocess.DEVNULL)
         perf = ""
         if os.path.exists(calls):
@@ -366,9 +370,9 @@ class PerProcessTest(FakeBox):
     STUB = 'perf() { echo "perf $*" >&2; }\n'
 
     def test_perf_args(self):
-        r = self.lib(self.STUB + 'perf_args pids 10,11 0,1; echo "${PERF_T[*]}|${PERF_U[*]}"\n'
-                     'PERF_USER_ONLY=1 perf_args pids 10,11 0,1; echo "${PERF_T[*]}|${PERF_U[*]}"\n'
-                     'perf_args cpus 10,11 0,1; echo "${PERF_T[*]}"')
+        r = self.lib(self.STUB + 'perf_args pids 10,11 0,1; echo "$PERF_T $PERF_TA|$PERF_U"\n'
+                     'PERF_USER_ONLY=1 perf_args pids 10,11 0,1; echo "$PERF_T $PERF_TA|$PERF_U"\n'
+                     'perf_args cpus 10,11 0,1; echo "$PERF_T $PERF_TA"')
         self.assertEqual(r.stdout.split("\n")[:-1], ["-p 10,11|", "-p 10,11|--all-user --user-callchains",
                                                        "-a -C 0,1"])
 
@@ -401,7 +405,7 @@ class PerProcessTest(FakeBox):
         for scope, rc in (("", 0), ("cpus", 1)):
             env["OUT"] = os.path.join(self.tmp, "out-" + (scope or "default"))
             env["PERF_SCOPE"] = scope
-            r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True,
+            r = subprocess.run(SH + [os.path.join(KIT, "profile.sh")], capture_output=True, text=True,
                                env=env, timeout=60, stdin=subprocess.DEVNULL)
             self.assertEqual(r.returncode, rc, scope + ": " + r.stdout + r.stderr)
         self.assertIn("cpus: unavailable (system-wide mode needs perf_event_paranoid <= 0", r.stdout)
@@ -417,7 +421,7 @@ class FakeKitTest(FakeBox):
 static void quit(int s) { (void) s; _exit(0); }
 int main(void) { signal(SIGQUIT, quit); sleep(60); return 0; }
 """
-    UNITD = """#!/usr/bin/env bash
+    UNITD = """#!/bin/sh
 while [ $# -gt 0 ]; do
     case $1 in --pid) pidf=$2; shift ;; --control) ctl=${2#unix:}; shift ;; esac
     shift
@@ -425,7 +429,7 @@ done
 # bind in the directory: the absolute path can be longer than a unix socket path
 (cd "$(dirname "$ctl")" && python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \\
     "$(basename "$ctl")")
-(exec -a "unit: router" "$(dirname "$0")/router") > /dev/null 2>&1 &
+python3 -c 'import os, sys; os.execv(sys.argv[1], ["unit: router"])' "$(dirname "$0")/router" > /dev/null 2>&1 &
 echo $! > "$pidf"
 """
     CURL = """#!/bin/sh
@@ -477,7 +481,7 @@ echo '{"summary": {"requestsPerSec": 100.0}, "statusCodeDistribution": {"200": 1
                    PATH=self.stubs + os.pathsep + os.environ["PATH"], PERF_CALLS=self.calls, WORKLOADS="capp",
                    PERF_SEC="1", WARM="1")
         env.update(extra)
-        r = subprocess.run(["bash", os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
+        r = subprocess.run(SH + [os.path.join(KIT, "profile.sh")], capture_output=True, text=True, env=env,
                            timeout=120, stdin=subprocess.DEVNULL)
 
         def read(name):
@@ -599,6 +603,7 @@ time.sleep(30)
 
     def test_strace_futex_dies_with_its_caller(self):
         # The strace outlived a caller that got SIGTERM. The caller's traps must still run.
+        # dash and busybox ash run an EXIT trap on a signal only through exit_traps.
         self.stub()
         pidfile = os.path.join(self.tmp, "stub.pid")
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
@@ -608,7 +613,7 @@ time.sleep(30)
                        STUB_PIDFILE=pidfile)
             log = os.path.join(self.tmp, "caller.log")
             with open(log, "w") as f:   # a file, not a pipe: an orphan strace would hold a pipe open
-                p = subprocess.Popen(["bash", "-c", '. "$LIB"\ntrap "echo caller-exit" EXIT\n'
+                p = subprocess.Popen(SH + ["-c", '. "$LIB"\nexit_traps "echo caller-exit"\n'
                                       'strace_futex 1 20 "$TMPD/out" "$TMPD/err"\necho returned'],
                                      stdout=f, env=env, stdin=subprocess.DEVNULL)
             for _ in range(100):
@@ -635,9 +640,10 @@ time.sleep(30)
 
     def test_strace_futex_gives_back_the_traps_of_the_caller(self):
         self.stub()
-        r = self.lib('trap "echo mine" TERM\nstrace_futex 1 1 "$TMPD/out" "$TMPD/err"; echo "rc=$?"\ntrap -p TERM EXIT',
+        r = self.lib('trap "echo mine" TERM\nstrace_futex 1 1 "$TMPD/out" "$TMPD/err"; echo "rc=$?"\ntrap',
                      STRACE=os.path.join(self.tmp, "strace"), TMPD=self.tmp, STUB_MODE="0")
-        self.assertEqual(r.stdout, "rc=0\ntrap -- 'echo mine' SIGTERM\n", r.stderr)
+        # bash prints SIGTERM outside POSIX mode
+        self.assertEqual(r.stdout.replace("SIGTERM", "TERM"), "rc=0\ntrap -- 'echo mine' TERM\n", r.stderr)
 
     TARGET = """
 import ctypes, os, sys, threading, time
@@ -688,7 +694,7 @@ class SweepNameTest(Base):
                        WWW=os.path.join(self.tmp, "www"), TREES=os.path.join(self.tmp, "none"),
                        SYSCPU=os.path.join(self.tmp, "cpu") if os.path.isdir(os.path.join(self.tmp, "cpu"))
                        else self.topology(["0", "1"]))
-            r = subprocess.run(["bash", os.path.join(KIT, "sweep.sh")], capture_output=True, text=True, env=env,
+            r = subprocess.run(SH + [os.path.join(KIT, "sweep.sh")], capture_output=True, text=True, env=env,
                                timeout=60, stdin=subprocess.DEVNULL)
             self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertTrue(os.path.exists(keep), "VARIANTS=%r WORKLOADS=%r removed %s" % (variants, workloads, keep))
@@ -1261,6 +1267,49 @@ class RunStageTest(Base):
         r = self.run_sh()
         self.assertEqual(r.returncode, 2)
         self.assertIn("run.sh claim", r.stdout)
+
+
+class PosixShellTest(Base):
+    """lib.sh, sweep.sh and profile.sh are POSIX sh (docs/shell.md)."""
+
+    def test_scripts_parse(self):
+        # Parse with sh, and with dash, busybox ash and bash --posix when present.
+        shells = [["sh", "-n"]]
+        for name, cmd in (("dash", ["dash", "-n"]), ("busybox", ["busybox", "sh", "-n"]),
+                          ("bash", ["bash", "--posix", "-n"])):
+            if shutil.which(name):
+                shells.append(cmd)
+        for s in ("lib.sh", "sweep.sh", "profile.sh"):
+            path = os.path.join(KIT, s)
+            with open(path) as f:
+                self.assertEqual(f.readline(), "#!/bin/sh\n", s)
+            for cmd in shells:
+                r = subprocess.run(cmd + [path], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, f"{' '.join(cmd)} {s}: {r.stderr}")
+
+    def test_the_exit_trap_is_read_back_whole(self):
+        # The EXIT action holds " EXIT" at a line end, quotes and a blank line; other traps follow.
+        action = "echo \"a b\" 'c' EXIT\nprintf '%s\\n' x' EXIT\n\necho end"
+        r = self.lib('trap "$ACTION" EXIT; trap "echo t" TERM; trap "" QUIT\n'
+                     'f=$TMPD/traps; trap > "$f"; _sf_exit_action "$(cat "$f")"; trap - EXIT\n'
+                     '[ "$_SF_EXIT" = "$ACTION" ] && echo same\n'
+                     'trap - TERM; trap > "$f"; _sf_exit_action "$(cat "$f")"; echo "none[$_SF_EXIT]"',
+                     ACTION=action, TMPD=self.tmp)
+        self.assertEqual(r.stdout, "same\nnone[]\n", r.stderr)
+
+    def test_exit_traps_run_on_a_signal(self):
+        # dash and busybox ash skip a plain EXIT trap when a signal ends the shell.
+        for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            p = subprocess.Popen(SH + ["-c", '. "$LIB"\nexit_traps "echo cleanup"\necho up\nsleep 5 > /dev/null & wait'],
+                                 stdout=subprocess.PIPE, text=True, env=dict(self.env, LIB=LIB),
+                                 stdin=subprocess.DEVNULL)
+            self.assertEqual(p.stdout.readline(), "up\n")
+            p.send_signal(sig)
+            out = p.stdout.read()
+            p.wait(timeout=10)
+            p.stdout.close()
+            self.assertEqual(out, "cleanup\n", sig.name)
+            self.assertEqual(p.returncode, -sig, sig.name)
 
 
 if __name__ == "__main__":

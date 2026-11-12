@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # mirror-check.sh — prove that a copy of a repo still carries every committed
 # file, byte for byte, and that the next sync can write into it.
 #
@@ -58,66 +58,130 @@
 
 set -u
 
-if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
-   { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
-    echo "this script needs bash >= 4.4 (found $BASH_VERSION)" >&2; exit 2
-fi
-
 SRC=""; DEST=""; REV=""; ALLOW_DIFFER=0
-PATHSPEC=()
+PATHSPEC=""   # each --pathspec, quoted by shq, in the order given
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
 
+shq() {  # value -> one shell word that eval reads back as that value
+    sq_r="" sq_s=$1
+    while :; do
+        case "$sq_s" in
+        *\'*) sq_r="$sq_r${sq_s%%\'*}'\\''"; sq_s=${sq_s#*\'} ;;
+        *) break ;;
+        esac
+    done
+    printf "'%s'" "$sq_r$sq_s"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --rev)          REV="${2:-}"; shift 2 ;;
-        --pathspec)     PATHSPEC+=("${2:-}"); shift 2 ;;
+        --rev)          [ $# -ge 2 ] || usage; REV="$2"; shift 2 ;;
+        --pathspec)     [ $# -ge 2 ] || usage; PATHSPEC="$PATHSPEC $(shq "$2")"; shift 2 ;;
         --allow-differ) ALLOW_DIFFER=1; shift ;;
         -h|--help)      usage ;;
-        -*)             echo "unknown option: $1" >&2; usage ;;
+        -*)             printf '%s\n' "unknown option: $1" >&2; usage ;;
         *)              if [ -z "$SRC" ]; then SRC="$1"; else DEST="$1"; fi; shift ;;
     esac
 done
 
 [ -n "$SRC" ] && [ -n "$DEST" ] || usage
-[ -d "$DEST" ] || { echo "destination is not a directory: $DEST" >&2; exit 2; }
+[ -d "$DEST" ] || { printf '%s\n' "destination is not a directory: $DEST" >&2; exit 2; }
 git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 || {
-    echo "not a git tree: $SRC" >&2; exit 2; }
+    printf '%s\n' "not a git tree: $SRC" >&2; exit 2; }
 
 SRC=$(cd "$SRC" && pwd) || exit 2
 DEST=$(cd "$DEST" && pwd) || exit 2
 
-# -z / mapfile -d '': git quotes unusual paths in its default output, and a
-# quoted path never matches the file it names.
+NL='
+'
+TAB=$(printf '\t')
+BS=\\
+
+# shellcheck disable=SC2059  # the format is \ooo or one of \a \b \f \r \v, checked by the case
+# unquote PATH: git prints a path that holds a control character, '"' or '\'
+# in double quotes, with C escapes: \n \t \" \\ and \ooo octal. Sets uq_out
+# to the bytes of the path.
+unquote() {
+    uq_s=${1#\"}; uq_s=${uq_s%\"}; uq_out=""
+    while [ -n "$uq_s" ]; do
+        case $uq_s in
+        "$BS"*)
+            uq_s=${uq_s#?}
+            case $uq_s in
+            [0-7][0-7][0-7]*)
+                uq_c=$(printf "$BS${uq_s%"${uq_s#???}"}x"); uq_c=${uq_c%x}; uq_s=${uq_s#???} ;;
+            n*) uq_c=$NL; uq_s=${uq_s#?} ;;
+            t*) uq_c=$TAB; uq_s=${uq_s#?} ;;
+            [abfrv]*) uq_c=$(printf "$BS${uq_s%"${uq_s#?}"}x"); uq_c=${uq_c%x}; uq_s=${uq_s#?} ;;
+            *) uq_c=${uq_s%"${uq_s#?}"}; uq_s=${uq_s#?} ;;   # \" and \\
+            esac ;;
+        *)
+            uq_c=${uq_s%%"$BS"*}; uq_s=${uq_s#"$uq_c"} ;;
+        esac
+        uq_out=$uq_out$uq_c
+    done
+}
+
+# One path per line. core.quotePath=false prints other bytes as they are; a
+# path with a newline or a quote is still quoted, so a line is always one path.
+# git quotes unusual paths in its default output; unquote reads them back.
+eval "set -- $PATHSPEC"
 if [ -n "$REV" ]; then
-    mapfile -d '' -t FILES < <(git -C "$SRC" ls-tree -r -z --name-only "$REV" \
-                                   -- "${PATHSPEC[@]+"${PATHSPEC[@]}"}")
+    FILES=$(git -C "$SRC" -c core.quotePath=false ls-tree -r --name-only "$REV" -- "$@")
 else
-    mapfile -d '' -t FILES < <(git -C "$SRC" ls-files -z \
-                                   -- "${PATHSPEC[@]+"${PATHSPEC[@]}"}")
+    FILES=$(git -C "$SRC" -c core.quotePath=false ls-files -- "$@")
 fi
 
-[ "${#FILES[@]}" -gt 0 ] || {
+[ -n "$FILES" ] || {
     echo "no tracked files matched — check SRC and --pathspec" >&2; exit 2; }
 
-missing=0; differ=0; unwritable=0
-declare -A SEEN_DIR=()
+nfiles=0; missing=0; differ=0; unwritable=0
+ndirs=0; SEEN_DIR=$NL   # the directories checked, one key per line
 
-for f in "${FILES[@]}"; do
+# dir_key DIR: sets dk_out to DIR with "\" written as "\\" and a newline as
+# "\n". The key has no newline, so a whole-line match in SEEN_DIR is exact: a
+# directory name that holds a newline cannot look like two entries and hide
+# another directory from the writability check. A DIR without either
+# character is its own key; it has no "\", so no encoded key can equal it.
+dir_key() {
+    case $1 in
+    *["$BS$NL"]*) ;;
+    *) dk_out=$1; return ;;
+    esac
+    dk_s=$1 dk_out=""
+    while [ -n "$dk_s" ]; do
+        dk_c=${dk_s%%["$BS$NL"]*}
+        dk_out=$dk_out$dk_c; dk_s=${dk_s#"$dk_c"}
+        case $dk_s in
+        "$BS"*) dk_out="$dk_out$BS$BS" ;;
+        "$NL"*) dk_out="$dk_out${BS}n" ;;
+        esac
+        dk_s=${dk_s#?}
+    done
+}
+
+# A here-document, not a pipe: the loop sets the counts and exits in this shell.
+while IFS= read -r f; do
+    case $f in \"*) unquote "$f"; f=$uq_out ;; esac
+    nfiles=$((nfiles + 1))
     d="$DEST/$f"
 
     # The directory is what rsync needs to write; check each one once.
     dir=$(dirname "$d")
-    if [ -z "${SEEN_DIR[$dir]:-}" ]; then
-        SEEN_DIR[$dir]=1
+    dir_key "$dir"
+    case $SEEN_DIR in
+    *"$NL$dk_out$NL"*) ;;
+    *)
+        SEEN_DIR="$SEEN_DIR$dk_out$NL"; ndirs=$((ndirs + 1))
         if [ -d "$dir" ] && [ ! -w "$dir" ]; then
-            echo "UNWRITABLE ${dir#$DEST/}/"
+            printf '%s\n' "UNWRITABLE ${dir#"$DEST"/}/"
             unwritable=$((unwritable + 1))
-        fi
-    fi
+        fi ;;
+    esac
 
     if [ ! -e "$d" ]; then
-        echo "MISSING    $f"; missing=$((missing + 1)); continue
+        printf '%s\n' "MISSING    $f"; missing=$((missing + 1)); continue
     fi
 
     if [ -n "$REV" ]; then
@@ -126,16 +190,18 @@ for f in "${FILES[@]}"; do
         src_hash=$(git -C "$SRC" hash-object -- "$SRC/$f" 2>/dev/null)
     fi
     [ -n "$src_hash" ] || {
-        echo "could not hash source file: $f (in $SRC)" >&2; exit 2; }
+        printf '%s\n' "could not hash source file: $f (in $SRC)" >&2; exit 2; }
 
     dst_hash=$(git -C "$SRC" hash-object -- "$d" 2>/dev/null)
     if [ "$src_hash" != "$dst_hash" ]; then
-        echo "DIFFER     $f"; differ=$((differ + 1))
+        printf '%s\n' "DIFFER     $f"; differ=$((differ + 1))
     fi
-done
+done <<EOF
+$FILES
+EOF
 
 echo
-echo "checked ${#FILES[@]} tracked files in ${#SEEN_DIR[@]} directories:" \
+echo "checked $nfiles tracked files in $ndirs directories:" \
      "missing=$missing differ=$differ unwritable=$unwritable"
 [ "$(id -u)" = 0 ] && echo "note: running as root — the writability check cannot fail" >&2
 

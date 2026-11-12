@@ -165,7 +165,7 @@ prepare() {  # sha patchfile configure-args -> prints tree path
     [ -n "$pp_patch" ] && pp_name="$pp_name-p$(sha256sum "$pp_patch" | cut -c1-8)"
     # Per-side configure arguments get their own tree: one SHA can be built
     # two ways in one job (CONFIGURE_ARGS_A and CONFIGURE_ARGS_B).
-    case "$pp_cargs" in *[!\ ]*) pp_name="$pp_name-c$(echo "$pp_cargs" | sha256sum | cut -c1-8)" ;; esac
+    case "$pp_cargs" in *[!\ ]*) pp_name="$pp_name-c$(printf '%s\n' "$pp_cargs" | sha256sum | cut -c1-8)" ;; esac
     pp_t=$W/trees/$pp_name
     if [ ! -f "$pp_t/.lab-src-ok" ]; then
         rm -rf "$pp_t"; mkdir -p "$pp_t"
@@ -178,7 +178,7 @@ prepare() {  # sha patchfile configure-args -> prints tree path
     # py-*: the Unit python3 module (build/lib/unit/modules/python3.unit.so) for the image's python3.
     case "$WORKLOAD" in py-*) pp_php="./configure python --config=python3-config --module=python3 >/dev/null && make -j$BUILD_JOBS python3 >/dev/null &&" ;; esac
     [ "$WORKLOAD" = capp ] && pp_extra="make -j$BUILD_JOBS build/lib/libunit.a >/dev/null && cc -O2 -I src -I build/include -o build/lab_capp src/test/nxt_unit_app_test.c build/lib/libunit.a -lpthread &&"
-    pp_stamp=$(echo "$IMG $CONFIGURE_ARGS $pp_cargs $WORKLOAD" | sha256sum | cut -c1-16)
+    pp_stamp=$(printf '%s\n' "$IMG $CONFIGURE_ARGS $pp_cargs $WORKLOAD" | sha256sum | cut -c1-16)
     if [ "$(cat "$pp_t/.lab-build" 2>/dev/null)" != "$pp_stamp" ] || [ ! -x "$pp_t/build/sbin/unitd" ]; then
         log "building $pp_name ($WORKLOAD) in $LAB_IMAGE" >&2
         docker run --rm --user "$(id -u):$(id -g)" -v "$pp_t:/src" -w /src "$LAB_IMAGE" sh -c \
@@ -282,6 +282,6 @@ docker run --rm --name "$CONTAINER" --cap-add PERFMON --cap-add SYS_PTRACE \
     > "$RUN/cells.log" 2>&1 || { tail -20 "$RUN/cells.log"; fail "cells failed, see cells.log"; }
 CONTAINER=""
 cat "$RUN/sizes.tsv" >> "$RUN/results.tsv"
-echo "ended=$(date -Is)" >> "$RUN/meta.txt"
+printf '%s\n' "ended=$(date -Is)" >> "$RUN/meta.txt"
 log "done"
 STATUS=0

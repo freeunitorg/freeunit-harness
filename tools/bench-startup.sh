@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bench-startup.sh -- startup/lifecycle latency for one unitd build, measured
 # as wall-clock time across the four phases a change to the startup path can
 # actually move.
@@ -144,6 +144,11 @@
 #   root-owned and sudo prompts, so an agent cannot set it -- either the user
 #   runs `sudo cpupower frequency-set -g performance` first, or the run
 #   carries ALLOW_POWERSAVE=1 and the report says so out loud.
+# This script needs bash on purpose, not POSIX sh (docs/shell.md). Its clock
+# is EPOCHREALTIME and its poll loops use /dev/tcp, exec {fd}, read -t and
+# mapfile, so no fork lands inside a measured interval. POSIX sh has no clock
+# and no socket without a fork (date, curl), and a fork costs about 5 ms, more
+# than the resolution this script reports. See "RESOLUTION, AND WHAT IT IS NOT" above.
 set -u
 export LC_ALL=C
 

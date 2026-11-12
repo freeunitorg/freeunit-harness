@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # ci-local — run the CI gates locally, in the CI image, before you push.
 #
 # Runs the same sequence the server repo's workflows run, in dependency order,
@@ -21,7 +21,10 @@
 #                         0..versions-1 (see pkg/eol.json); omit for the whole
 #                         suite (the default, "test")
 
-set -euo pipefail
+# pipefail is not in every POSIX shell. This script runs no pipeline whose
+# status matters on the host; the commands inside the CI image still run
+# under bash -euo pipefail (see run below).
+set -eu
 
 HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
 UNIT_SRC="${UNIT_SRC:-$HARNESS/src}"
@@ -33,7 +36,9 @@ SHARD=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --shard)
-            SHARD="${2:?--shard needs a number}"
+            # Not ${2:?}: its exit status is 1 in bash and 2 in dash and ash.
+            [ $# -ge 2 ] && [ -n "$2" ] || { echo "ci-local: --shard needs a number" >&2; exit 1; }
+            SHARD="$2"
             shift 2
             ;;
         --shard=*)
@@ -41,7 +46,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         *)
-            echo "ci-local: unrecognized argument: $1" >&2
+            printf '%s\n' "ci-local: unrecognized argument: $1" >&2
             exit 1
             ;;
     esac
@@ -53,11 +58,11 @@ done
 PLATFORM="${PLATFORM:-linux/amd64}"
 
 command -v docker >/dev/null || { echo "docker not found — ci-local needs it" >&2; exit 1; }
-[ -d "$UNIT_SRC" ] || { echo "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
+[ -d "$UNIT_SRC" ] || { printf '%s\n' "no source tree at $UNIT_SRC — run 'make src'" >&2; exit 1; }
 
 has_stage() { case " $STAGES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-echo "==> building CI image ($PLATFORM)"
+printf '%s\n' "==> building CI image ($PLATFORM)"
 docker build --platform "$PLATFORM" -t "$IMAGE" -f "$HARNESS/ci/Dockerfile.dev" "$HARNESS/ci"
 
 # One container for the whole run so stages share the configured tree.
@@ -119,19 +124,19 @@ if has_stage 5; then
         # shard path fails locally instead of only on CI (see #396).
         command -v jq >/dev/null || { echo "ci-local: jq not found — needed to derive --shard from pkg/eol.json" >&2; exit 1; }
         EOL_JSON="$UNIT_SRC/pkg/eol.json"
-        [ -f "$EOL_JSON" ] || { echo "ci-local: no $EOL_JSON — can't derive shards" >&2; exit 1; }
+        [ -f "$EOL_JSON" ] || { printf '%s\n' "ci-local: no $EOL_JSON — can't derive shards" >&2; exit 1; }
 
         VERSIONS="$(jq -r '.runtimes.python | length' "$EOL_JSON")"
         case "$VERSIONS" in
             ''|0|*[!0-9]*)
-                echo "::error::no python runtimes in $EOL_JSON" >&2
+                printf '%s\n' "::error::no python runtimes in $EOL_JSON" >&2
                 exit 1
                 ;;
         esac
 
         case "$SHARD" in
             ''|*[!0-9]*)
-                echo "ci-local: --shard must be a non-negative integer, got '$SHARD'" >&2
+                printf '%s\n' "ci-local: --shard must be a non-negative integer, got '$SHARD'" >&2
                 exit 1
                 ;;
         esac
@@ -172,10 +177,10 @@ if has_stage 5; then
         # directory not found" abort deep inside stage 5 (or not at all, if
         # ci-local never sharded and stayed green while CI did not).
         for p in $TESTPATH; do
-            [ -e "$UNIT_SRC/$p" ] || { echo "ci-local: derived test path does not exist: $p" >&2; exit 1; }
+            [ -e "$UNIT_SRC/$p" ] || { printf '%s\n' "ci-local: derived test path does not exist: $p" >&2; exit 1; }
         done
 
-        echo "==> shard $SHARD/$((VERSIONS - 1)): $TESTPATH"
+        printf '%s\n' "==> shard $SHARD/$((VERSIONS - 1)): $TESTPATH"
     fi
 
     # Rebuild without the plugin first: stage 4 leaves the tree configured for

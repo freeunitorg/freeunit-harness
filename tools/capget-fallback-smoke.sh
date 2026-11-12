@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # capget-fallback-smoke.sh — start build/sbin/unitd unprivileged under
 # tools/secexec with SYS_capget filtered, and prove the plan-capget-fallback.md
 # (S3) fallback actually took effect: the new [warn] line fired, the router
@@ -129,7 +129,6 @@
 
 set -u
 
-HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 UNITD=""
@@ -151,9 +150,13 @@ REFUSED_PATTERN='refused to start: capset\(\) is denied'
 START_FAILED_PATTERN="failed to start a process"
 KEEP=0
 
-die() { echo "capget-fallback-smoke.sh: $*" >&2; exit 2; }
+die() { printf '%s\n' "capget-fallback-smoke.sh: $*" >&2; exit 2; }
 
 while [ $# -gt 0 ]; do
+    case "$1" in
+        --unitd|--modulesdir|--app-type|--caps|--uid|--gid|--errno|--secexec|--capget-probe|--warn-pattern)
+            [ $# -ge 2 ] || die "$1 needs a value (see --help)" ;;
+    esac
     case "$1" in
         --unitd) UNITD="$2"; shift 2 ;;
         --modulesdir) MODULESDIR="$2"; shift 2 ;;
@@ -191,14 +194,13 @@ done
 
 CC="${CC:-cc}"
 
-build_tool() {
-    local src="$1" out="$2"
+build_tool() {  # src out
     if "$CC" --version 2>&1 | grep -qi 'tiny c compiler\|tcc version'; then
         if [ "${CC_ALLOW_TCC:-0}" != 1 ]; then
             die "$CC is tcc -- unproven for secexec's BPF filter (see BUILD NOTE at the top of this script). Run this in a container with a real gcc/clang, or set CC=gcc / CC=clang. (Override with CC_ALLOW_TCC=1 if you have independently verified this tcc build -- you should not need to.)"
         fi
     fi
-    "$CC" -O2 -Wall -Wextra -o "$out" "$src" || die "failed to build $src"
+    "$CC" -O2 -Wall -Wextra -o "$2" "$1" || die "failed to build $1"
 }
 
 if [ -z "$SECEXEC" ]; then
@@ -217,12 +219,12 @@ fi
 # built and required but never invoked. Run it once per invocation (the
 # errno is the same for both variants), from inside the exec'd image, not
 # just checking that secexec's own prctl(PR_SET_SECCOMP) call succeeded.
-echo "== capget-probe pre-flight: secexec --errno=$TARGET_ERRNO -- capget-probe =="
+printf '%s\n' "== capget-probe pre-flight: secexec --errno=$TARGET_ERRNO -- capget-probe =="
 case "$TARGET_ERRNO" in
     EPERM|ENOSYS)
         PROBE_OUT="$("$SECEXEC" --errno="$TARGET_ERRNO" -- "$CAPGET_PROBE" --want="$TARGET_ERRNO" 2>&1)"
         PROBE_RC=$?
-        echo "$PROBE_OUT"
+        printf '%s\n' "$PROBE_OUT"
         [ "$PROBE_RC" = 0 ] || die "capget-probe pre-flight failed: capget() did not fail with $TARGET_ERRNO across execve -- see output above. The unitd variants below cannot be trusted until this passes."
         ;;
     *)
@@ -231,13 +233,13 @@ case "$TARGET_ERRNO" in
         # reported errno ourselves.
         PROBE_OUT="$("$SECEXEC" --errno="$TARGET_ERRNO" -- "$CAPGET_PROBE" 2>&1)"
         PROBE_RC=$?
-        echo "$PROBE_OUT"
+        printf '%s\n' "$PROBE_OUT"
         [ "$PROBE_RC" = 0 ] || die "capget-probe pre-flight: capget-probe itself failed (exit $PROBE_RC) -- see output above"
         printf '%s\n' "$PROBE_OUT" | grep -q "errno=$TARGET_ERRNO(" \
             || die "capget-probe pre-flight: expected errno=$TARGET_ERRNO in probe output, got: $PROBE_OUT"
         ;;
 esac
-echo "-- capget-probe pre-flight OK: filter survives execve, capget() fails with $TARGET_ERRNO as expected"
+printf '%s\n' "-- capget-probe pre-flight OK: filter survives execve, capget() fails with $TARGET_ERRNO as expected"
 
 # --- temp tree, one per variant ----------------------------------------------
 
@@ -249,26 +251,32 @@ TMPROOT="$(mktemp -d /tmp/capget-fallback-smoke.XXXXXX)"
 # dir (which IS chowned to them, and stays private to them via its own
 # mode).
 chmod 0711 "$TMPROOT"
-cleanup() {
-    local ec=$?
+cleanup_tree() {
     if [ "$KEEP" = 1 ]; then
-        echo "capget-fallback-smoke.sh: kept $TMPROOT (--keep)" >&2
+        printf '%s\n' "capget-fallback-smoke.sh: kept $TMPROOT (--keep)" >&2
     else
         rm -rf "$TMPROOT"
     fi
-    exit "$ec"
+}
+cleanup() {
+    cl_ec=$?
+    cleanup_tree
+    exit "$cl_ec"
 }
 trap cleanup EXIT INT TERM
+# bash runs the EXIT trap when HUP ends it, and then dies by HUP; dash and
+# busybox ash skip the EXIT trap. Do what bash did.
+trap 'trap - EXIT HUP; cleanup_tree; kill -s HUP $$' HUP
 
 FAILED=0
 
 wait_for() {   # path timeout_s
-    local path="$1" n="${2:-50}"
-    while [ ! -e "$path" ] && [ "$n" -gt 0 ]; do
+    wf_n="${2:-50}"
+    while [ ! -e "$1" ] && [ "$wf_n" -gt 0 ]; do
         sleep 0.1
-        n=$((n - 1))
+        wf_n=$((wf_n - 1))
     done
-    [ -e "$path" ]
+    [ -e "$1" ]
 }
 
 # Own your processes: everything unitd spawns (router, controller, app
@@ -277,22 +285,23 @@ wait_for() {   # path timeout_s
 # confuse with this script's own group -- same discipline as
 # tools/unitd-ctl.
 reap() {   # pgid
-    local pgid="$1"
-    [ -n "$pgid" ] || return 0
-    kill -TERM "-$pgid" 2>/dev/null
+    [ -n "$1" ] || return 0
+    kill -TERM "-$1" 2>/dev/null
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "-$pgid" 2>/dev/null || return 0
+        kill -0 "-$1" 2>/dev/null || return 0
         sleep 0.5
     done
-    kill -KILL "-$pgid" 2>/dev/null
+    kill -KILL "-$1" 2>/dev/null
 }
 
+# No local in POSIX sh: the variables of run_variant are global, and no other
+# function uses their names.
 run_variant() {
-    local label="$1" caps="$2" deny="${3:-capget}"
-    local wd="$TMPROOT/$label"
-    local statedir="$wd/state" pidfile="$wd/unit.pid" logfile="$wd/unit.log"
-    local controlsock="$wd/control.unit.sock" tmpdir="$wd/tmp"
-    local appdir="$wd/app" appsock="$wd/app.sock"
+    label="$1" caps="$2" deny="${3:-capget}"
+    wd="$TMPROOT/$label"
+    statedir="$wd/state" pidfile="$wd/unit.pid" logfile="$wd/unit.log"
+    controlsock="$wd/control.unit.sock" tmpdir="$wd/tmp"
+    appdir="$wd/app" appsock="$wd/app.sock"
 
     mkdir -p "$statedir" "$tmpdir" "$appdir"
 
@@ -322,19 +331,21 @@ def application(environ, start_response):
 PY
 
     chown -R "$TARGET_UID:$TARGET_GID" "$wd" 2>/dev/null || {
-        echo "-- $label: chown failed (need root to set up --uid/--gid $TARGET_UID:$TARGET_GID); skipping" >&2
+        printf '%s\n' "-- $label: chown failed (need root to set up --uid/--gid $TARGET_UID:$TARGET_GID); skipping" >&2
         FAILED=1
         return
     }
 
-    local -a priv=(setpriv --reuid="$TARGET_UID" --regid="$TARGET_GID" --clear-groups --no-new-privs)
+    # The extra setpriv options are the positional parameters.
     if [ "$caps" = ambient ]; then
-        priv+=(--inh-caps=+setuid,+setgid --ambient-caps=+setuid,+setgid)
+        set -- --inh-caps=+setuid,+setgid --ambient-caps=+setuid,+setgid
+    else
+        set --
     fi
 
-    echo "== $label (caps=$caps, deny=$deny, errno=$TARGET_ERRNO) =="
+    printf '%s\n' "== $label (caps=$caps, deny=$deny, errno=$TARGET_ERRNO) =="
 
-    setsid "${priv[@]}" -- \
+    setsid setpriv --reuid="$TARGET_UID" --regid="$TARGET_GID" --clear-groups --no-new-privs "$@" -- \
         "$SECEXEC" --errno="$TARGET_ERRNO" --syscall="$deny" -- \
         "$UNITD" --no-daemon \
             --modulesdir "$MODULESDIR" \
@@ -344,10 +355,10 @@ PY
             --control "unix:$controlsock" \
             --tmpdir "$tmpdir" \
             >"$wd/stdout.log" 2>&1 <&- &
-    local pgid=$!
+    pgid=$!
 
     if ! wait_for "$controlsock" 50; then
-        echo "FAIL $label: control socket never appeared -- see $logfile / $wd/stdout.log" >&2
+        printf '%s\n' "FAIL $label: control socket never appeared -- see $logfile / $wd/stdout.log" >&2
         cat "$logfile" 2>/dev/null >&2
         reap "$pgid"
         FAILED=1
@@ -363,29 +374,28 @@ PY
     # across --reuid, caps=ambient would pass while testing the exact same
     # thing as caps=none.
     if ! wait_for "$pidfile" 50; then
-        echo "FAIL $label: pid file never appeared -- see $logfile / $wd/stdout.log" >&2
+        printf '%s\n' "FAIL $label: pid file never appeared -- see $logfile / $wd/stdout.log" >&2
         cat "$logfile" 2>/dev/null >&2
         reap "$pgid"
         FAILED=1
         return
     fi
-    local unitd_pid unitd_status cap_eff_hex cap_amb_hex
     unitd_pid=$(tr -d '[:space:]' < "$pidfile")
     unitd_status="/proc/$unitd_pid/status"
     if [ -z "$unitd_pid" ] || [ ! -r "$unitd_status" ]; then
-        echo "FAIL $label: cannot read $unitd_status (pid '$unitd_pid' from $pidfile)" >&2
+        printf '%s\n' "FAIL $label: cannot read $unitd_status (pid '$unitd_pid' from $pidfile)" >&2
         reap "$pgid"
         FAILED=1
         return
     fi
     cap_eff_hex=$(awk '/^CapEff:/ {print $2; exit}' "$unitd_status")
     cap_amb_hex=$(awk '/^CapAmb:/ {print $2; exit}' "$unitd_status")
-    echo "-- $label: unitd (pid $unitd_pid) CapEff=$cap_eff_hex CapAmb=$cap_amb_hex"
+    printf '%s\n' "-- $label: unitd (pid $unitd_pid) CapEff=$cap_eff_hex CapAmb=$cap_amb_hex"
     if [ "$caps" = ambient ]; then
         if [ -z "$cap_eff_hex" ] || [ -z "$cap_amb_hex" ] \
             || [ "$(( 0x$cap_eff_hex & 0xc0 ))" != $((0xc0)) ] \
             || [ "$(( 0x$cap_amb_hex & 0xc0 ))" != $((0xc0)) ]; then
-            echo "FAIL $label: ambient-caps pre-flight -- unitd's own CapEff=$cap_eff_hex CapAmb=$cap_amb_hex do not both carry SETUID|SETGID (mask 0xc0). setpriv --ambient-caps did not survive to unitd; this variant would otherwise silently test the same thing as caps=none." >&2
+            printf '%s\n' "FAIL $label: ambient-caps pre-flight -- unitd's own CapEff=$cap_eff_hex CapAmb=$cap_amb_hex do not both carry SETUID|SETGID (mask 0xc0). setpriv --ambient-caps did not survive to unitd; this variant would otherwise silently test the same thing as caps=none." >&2
             reap "$pgid"
             FAILED=1
             return
@@ -393,7 +403,6 @@ PY
     fi
 
     # Load the app: PUT the whole config in one shot.
-    local cfg
     cfg=$(cat <<JSON
 {
     "listeners": { "unix:$appsock": { "pass": "applications/whoami" } },
@@ -409,17 +418,16 @@ PY
 }
 JSON
     )
-    local put_out
     put_out=$(curl -s --unix-socket "$controlsock" -X PUT --data-binary "$cfg" 'http://localhost/config')
     if ! printf '%s' "$put_out" | grep -q '"success"'; then
-        echo "FAIL $label: config PUT did not report success: $put_out" >&2
+        printf '%s\n' "FAIL $label: config PUT did not report success: $put_out" >&2
         reap "$pgid"
         FAILED=1
         return
     fi
 
     if ! wait_for "$appsock" 50; then
-        echo "FAIL $label: app listener socket never appeared after config PUT" >&2
+        printf '%s\n' "FAIL $label: app listener socket never appeared after config PUT" >&2
         reap "$pgid"
         FAILED=1
         return
@@ -429,7 +437,7 @@ JSON
     # --- refusal, not a response.  With none held (capset-nocaps) the
     # --- expectation is the ordinary one and this branch is skipped.
     if [ "$deny" = capset ] && [ "$caps" = ambient ]; then
-        local ok=1 code
+        ok=1
         code=$(curl -s -o /dev/null -w '%{http_code}' \
                     --unix-socket "$appsock" 'http://localhost/')
 
@@ -439,22 +447,21 @@ JSON
         # here is the bug this variant exists to catch -- it would mean the
         # application ran with unitd's capabilities.
         if [ "$code" != 503 ]; then
-            echo "FAIL $label: app request returned HTTP $code, wanted 503 -- body was:" >&2
+            printf '%s\n' "FAIL $label: app request returned HTTP $code, wanted 503 -- body was:" >&2
             curl -s --unix-socket "$appsock" 'http://localhost/' >&2
             ok=0
         fi
 
-        local pat
         for pat in "$CAPSET_WARN_PATTERN" "$REFUSED_PATTERN" \
                    "$START_FAILED_PATTERN"; do
             if ! grep -qE "$pat" "$logfile"; then
-                echo "FAIL $label: no line matching /$pat/ in $logfile" >&2
+                printf '%s\n' "FAIL $label: no line matching /$pat/ in $logfile" >&2
                 ok=0
             fi
         done
 
         if ! grep -q 'router started' "$logfile"; then
-            echo "FAIL $label: no 'router started' in $logfile" >&2
+            printf '%s\n' "FAIL $label: no 'router started' in $logfile" >&2
             ok=0
         fi
 
@@ -464,20 +471,19 @@ JSON
         # controller (.restart = 1, re-forked with no backoff) would be in a
         # respawn loop and unitd would not be sitting here answering.
         if ! kill -0 "$unitd_pid" 2>/dev/null; then
-            echo "FAIL $label: unitd (pid $unitd_pid) is gone -- the core processes did not survive the denial" >&2
+            printf '%s\n' "FAIL $label: unitd (pid $unitd_pid) is gone -- the core processes did not survive the denial" >&2
             ok=0
         fi
 
-        local cfg_code
         cfg_code=$(curl -s -o /dev/null -w '%{http_code}' \
                         --unix-socket "$controlsock" 'http://localhost/config')
         if [ "$cfg_code" != 200 ]; then
-            echo "FAIL $label: controller answered HTTP $cfg_code on /config, wanted 200" >&2
+            printf '%s\n' "FAIL $label: controller answered HTTP $cfg_code on /config, wanted 200" >&2
             ok=0
         fi
 
         if [ "$ok" = 1 ]; then
-            echo "PASS $label: capset() denied -- app refused with 503, prototype and router both said so, unitd still serving its control socket while holding CapEff=$cap_eff_hex CapAmb=$cap_amb_hex"
+            printf '%s\n' "PASS $label: capset() denied -- app refused with 503, prototype and router both said so, unitd still serving its control socket while holding CapEff=$cap_eff_hex CapAmb=$cap_amb_hex"
         else
             FAILED=1
         fi
@@ -486,22 +492,21 @@ JSON
         return
     fi
 
-    local body
     body=$(curl -s --unix-socket "$appsock" 'http://localhost/')
     if [ -z "$body" ]; then
-        echo "FAIL $label: app request returned no body" >&2
+        printf '%s\n' "FAIL $label: app request returned no body" >&2
         reap "$pgid"
         FAILED=1
         return
     fi
 
-    local ok=1
+    ok=1
 
     # Only when capget(2) is what was denied: the warning is
     # nxt_capability_specific_set()'s, and a capset-only filter never
     # reaches it.
     if [ "$deny" = capget ] && ! grep -qE "$WARN_PATTERN" "$logfile"; then
-        echo "FAIL $label: no [warn] line matching /$WARN_PATTERN/ in $logfile" >&2
+        printf '%s\n' "FAIL $label: no [warn] line matching /$WARN_PATTERN/ in $logfile" >&2
         ok=0
     fi
 
@@ -509,21 +514,20 @@ JSON
     # refused anything: nxt_capability_still_held() had to find the sets
     # already empty and let the start proceed.
     if [ "$deny" = capset ] && grep -qE "$REFUSED_PATTERN" "$logfile"; then
-        echo "FAIL $label: prototype refused to start although no capability was held -- see $logfile" >&2
+        printf '%s\n' "FAIL $label: prototype refused to start although no capability was held -- see $logfile" >&2
         ok=0
     fi
     if ! grep -q 'router started' "$logfile"; then
-        echo "FAIL $label: no 'router started' in $logfile" >&2
+        printf '%s\n' "FAIL $label: no 'router started' in $logfile" >&2
         ok=0
     fi
 
     # The assertion that matters: the app's OWN /proc/self/status, read from
     # inside the app process, says it is running as the uid we started
     # unitd as -- not root, not escalated, in EITHER caps mode.
-    local app_uid
     app_uid=$(printf '%s\n' "$body" | awk '/^Uid:/ {print $2; exit}')
     if [ "$app_uid" != "$TARGET_UID" ]; then
-        echo "FAIL $label: app /proc/self/status Uid was '$app_uid', wanted $TARGET_UID -- body:" >&2
+        printf '%s\n' "FAIL $label: app /proc/self/status Uid was '$app_uid', wanted $TARGET_UID -- body:" >&2
         printf '%s\n' "$body" >&2
         ok=0
     fi
@@ -535,28 +539,28 @@ JSON
     # nxt_capability_drop() ran in the prototype -- CapAmb is included
     # because it is the one set that would otherwise survive an execve()
     # into an "external" application.
-    local app_cap_eff_hex="" set_name set_hex
+    app_cap_eff_hex=""
     for set_name in CapInh CapPrm CapEff CapAmb; do
         set_hex=$(printf '%s\n' "$body" | awk -v n="^$set_name:" '$0 ~ n {print $2; exit}')
         if [ -z "$set_hex" ]; then
             if [ "$set_name" = CapAmb ]; then
                 continue    # needs Linux 4.3
             fi
-            echo "FAIL $label: app /proc/self/status had no $set_name: line -- body:" >&2
+            printf '%s\n' "FAIL $label: app /proc/self/status had no $set_name: line -- body:" >&2
             printf '%s\n' "$body" >&2
             ok=0
             continue
         fi
         [ "$set_name" = CapEff ] && app_cap_eff_hex="$set_hex"
         if [ "$(( 0x$set_hex ))" != 0 ]; then
-            echo "FAIL $label: app $set_name=$set_hex, wanted 0 -- unitd held CapEff=$cap_eff_hex CapAmb=$cap_amb_hex and the fork should not have passed that on -- body:" >&2
+            printf '%s\n' "FAIL $label: app $set_name=$set_hex, wanted 0 -- unitd held CapEff=$cap_eff_hex CapAmb=$cap_amb_hex and the fork should not have passed that on -- body:" >&2
             printf '%s\n' "$body" >&2
             ok=0
         fi
     done
 
     if [ "$ok" = 1 ]; then
-        echo "PASS $label: [warn] present, router started, app uid == $TARGET_UID, app capability sets all empty (CapEff=$app_cap_eff_hex) while unitd held CapEff=$cap_eff_hex CapAmb=$cap_amb_hex"
+        printf '%s\n' "PASS $label: [warn] present, router started, app uid == $TARGET_UID, app capability sets all empty (CapEff=$app_cap_eff_hex) while unitd held CapEff=$cap_eff_hex CapAmb=$cap_amb_hex"
     else
         FAILED=1
     fi

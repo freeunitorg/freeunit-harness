@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # new-failures.sh — run a checker at a base revision and at your tree, and fail
 # only on failures your change INTRODUCED.
 #
@@ -55,11 +55,6 @@
 set -u
 export LC_ALL=C          # must cover sort AND comm; see the header
 
-if [ "${BASH_VERSINFO[0]}" -lt 4 ] ||
-   { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
-    echo "this script needs bash >= 4.4 (found $BASH_VERSION)" >&2; exit 2
-fi
-
 BASE=""
 REPO="${UNIT_SRC:-$(cd "$(dirname "$0")/.." && pwd)/src}"
 MATCH='^FAIL '
@@ -69,7 +64,14 @@ KEEP=0
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
 
+# An option without its value is a usage error. Before, "shift 2" with one
+# argument left looped for ever in bash and ended dash and ash at once.
+need2() { [ "$1" -ge 2 ] || { echo "$2 needs a value" >&2; usage; }; }
+
 while [ $# -gt 0 ]; do
+    case "$1" in
+        --base|--repo|--match|--key-sed|--ok-status) need2 $# "$1" ;;
+    esac
     case "$1" in
         --base)       BASE="${2:-}"; shift 2 ;;
         --repo)       REPO="${2:-}"; shift 2 ;;
@@ -79,14 +81,14 @@ while [ $# -gt 0 ]; do
         --keep)       KEEP=1; shift ;;
         --)           shift; break ;;
         -h|--help)    usage ;;
-        *)            echo "unknown option: $1" >&2; usage ;;
+        *)            printf '%s\n' "unknown option: $1" >&2; usage ;;
     esac
 done
 
 [ -n "$BASE" ] || { echo "--base is required" >&2; usage; }
 [ $# -gt 0 ]   || { echo "no CMD given after --" >&2; usage; }
 [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || {
-    echo "not a git tree: $REPO (pass --repo, or run 'make src')" >&2; exit 2; }
+    printf '%s\n' "not a git tree: $REPO (pass --repo, or run 'make src')" >&2; exit 2; }
 
 REPO=$(cd "$REPO" && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/new-failures.XXXXXX")
@@ -94,7 +96,7 @@ BASE_TREE="$WORK/base"
 
 cleanup() {
     if [ "$KEEP" = 1 ]; then
-        echo "kept: $WORK" >&2
+        printf '%s\n' "kept: $WORK" >&2
         return
     fi
     [ -d "$BASE_TREE" ] && git -C "$REPO" worktree remove --force "$BASE_TREE" >/dev/null 2>&1
@@ -102,8 +104,8 @@ cleanup() {
 }
 CHILD=""
 
-# Ctrl-C is the expected way to abort a long checker run, and bash does NOT run
-# an EXIT trap when it dies of SIGINT — verified: the base worktree stayed
+# Ctrl-C is the expected way to abort a long checker run, and no shell here
+# (bash, dash, busybox ash) runs an EXIT trap when it dies of SIGINT — verified: the base worktree stayed
 # registered in the user's repo, recoverable only with `git worktree prune`,
 # which nothing would have told them to run. So: handle the signal, kill the
 # checker, clean up, then die of the signal properly.
@@ -117,22 +119,34 @@ trap cleanup EXIT
 trap on_signal INT TERM HUP
 
 status_ok() {
-    local s="$1" w
-    local -a want
-    IFS=',' read -ra want <<< "$OK_STATUS"
-    for w in "${want[@]}"; do [ "$s" = "$w" ] && return 0; done
+    so_s="$1" so_rest="$OK_STATUS,"
+    while [ -n "$so_rest" ]; do
+        so_w=${so_rest%%,*}; so_rest=${so_rest#*,}
+        [ "$so_s" = "$so_w" ] && return 0
+    done
     return 1
 }
 
-# Run CMD against $1, capturing stdout+stderr to $2; sets RC.
+# run_checker TREE OUT CMD...: run CMD against TREE, capturing stdout+stderr
+# to OUT; sets RC. Every literal {} in each word of CMD becomes TREE.
 # Backgrounded and waited on rather than run in the foreground: `wait` is
 # interruptible, so a Ctrl-C during a ten-minute checker is handled now instead
 # of whenever the checker happens to finish.
 run_checker() {
-    local tree="$1" out="$2" arg
-    local -a cmd=()
-    for arg in "${CMD[@]}"; do cmd+=("${arg//\{\}/$tree}"); done
-    "${cmd[@]}" > "$out" 2>&1 &
+    rc_tree="$1" rc_out="$2"; shift 2
+    rc_n=$#
+    while [ "$rc_n" -gt 0 ]; do
+        rc_s=$1 rc_r=""; shift
+        while :; do
+            case $rc_s in
+                *'{}'*) rc_r=$rc_r${rc_s%%'{}'*}$rc_tree; rc_s=${rc_s#*'{}'} ;;
+                *) break ;;
+            esac
+        done
+        set -- "$@" "$rc_r$rc_s"
+        rc_n=$((rc_n - 1))
+    done
+    "$@" > "$rc_out" 2>&1 &
     CHILD=$!
     wait "$CHILD"
     RC=$?                      # the child's status, never a pipeline's: after a
@@ -147,26 +161,26 @@ keys_from() {
     fi | LC_ALL=C sort -u
 }
 
-CMD=("$@")
+# CMD stays in "$@" from here on; nothing below shifts it.
 
 BASE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "$BASE^{commit}") || {
-    echo "base revision not found in $REPO: $BASE" >&2; exit 2; }
+    printf '%s\n' "base revision not found in $REPO: $BASE" >&2; exit 2; }
 
-echo "==> base worktree: $BASE ($BASE_SHA)"
+printf '%s\n' "==> base worktree: $BASE ($BASE_SHA)"
 git -C "$REPO" worktree add --detach "$BASE_TREE" "$BASE_SHA" >/dev/null 2>&1 || {
     echo "could not create a worktree at $BASE_SHA" >&2; exit 3; }
 
-run_checker "$BASE_TREE" "$WORK/before.txt"; before_rc=$RC
+run_checker "$BASE_TREE" "$WORK/before.txt" "$@"; before_rc=$RC
 echo "    checker exit $before_rc"
 if ! status_ok "$before_rc"; then
-    echo "!! checker exited $before_rc at the base (not in --ok-status=$OK_STATUS)." >&2
+    printf '%s\n' "!! checker exited $before_rc at the base (not in --ok-status=$OK_STATUS)." >&2
     echo "   The base run did not execute; a delta against it means nothing." >&2
     sed -n '1,20p' "$WORK/before.txt" >&2
     exit 3
 fi
 
-echo "==> working tree: $REPO"
-run_checker "$REPO" "$WORK/after.txt"; after_rc=$RC
+printf '%s\n' "==> working tree: $REPO"
+run_checker "$REPO" "$WORK/after.txt" "$@"; after_rc=$RC
 echo "    checker exit $after_rc"
 if ! status_ok "$after_rc"; then
     echo "!! checker exited $after_rc on the working tree." >&2
@@ -179,9 +193,12 @@ keys_from "$WORK/after.txt"  > "$WORK/after.keys"
 nb=$(wc -l < "$WORK/before.keys"); na=$(wc -l < "$WORK/after.keys")
 
 for side in before after; do
-    eval "n=\$n${side:0:1} rc=\$${side}_rc"
+    case $side in
+        before) n=$nb rc=$before_rc ;;
+        after)  n=$na rc=$after_rc ;;
+    esac
     if [ "$n" -eq 0 ] && [ "$rc" -ne 0 ]; then
-        echo "!! $side run matched no '$MATCH' lines but exited $rc — the" >&2
+        printf '%s\n' "!! $side run matched no '$MATCH' lines but exited $rc — the" >&2
         echo "   --match pattern probably does not fit this checker's output." >&2
         exit 3
     fi

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # hosts — resolve a machine ROLE to the ssh name this checkout should use.
 #
 # WHY
@@ -43,6 +43,7 @@
 set -u
 
 HARNESS=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck disable=SC2034  # read by tools/lib/env.sh
 LAB_HARNESS=$HARNESS
 # shellcheck source=lib/env.sh
 . "$HARNESS/tools/lib/env.sh"
@@ -53,18 +54,18 @@ die() { printf 'hosts: %s\n' "$*" >&2; exit 1; }
 lab_env_load
 
 # val NAME: the loaded value of NAME, empty when unset or not a valid name.
+# NAME is checked before the eval, so file content is never evaluated.
 val() {
     case $1 in ''|[0-9]*|*[!A-Z0-9_]*) printf '\n'; return 0 ;; esac
-    printf '%s\n' "${!1:-}"
+    eval "printf '%s\\n' \"\${$1:-}\""
 }
 UPPER() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 
 # host_for ROLE — the ssh name, following the fallback chain in the header.
 host_for() {
-    local h
     case $(UPPER "$1") in
         BUILD)  val BUILD_HOST ;;
-        ALPINE) h=$(val ALPINE_HOST); [ -n "$h" ] || h=$(val LAB_DOCKER_HOST); printf '%s\n' "$h" ;;
+        ALPINE) hf_h=$(val ALPINE_HOST); [ -n "$hf_h" ] || hf_h=$(val LAB_DOCKER_HOST); printf '%s\n' "$hf_h" ;;
         LAB)    val PERF_HOST ;;
         INFER)  val INFER_HOST ;;
         BOT)    val BOT_HOST ;;

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # run-gates — the local gates an agent runs on a FreeUnit checkout before a
 # push.  Each gate prints "G<n>: PASS" or "G<n>: FAIL: ...".  The exit status
@@ -53,7 +53,7 @@
 
 set -u
 
-HARNESS_GATES=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit
+HARNESS_GATES=$(cd "$(dirname "$0")" && pwd) || exit
 CONTRACTS=$HARNESS_GATES/contract_functions.txt
 
 REPO=
@@ -67,16 +67,16 @@ ALLOW_LOCAL_BUILD=0
 FAILED=0
 
 export JAVA_TOOL_OPTIONS=
-
+need() { printf 'run-gates: %s\n' "$1" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case "$1" in
-        -s|--src)       REPO=${2:?-s needs a checkout}; shift 2 ;;
-        -g|--gates)     GATES=${2:?-g needs a gate list}; shift 2 ;;
-        -t|--tests)     SLICE=${2:?-t needs a test list}; shift 2 ;;
-        --fuzz-seconds) FUZZ_SECONDS=${2:?--fuzz-seconds needs a number}; shift 2 ;;
+        -s|--src)       [ -n "${2:-}" ] || need "-s needs a checkout"; REPO=$2; shift 2 ;;
+        -g|--gates)     [ -n "${2:-}" ] || need "-g needs a gate list"; GATES=$2; shift 2 ;;
+        -t|--tests)     [ -n "${2:-}" ] || need "-t needs a test list"; SLICE=$2; shift 2 ;;
+        --fuzz-seconds) [ -n "${2:-}" ] || need "--fuzz-seconds needs a number"; FUZZ_SECONDS=$2; shift 2 ;;
         --allow-local-build) ALLOW_LOCAL_BUILD=1; shift ;;
         -h|--help)      sed -n '3,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
-        *)              echo "run-gates: unknown argument: $1" >&2; exit 2 ;;
+        *)              printf '%s\n' "run-gates: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 
@@ -87,7 +87,7 @@ if [ -z "$REPO" ]; then
 fi
 
 if [ ! -d "$REPO" ]; then
-    echo "run-gates: no checkout at $REPO" >&2
+    printf '%s\n' "run-gates: no checkout at $REPO" >&2
     echo "run-gates: pass one with -s <checkout>, or set UNIT_SRC," \
          "or run 'make src'" >&2
     exit 2
@@ -96,12 +96,12 @@ fi
 REPO=$(cd "$REPO" && pwd) || exit 2
 
 if [ ! -f "$REPO/configure" ]; then
-    echo "run-gates: $REPO holds no ./configure, so it is not a FreeUnit" \
+    printf '%s %s\n' "run-gates: $REPO holds no ./configure, so it is not a FreeUnit" \
          "checkout" >&2
     exit 2
 fi
 
-echo "checkout: $REPO"
+printf '%s\n' "checkout: $REPO"
 
 cd "$REPO" || exit 2
 
@@ -110,21 +110,22 @@ cd "$REPO" || exit 2
 LOGDIR=$(mktemp -d "${TMPDIR:-/tmp}/freeunit-gates.XXXXXX") || exit
 
 fail() {
-    echo "G$1: FAIL: $2"
+    printf '%s\n' "G$1: FAIL: $2"
     FAILED=1
     return 1
 }
 
 # run <gate> <log name> <command...>: on failure, show the tail of the log.
 run() {
-    local log="$LOGDIR/g$1-$2.log"
+    run_gate=$1 run_name=$2 run_log="$LOGDIR/g$1-$2.log"
+    shift 2
 
-    if "${@:3}" >"$log" 2>&1; then
+    if "$@" >"$run_log" 2>&1; then
         return 0
     fi
 
-    tail -n 40 "$log"
-    fail "$1" "$2 failed, see $log"
+    tail -n 40 "$run_log"
+    fail "$run_gate" "$run_name failed, see $run_log"
 }
 
 # local_build_allowed <gate>: a gate that builds runs only when the caller
@@ -141,23 +142,23 @@ local_build_allowed() {
 }
 
 gate_1() {
-    local cc rc=0
+    g1_rc=0
 
     local_build_allowed 1 || return 1
 
-    for cc in gcc clang; do
-        if ! command -v "$cc" >/dev/null; then
-            echo "G1 ($cc): SKIP: not found"
+    for g1_cc in gcc clang; do
+        if ! command -v "$g1_cc" >/dev/null; then
+            echo "G1 ($g1_cc): SKIP: not found"
             continue
         fi
 
         rm -rf build
-        run 1 "$cc-configure" \
-            env CC="$cc" ./configure --zlib --openssl --hardening=strict \
-            && run 1 "$cc-build" make -j2 || rc=1
+        run 1 "$g1_cc-configure" \
+            env CC="$g1_cc" ./configure --zlib --openssl --hardening=strict \
+            && run 1 "$g1_cc-build" make -j2 || g1_rc=1
     done
 
-    return $rc
+    return $g1_rc
 }
 
 gate_2() {
@@ -178,39 +179,39 @@ gate_2() {
 }
 
 gate_3() {
-    local asan="-fsanitize=address,undefined" logs rc
+    g3_asan="-fsanitize=address,undefined"
 
     local_build_allowed 3 || return 1
 
     rm -rf build
     run 3 configure env ASAN_OPTIONS=detect_leaks=0 ./configure --debug \
-        --tests --openssl --cc-opt="$asan -fno-omit-frame-pointer -O1" \
-        --ld-opt="$asan" \
+        --tests --openssl --cc-opt="$g3_asan -fno-omit-frame-pointer -O1" \
+        --ld-opt="$g3_asan" \
         && run 3 build make -j2 unitd \
         || return 1
 
     # A sanitizer report from unitd goes only to unit.log.  pytest can pass
     # with such a report.  Keep the logs in a private directory, and scan
     # them as CI does (.github/workflows/sanitize.yml).
-    logs=$(mktemp -d)
+    g3_logs=$(mktemp -d)
 
     # The router runs as an unprivileged user.  It must reach the files
     # under this directory.
-    chmod 755 "$logs"
+    chmod 755 "$g3_logs"
 
     # TZ as in sanitize.yml: test_static_last_modified_is_gmt skips under
     # UTC.
     run 3 pytest env ASAN_OPTIONS=detect_leaks=0 \
-        UBSAN_OPTIONS=print_stacktrace=1 TMPDIR="$logs" TZ=Asia/Kolkata \
+        UBSAN_OPTIONS=print_stacktrace=1 TMPDIR="$g3_logs" TZ=Asia/Kolkata \
         sh -c "cd test && $PYTEST --save-log test_static.py"
-    rc=$?
+    g3_rc=$?
 
     run 3 sanitizer-reports .github/scripts/check-sanitizer-reports.sh \
-        "$logs" .github/sanitizer-allowlist.txt || rc=1
+        "$g3_logs" .github/sanitizer-allowlist.txt || g3_rc=1
 
-    rm -rf "$logs"
+    rm -rf "$g3_logs"
 
-    return $rc
+    return $g3_rc
 }
 
 # The fuzz build as in fuzzing/build-fuzz.sh, but a failed configure or
@@ -219,16 +220,16 @@ gate_3() {
 # report fail the run (halt_on_error=1), and it writes new inputs to
 # build/fuzz-corpora/, not to the tracked seed corpus.
 gate_4() {
-    local flags="-g -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
+    g4_flags="-g -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
 
     local_build_allowed 4 || return 1
 
-    flags="$flags -fsanitize=address,undefined -fsanitize=fuzzer-no-link"
+    g4_flags="$g4_flags -fsanitize=address,undefined -fsanitize=fuzzer-no-link"
 
     rm -f build/fuzz_basic
 
-    run 4 configure env CC=clang CXX=clang++ CFLAGS="$flags" \
-            CXXFLAGS="$flags" \
+    run 4 configure env CC=clang CXX=clang++ CFLAGS="$g4_flags" \
+            CXXFLAGS="$g4_flags" \
             ./configure --no-regex --no-pcre2 --fuzz=-fsanitize=fuzzer \
         && run 4 build make fuzz -j"$(nproc)" \
         && run 4 fuzz sh fuzzing/run-ci.sh -t "$FUZZ_SECONDS" fuzz_basic
@@ -238,7 +239,7 @@ gate_4() {
 # The rules, the baseline and the two checkers come from the checkout: they
 # live in the FreeUnit repository, not in this harness.
 gate_5() {
-    local dir="$REPO/tools/ast-grep" f
+    g5_dir="$REPO/tools/ast-grep"
 
     if ! command -v ast-grep >/dev/null; then
         fail 5 "ast-grep not installed"
@@ -247,18 +248,18 @@ gate_5() {
 
     # A missing tools/ast-grep/ must fail G5.  Without this check ast-grep
     # would scan nothing and the gate would look clean.
-    for f in sgconfig.yml check_baseline.py check_baseline_test.py \
+    for g5_f in sgconfig.yml check_baseline.py check_baseline_test.py \
              baseline.json
     do
-        if [ ! -f "$dir/$f" ]; then
-            fail 5 "no $dir/$f: this checkout has no tools/ast-grep/"
+        if [ ! -f "$g5_dir/$g5_f" ]; then
+            fail 5 "no $g5_dir/$g5_f: this checkout has no tools/ast-grep/"
             return
         fi
     done
 
-    run 5 rule-tests ast-grep test -c "$dir/sgconfig.yml" \
-        && run 5 baseline-tests python3 "$dir/check_baseline_test.py" \
-        && run 5 baseline python3 "$dir/check_baseline.py"
+    run 5 rule-tests ast-grep test -c "$g5_dir/sgconfig.yml" \
+        && run 5 baseline-tests python3 "$g5_dir/check_baseline_test.py" \
+        && run 5 baseline python3 "$g5_dir/check_baseline.py"
 }
 
 # contract_above <file> <line>: the line starts a function definition,
@@ -319,7 +320,7 @@ contract_above() {
 }
 
 gate_6() {
-    local fn file line found names=0 rc=0
+    g6_names=0 g6_rc=0
 
     if [ ! -f "$CONTRACTS" ]; then
         fail 6 "no $CONTRACTS"
@@ -331,40 +332,46 @@ gate_6() {
         return
     fi
 
-    while IFS= read -r fn; do
-        case "$fn" in
+    while IFS= read -r g6_fn; do
+        case "$g6_fn" in
             ''|'#'*) continue ;;
         esac
 
-        names=$((names + 1))
-        found=0
+        g6_names=$((g6_names + 1))
+        g6_found=0
 
-        while IFS=: read -r file line _; do
-            if contract_above "$file" "$line"; then
-                found=1
-                break
-            fi
         # The usual style has the type on the line above the name:
         #   static void
         #   nxt_conn_wait(...)
         # Also accept the type and the name on one line.
-        done < <(grep -rn -E "^([A-Za-z_][A-Za-z0-9_ *]*[ *])?$fn\(" src \
-                 --include='*.c')
+        # A here-document, not a pipe: the loop must set g6_found in this
+        # shell.  No match gives one empty line.  find, not grep -r
+        # --include: busybox grep has no --include.
+        while IFS=: read -r g6_file g6_line _; do
+            [ -n "$g6_file" ] || continue
+            if contract_above "$g6_file" "$g6_line"; then
+                g6_found=1
+                break
+            fi
+        done <<EOF
+$(find src -type f -name '*.c' -exec grep -n -H -E \
+      "^([A-Za-z_][A-Za-z0-9_ *]*[ *])?$g6_fn\(" {} +)
+EOF
 
-        if [ "$found" = 0 ]; then
-            echo "  missing @contract for: $fn"
-            rc=1
+        if [ "$g6_found" = 0 ]; then
+            printf '%s\n' "  missing @contract for: $g6_fn"
+            g6_rc=1
         fi
     done < "$CONTRACTS"
 
     # Say so, rather than report a pass that proves nothing.
-    if [ "$names" = 0 ]; then
-        echo "  no names in $CONTRACTS: nothing to check"
+    if [ "$g6_names" = 0 ]; then
+        printf '%s\n' "  no names in $CONTRACTS: nothing to check"
     else
-        echo "  checked $names function name(s)"
+        echo "  checked $g6_names function name(s)"
     fi
 
-    [ "$rc" = 0 ] || fail 6 "functions without @contract"
+    [ "$g6_rc" = 0 ] || fail 6 "functions without @contract"
 }
 
 ran=0
@@ -373,27 +380,27 @@ ran=0
 # checker live next to this script.  A missing clang-query fails the gate:
 # a check that cannot run must not look clean.
 gate_7() {
-    local cq=
+    g7_cq=
 
     if [ -n "${CLANG_QUERY:-}" ]; then
-        cq=$CLANG_QUERY
+        g7_cq=$CLANG_QUERY
     else
-        cq=$(command -v clang-query || true)
+        g7_cq=$(command -v clang-query || true)
     fi
 
-    if [ -z "$cq" ]; then
+    if [ -z "$g7_cq" ]; then
         # The distro package does not put the binary on PATH.
-        cq=$(ls -d /usr/lib/llvm-*/bin/clang-query 2>/dev/null \
+        g7_cq=$(ls -d /usr/lib/llvm-*/bin/clang-query 2>/dev/null \
              | sort -r | head -1)
     fi
 
-    if [ -z "$cq" ] || [ ! -x "$cq" ]; then
+    if [ -z "$g7_cq" ] || [ ! -x "$g7_cq" ]; then
         fail 7 "clang-query not installed (package clang-tools-21); the
   binary is in /usr/lib/llvm-*/bin.  Set CLANG_QUERY to override."
         return
     fi
 
-    export CLANG_QUERY=$cq
+    export CLANG_QUERY="$g7_cq"
 
     run 7 atomic python3 "$HARNESS_GATES/atomic_check.py" "$REPO"
 }
@@ -415,11 +422,11 @@ for g in 1 2 3 4 5 6 7; do
 done
 
 if [ "$ran" = 0 ]; then
-    echo "no gates matched '$GATES'" >&2
+    printf '%s\n' "no gates matched '$GATES'" >&2
     exit 2
 fi
 
-echo "logs: $LOGDIR"
+printf '%s\n' "logs: $LOGDIR"
 
 if [ "$FAILED" != 0 ]; then
     echo "one or more gates FAILED"
