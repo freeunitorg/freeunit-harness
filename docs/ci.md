@@ -20,7 +20,9 @@ machine, so you can run the same check before you push.
 
 Notes:
 
-- `tests` uses Python 3.13 and installs only pytest and PyYAML, at fixed versions.
+- `tests` uses Python 3.13 and installs pytest, PyYAML, tree-sitter and tree-sitter-c, at fixed
+  versions. tree-sitter runs the schema extractor test of `tools/model`. Hypothesis is not installed,
+  so its test is skipped.
   Python 3.13 is the first version that raises the `time.sleep` audit event.
   Some tests use that event, and Python 3.12 skips them.
 - `public-text` checks out the full history (`fetch-depth: 0`). It uses the
