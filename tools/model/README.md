@@ -36,6 +36,7 @@ Longer docs are under [docs/model/](../../docs/model/).
 | `ast_extractor.py` | tree-sitter parser for the C headers: enums, defines, struct layouts, x86_64 offsets |
 | `cli.py` | the commands below |
 | `tests/` | pytest tests for the model |
+| `tui/` | a Textual terminal UI for `cli.py`; start it with `tools/model/tui/model-tui` (see `tui/README.md`) |
 
 ## Commands
 

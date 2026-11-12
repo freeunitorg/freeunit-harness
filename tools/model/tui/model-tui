@@ -1,0 +1,19 @@
+#!/bin/sh
+# model-tui - start the Textual front end for the model CLI.
+#
+# Usage: tools/model/tui/model-tui
+# It runs "uv run --with textual==8.2.8 python3 -m tools.model.tui" from the
+# harness root. Textual is not a dependency of the model itself.
+
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd -P)
+root=$(cd "$here/../../.." && pwd -P)
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "model-tui: uv is not on PATH; install uv or run: python3 -m tools.model.tui with textual installed" >&2
+    exit 2
+fi
+
+cd "$root"
+exec uv run --no-project --with textual==8.2.8 python3 -m tools.model.tui "$@"
