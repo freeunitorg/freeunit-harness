@@ -790,8 +790,7 @@ detect_engine() {  # rundir -> engine name (or "unknown")
     # The main process emits it on stderr (before the log file opens); router
     # workers emit it into unit.log later. Check both.
     de_name=$(cat "$de_run/stderr.log" "$de_run/unit.log" 2>/dev/null \
-           | grep -oE 'using "[^"]+" event engine' | head -1 \
-           | sed -E 's/using "([^"]+)".*/\1/')
+           | sed -n 's/.*using "\([^"][^"]*\)" event engine.*/\1/p' | head -1)
     if [ -n "$de_name" ]; then printf '%s\n' "$de_name"; else echo "unknown"; fi
 }
 
@@ -1109,8 +1108,9 @@ run_build_round() {
 
     # --- PHP scenario (optional) ---
     rb_php_mod=""
-    [ -d "$rb_build/lib/unit/modules" ] && \
-        rb_php_mod=$(find "$rb_build/lib/unit/modules" -maxdepth 1 -name 'php*.so' 2>/dev/null | head -1)
+    for rb_m in "$rb_build"/lib/unit/modules/php*.so; do
+        [ -f "$rb_m" ] && { rb_php_mod=$rb_m; break; }
+    done
     if [ -n "$rb_php_mod" ]; then
         rb_root=$(ensure_phpapp) || rb_root=""
         if [ -n "$rb_root" ]; then

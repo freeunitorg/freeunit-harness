@@ -64,13 +64,16 @@ DEADLINE=3600
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
 
+# An option without its value is a usage error, and says which option.
+need2() { [ "$1" -ge 2 ] || { printf '%s\n' "$2 needs a value" >&2; usage; }; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --repo)     [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
-        --pr)       [ $# -ge 2 ] || usage; PR="$2"; shift 2 ;;
-        --branch)   [ $# -ge 2 ] || usage; BRANCH="$2"; shift 2 ;;
-        --interval) [ $# -ge 2 ] || usage; INTERVAL="$2"; shift 2 ;;
-        --deadline) [ $# -ge 2 ] || usage; DEADLINE="$2"; shift 2 ;;
+        --repo)     need2 $# "$1"; REPO="$2"; shift 2 ;;
+        --pr)       need2 $# "$1"; PR="$2"; shift 2 ;;
+        --branch)   need2 $# "$1"; BRANCH="$2"; shift 2 ;;
+        --interval) need2 $# "$1"; INTERVAL="$2"; shift 2 ;;
+        --deadline) need2 $# "$1"; DEADLINE="$2"; shift 2 ;;
         -h|--help)  usage ;;
         -*)         printf '%s\n' "unknown option: $1" >&2; usage ;;
         *)          RUN_ID="$1"; shift ;;
