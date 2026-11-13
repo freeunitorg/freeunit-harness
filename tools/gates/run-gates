@@ -193,7 +193,7 @@ gate_3() {
     # A sanitizer report from unitd goes only to unit.log.  pytest can pass
     # with such a report.  Keep the logs in a private directory, and scan
     # them as CI does (.github/workflows/sanitize.yml).
-    g3_logs=$(mktemp -d)
+    g3_logs=$(mktemp -d "${TMPDIR:-/tmp}/freeunit-g3.XXXXXX") || return 1
 
     # The router runs as an unprivileged user.  It must reach the files
     # under this directory.

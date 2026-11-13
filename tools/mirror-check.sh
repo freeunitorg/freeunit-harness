@@ -63,6 +63,9 @@ PATHSPEC=""   # each --pathspec, quoted by shq, in the order given
 
 usage() { sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
 
+# An option without its value is a usage error, and says which option.
+need2() { [ "$1" -ge 2 ] || { printf '%s\n' "$2 needs a value" >&2; usage; }; }
+
 shq() {  # value -> one shell word that eval reads back as that value
     sq_r="" sq_s=$1
     while :; do
@@ -76,8 +79,8 @@ shq() {  # value -> one shell word that eval reads back as that value
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --rev)          [ $# -ge 2 ] || usage; REV="$2"; shift 2 ;;
-        --pathspec)     [ $# -ge 2 ] || usage; PATHSPEC="$PATHSPEC $(shq "$2")"; shift 2 ;;
+        --rev)          need2 $# "$1"; REV="$2"; shift 2 ;;
+        --pathspec)     need2 $# "$1"; PATHSPEC="$PATHSPEC $(shq "$2")"; shift 2 ;;
         --allow-differ) ALLOW_DIFFER=1; shift ;;
         -h|--help)      usage ;;
         -*)             printf '%s\n' "unknown option: $1" >&2; usage ;;

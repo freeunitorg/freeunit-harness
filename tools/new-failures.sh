@@ -86,6 +86,12 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$BASE" ] || { echo "--base is required" >&2; usage; }
+# --key-sed takes an ERE, and "sed -E" is not POSIX (old Solaris sed has only
+# -n, -e and -f; see docs/shell.md). Probe it once, up front, rather than let
+# keys_from fail after both checker runs.
+if [ -n "$KEY_SED" ] && ! echo a | sed -E 's/a+/b/' >/dev/null 2>&1; then
+    echo "--key-sed needs a sed with -E (ERE); this sed has none" >&2; exit 2
+fi
 [ $# -gt 0 ]   || { echo "no CMD given after --" >&2; usage; }
 [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || {
     printf '%s\n' "not a git tree: $REPO (pass --repo, or run 'make src')" >&2; exit 2; }

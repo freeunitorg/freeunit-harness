@@ -146,7 +146,11 @@ my_pids() {
 # The lab container runs as root, and the box user cannot remove root files
 # from the results directory. Give them to the owner of $OUT.
 own_out() {
-    if [ "$(id -u)" = 0 ] && [ -d "$OUT" ]; then chown -R "$(stat -c %u:%g "$OUT")" "$OUT" 2>/dev/null; fi
+    # "ls -ldn", not "stat -c": stat has no POSIX form (docs/shell.md).
+    if [ "$(id -u)" = 0 ] && [ -d "$OUT" ]; then
+        oo_own=$(ls -ldn "$OUT" | awk '{ print $3 ":" $4 }')
+        case $oo_own in *[0-9]:[0-9]*) chown -R "$oo_own" "$OUT" 2>/dev/null ;; esac
+    fi
     return 0
 }
 
