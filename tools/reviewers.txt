@@ -25,5 +25,14 @@ Muse Spark 1.3	-	pi muse-spark-1.3,muse-spark-1.3
 Gemini 3.8 Flash	-	gemini-3.8-flash,google/gemini-3.8-flash,Gemini
 Gemini 3.1 Pro	-	gemini-3.1-pro,google/gemini-3.1-pro
 Gemini 4 Argon	-	gemini-4-argon,gemini-4-argon-high,gemini-4-argon-medium,gemini-4-argon-low,google/gemini-4-argon
+Gemini 4 Hydrogen	-	gemini-4-hydrogen,google/gemini-4-hydrogen
+Gemini 4 Hydrogen low	-	gemini-4-hydrogen-low
+Gemini 4 Hydrogen medium	-	gemini-4-hydrogen-medium
+Gemini 4 Hydrogen high	-	gemini-4-hydrogen-high
+Gemini 4 Hydrogen xhigh	-	gemini-4-hydrogen-xhigh
+Gemini 4 Carbon	-	gemini-4-carbon,google/gemini-4-carbon
+Gemini 4 Carbon low	-	gemini-4-carbon-low
+Gemini 4 Carbon medium	-	gemini-4-carbon-medium
+Gemini 4 Carbon high	-	gemini-4-carbon-high
 Space Bunny Free	-	space-bunny-free
 tuzelko-familiar	-	Frost's Familiar

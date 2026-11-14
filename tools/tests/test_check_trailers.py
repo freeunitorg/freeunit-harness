@@ -195,6 +195,33 @@ class TrailerTest(unittest.TestCase):
         self.assertEqual(self.problems("x\n\nReviewed-by: GPT-6.1-Sol (codex-cli 0.9.1)\n"), [])
         self.assertIn("should be spelled 'GPT-6.1-Sol'", self.problems("x\n\nReviewed-by: gpt-6.1-sol\n")[0])
 
+    def test_gemini_4_hydrogen_and_carbon_with_and_without_effort(self):
+        for trailer in (
+            "Reviewed-by: Gemini 4 Hydrogen (agy 1.5.8)",
+            "Reviewed-by: Gemini 4 Hydrogen xhigh (agy 1.5.8)",
+            "Co-Authored-By: Gemini 4 Hydrogen high (agy 1.5.8)",
+            "Reviewed-by: Gemini 4 Carbon (agy 1.5.8)",
+            "Reviewed-by: Gemini 4 Carbon high (agy 1.5.8)",
+        ):
+            self.assertEqual(self.problems("x\n\n%s\n" % trailer), [], trailer)
+            self.assertEqual(self.comment("x\n\n%s\n" % trailer), [], trailer)
+        self.assertEqual(
+            self.problems("x\n\nReviewed-by: gemini-4-hydrogen-xhigh\n"),
+            ["line 3: 'gemini-4-hydrogen-xhigh' is an alias; use 'Gemini 4 Hydrogen xhigh'"],
+        )
+        self.assertEqual(
+            self.problems("x\n\nReviewed-by: gemini-4-carbon-medium\n"),
+            ["line 3: 'gemini-4-carbon-medium' is an alias; use 'Gemini 4 Carbon medium'"],
+        )
+        self.assertEqual(
+            self.problems("x\n\nReviewed-by: Gemini 4 Hydrogen XHigh (agy 1.5.8)\n"),
+            ["line 3: 'Gemini 4 Hydrogen XHigh' should be spelled 'Gemini 4 Hydrogen xhigh'"],
+        )
+        self.assertEqual(
+            self.problems("x\n\nReviewed-by: Gemini 4 Carbon xhigh (agy 1.5.8)\n"),
+            ["line 3: unknown model 'Gemini 4 Carbon xhigh'; add it to tools/reviewers.txt"],
+        )
+
     def test_every_list_entry_is_self_consistent(self):
         for key, (name, addr) in CANON.items():
             line = "Reviewed-by: %s%s\n" % (name, " " + ADDR if addr else "")
