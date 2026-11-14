@@ -723,6 +723,39 @@ class BenchEnginesRunTest(unittest.TestCase):
                 self.assertEqual(self.fakes(), [], "a fake unitd survived")
 
 
+class BenchEnginesLockTest(unittest.TestCase):
+    """acquire_run_lock in bench-engines.sh takes the per-run flock on fd 9.
+
+    The bash original opened the lock with "exec {fd}>file 2>/dev/null". An exec with no command makes both
+    redirections permanent, so every later error message of the script went to /dev/null. Here the function
+    runs alone under each shell: after it takes the lock, stderr must still reach the caller, and a second
+    process must not get the same lock.
+    """
+
+    def test_lock_keeps_stderr_and_excludes_a_second_holder(self):
+        if not shutil.which("flock"):
+            self.skipTest("no flock")
+        with open(os.path.join(TOOLS, "bench-engines.sh")) as f:
+            text = f.read()
+        start = text.index("acquire_run_lock() {")
+        func = text[start:text.index("\n}\n", start) + 3]
+        tmp = tempfile.mkdtemp(prefix="be-lock-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        lib = os.path.join(tmp, "lock.sh")
+        with open(lib, "w") as f:
+            f.write(func)
+        run = os.path.join(tmp, "run")
+        script = ('. "$1"; acquire_run_lock "$2" || { echo "no lock" >&2; exit 3; };'
+                  ' echo "stderr after lock" >&2;'
+                  ' if flock -n "$2.lock" true; then echo "second holder got the lock" >&2; exit 4; fi')
+        shells = [["sh"]] + [s.split() for s in ("dash", "busybox sh", "bash --posix", "bash") if shutil.which(s.split()[0])]
+        for sh in shells:
+            with self.subTest(shell=" ".join(sh)):
+                r = subprocess.run(sh + ["-c", script, "sh", lib, run], capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("stderr after lock", r.stderr)
+
+
 class MakeToolsTestTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("make"), "make is not installed")
     def test_tools_test_runs_every_suite(self):
